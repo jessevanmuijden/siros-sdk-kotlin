@@ -138,6 +138,56 @@ object CredentialUtils {
     }
 
     /**
+     * Recursively flattens every claim path in a JSON-based credential's
+     * merged SD-JWT/JWT payload, regardless of VCTM coverage.
+     *
+     * [extractClaims] is a *display* function: a claim only gets its own
+     * entry there if VCTM explicitly labels it (by path, however deeply
+     * nested), or - for everything VCTM doesn't cover - as a single,
+     * un-recursed dump of the WHOLE top-level value, so a nested object
+     * like `registered_address` becomes one opaque claim, never one claim
+     * per field inside it. DCQL matching (OID4VP 1.0 §6.4.1) needs the
+     * opposite: every path a verifier might request, including a nested
+     * claim (e.g. `registered_address.full_address`) whose VCTM happens not
+     * to declare that specific sub-path even though the credential itself
+     * genuinely has it - confirmed via a real user report: a verifier
+     * asking for exactly that path against a real `eucc` credential got
+     * "you do not have any credentials that match this request" because
+     * the deep path was never exposed for matching at all, VCTM coverage
+     * or not.
+     *
+     * Returns every (path, value) pair reachable by walking nested JSON
+     * objects - both each intermediate node (so a verifier asking for the
+     * whole parent object, e.g. just `["registered_address"]`, still
+     * matches) and every leaf beneath it. Real path arrays throughout,
+     * never a joined-then-resplit string - see [SharedDcqlMatcher]'s own
+     * doc comment on why that mattered too.
+     *
+     * `mso_mdoc` credentials have their own flat namespace/element shape
+     * (see [extractMdocClaims]) and are not walked here - returns empty for
+     * them.
+     */
+    fun flattenClaimPaths(credential: StoredCredential): List<Pair<List<String>, JsonElement>> {
+        if (credential.format.equals("mso_mdoc", ignoreCase = true)) return emptyList()
+        val rawPayload = parseJwtPayload(credential.raw) ?: return emptyList()
+        val payload = mergeSdJwtDisclosures(credential.raw, rawPayload)
+        return flattenJsonObject(payload, emptyList())
+    }
+
+    private fun flattenJsonObject(obj: JsonObject, prefix: List<String>): List<Pair<List<String>, JsonElement>> {
+        val result = mutableListOf<Pair<List<String>, JsonElement>>()
+        for ((key, value) in obj) {
+            if (prefix.isEmpty() && key in JWT_SKIP_KEYS) continue
+            val path = prefix + key
+            result += path to value
+            if (value is JsonObject) {
+                result += flattenJsonObject(value, path)
+            }
+        }
+        return result
+    }
+
+    /**
      * mdoc analogue of [extractClaims]: parse a stored mdoc credential's
      * REAL disclosed namespace/element values (via [MdocCbor], not
      * [parseJwtPayload] which assumes a JWT-shaped `raw`) into [DisplayClaim]s,
@@ -482,9 +532,11 @@ object CredentialUtils {
     }
 
     /**
-     * Format a JSON value for display.
+     * Format a JSON value for display. Internal (not private): also used by
+     * [SharedDcqlMatcher] to render a value pulled from [flattenClaimPaths]
+     * for the shared DCQL engine.
      */
-    private fun formatClaimValue(value: kotlinx.serialization.json.JsonElement): String {
+    internal fun formatClaimValue(value: kotlinx.serialization.json.JsonElement): String {
         return when (value) {
             is kotlinx.serialization.json.JsonPrimitive -> value.content
             else -> value.toString()

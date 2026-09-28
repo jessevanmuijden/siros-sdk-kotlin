@@ -152,23 +152,72 @@ internal object SharedDcqlMatcher {
         title = cred.metadata?.name ?: cred.format,
         subtitle = cred.metadata?.issuer?.name ?: "",
         iconId = null,
-        claims = CredentialUtils.extractClaims(cred).map { claim ->
-            FfiClaim(
-                path = splitClaimKey(cred.format, claim.key),
-                value = claim.value,
-                display = claim.label,
-                displayValue = null,
-            )
-        },
+        claims = buildFfiClaims(cred),
     )
 
     /**
-     * Split a display-claim key into the path components DCQL matches against.
+     * Builds the shared engine's claim list for one credential.
      *
-     * mdoc element identifiers never contain dots while namespaces routinely
-     * do, so the split is on the last one - `org.iso.18013.5.1.family_name` is
-     * a namespace and an element, not five path components. JSON-based
-     * credentials keep the key whole; theirs are not dotted paths.
+     * mdoc keeps using [CredentialUtils.extractClaims] (a *display*
+     * function) + [splitClaimKey]'s dotted-namespace split - correct there,
+     * since an mdoc's own claims are always exactly `[namespace, element]`.
+     *
+     * JSON-based credentials (`dc+sd-jwt`, `jwt_vc_json`, ...) instead use
+     * [CredentialUtils.flattenClaimPaths] directly, NOT `extractClaims` +
+     * [splitClaimKey] the way mdoc does - two compounding bugs made that
+     * combination wrong here (found via a real user report of a verifier's
+     * nested claim path, e.g. `registered_address.full_address`, always
+     * failing to match even though the wallet held a credential with
+     * exactly that claim):
+     *
+     * 1. `extractClaims` only exposes a nested claim if VCTM explicitly
+     *    declares that exact sub-path; anything VCTM doesn't cover is
+     *    dumped as ONE un-recursed claim for the whole top-level value, so
+     *    a verifier's request for a specific field inside it can never
+     *    match. `flattenClaimPaths` walks every nested object regardless of
+     *    VCTM coverage.
+     * 2. Even when VCTM DOES declare the nested path, `extractClaims`
+     *    collapses it into a single dotted string
+     *    (`claim.path.joinToString(".")`, purely a display convenience),
+     *    and `splitClaimKey` cannot tell that dot apart from a literal dot
+     *    that belongs to a single non-mdoc claim name - it just returns the
+     *    string whole either way, so the engine received a ONE-segment
+     *    path (`["registered_address.full_address"]`) for what should have
+     *    been two (`["registered_address", "full_address"]"`).
+     *    `flattenClaimPaths` returns real path arrays throughout, with no
+     *    join/resplit step to lose that boundary at all.
+     */
+    internal fun buildFfiClaims(cred: StoredCredential): List<FfiClaim> {
+        if (cred.format.equals("mso_mdoc", ignoreCase = true)) {
+            return CredentialUtils.extractClaims(cred).map { claim ->
+                FfiClaim(
+                    path = splitClaimKey(cred.format, claim.key),
+                    value = claim.value,
+                    display = claim.label,
+                    displayValue = null,
+                )
+            }
+        }
+        val labelsByPath = cred.metadata?.claims.orEmpty().associate { it.path to it.label }
+        return CredentialUtils.flattenClaimPaths(cred).map { (path, value) ->
+            FfiClaim(
+                path = path,
+                value = CredentialUtils.formatClaimValue(value),
+                display = labelsByPath[path] ?: CredentialUtils.formatClaimKey(path.last()),
+                displayValue = null,
+            )
+        }
+    }
+
+    /**
+     * Split a display-claim key into the path components DCQL matches
+     * against - mdoc only; see [buildFfiClaims]'s doc comment for why
+     * JSON-based credentials no longer go through this at all.
+     *
+     * mdoc element identifiers never contain dots while namespaces
+     * routinely do, so the split is on the last one -
+     * `org.iso.18013.5.1.family_name` is a namespace and an element, not
+     * five path components.
      */
     internal fun splitClaimKey(format: String, key: String): List<String> =
         if (format.equals("mso_mdoc", ignoreCase = true) && key.contains('.')) {

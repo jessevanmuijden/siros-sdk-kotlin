@@ -1,5 +1,6 @@
 package org.siros.sdk.credentials
 
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -249,6 +250,89 @@ class CredentialUtilsTest {
         val city = claims.find { it.label == "City" }
         assertNotNull(city)
         assertEquals("Berlin", city!!.value)
+    }
+
+    @Test
+    fun `flattenClaimPaths exposes a nested claim VCTM does not declare`() {
+        // Reproduces a real user report: a verifier's DCQL query asked for
+        // path ["registered_address", "full_address"] against a real
+        // `eucc` credential that genuinely has it, and got "you do not
+        // have any credentials that match this request" - because
+        // extractClaims (a *display* function) never exposes a nested
+        // claim unless VCTM explicitly declares that exact sub-path; this
+        // credential's VCTM does not. flattenClaimPaths must expose it
+        // regardless of VCTM coverage, since that's what DCQL matching
+        // actually needs.
+        val header = b64url("""{"alg":"ES256","typ":"vc+sd-jwt"}""")
+        val payload = b64url(
+            """{
+                "iss": "https://issuer.example.com",
+                "vct": "urn:eudi:eucc:1",
+                "registered_address": {
+                    "full_address": "1 Example Street, Anytown",
+                    "country": "NL"
+                },
+                "_sd_alg": "sha-256"
+            }""",
+        )
+        val jwt = "$header.$payload.fakesig"
+        // No VCTM claims at all - this credential's type metadata simply
+        // doesn't cover this nested path, which must not matter.
+        val cred = StoredCredential(id = 1L, batchId = 1L, instanceId = 0, format = "dc+sd-jwt", raw = jwt)
+
+        val paths = CredentialUtils.flattenClaimPaths(cred)
+
+        val fullAddress = paths.find { it.first == listOf("registered_address", "full_address") }
+        assertNotNull("a nested claim VCTM doesn't declare must still be exposed for matching", fullAddress)
+        assertEquals("1 Example Street, Anytown", (fullAddress!!.second as JsonPrimitive).content)
+
+        // The parent node itself must also be addressable, for a verifier
+        // that asks for the whole object rather than one field inside it.
+        val parent = paths.find { it.first == listOf("registered_address") }
+        assertNotNull(parent)
+    }
+
+    @Test
+    fun `flattenClaimPaths resolves a claim disclosed inside a nested object's own _sd array`() {
+        // Mirrors extractClaims' equivalent test - the disclosure-merge step
+        // is shared, but this confirms flattenClaimPaths sees the result too.
+        val disclosure = sdJwtDisclosure("eluV5Og3gSNII8EYnsxA_A", "street_address", "\"Schulstr. 12\"")
+        val digest = sha256Base64Url(disclosure)
+        val header = b64url("""{"alg":"ES256","typ":"vc+sd-jwt"}""")
+        val payload = b64url(
+            """{
+                "iss": "https://issuer.example.com",
+                "vct": "urn:example:pid",
+                "address": {"_sd": ["$digest"], "locality": "Berlin"},
+                "_sd_alg": "sha-256"
+            }""",
+        )
+        val sdJwt = "$header.$payload.fakesig~$disclosure~"
+        val cred = StoredCredential(id = 1L, batchId = 1L, instanceId = 0, format = "dc+sd-jwt", raw = sdJwt)
+
+        val paths = CredentialUtils.flattenClaimPaths(cred)
+
+        val street = paths.find { it.first == listOf("address", "street_address") }
+        assertNotNull(street)
+        assertEquals("Schulstr. 12", (street!!.second as JsonPrimitive).content)
+    }
+
+    @Test
+    fun `flattenClaimPaths excludes JWT metadata keys and returns empty for mdoc`() {
+        val cred = StoredCredential(
+            id = 1L,
+            batchId = 1L,
+            instanceId = 0,
+            format = "vc+sd-jwt",
+            raw = sampleJwt,
+        )
+        val paths = CredentialUtils.flattenClaimPaths(cred).map { it.first }
+        assertTrue(listOf("given_name") in paths)
+        assertTrue(listOf("iss") !in paths)
+        assertTrue(listOf("vct") !in paths)
+
+        val mdocCred = cred.copy(format = "mso_mdoc")
+        assertTrue(CredentialUtils.flattenClaimPaths(mdocCred).isEmpty())
     }
 
     @Test
