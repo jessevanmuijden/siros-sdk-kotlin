@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-09-28
+
+### Fixed
+- **DCQL matching now sees every nested claim path.** A verifier's query for
+  a nested claim (e.g. `registered_address.full_address`) could fail to
+  match a credential that genuinely has it, reported as "you do not have
+  any credentials that match this request" against a real `eucc`
+  credential. `SharedDcqlMatcher` (the shared Rust engine's input) built
+  its claim list from `CredentialUtils.extractClaims`, a *display* function
+  that only exposes a nested claim if the credential's issuer type
+  metadata (VCTM) explicitly declares that exact sub-path, and even then
+  collapsed it into one dotted display string that a naive re-split could
+  not tell apart from a literal dot in a claim name. `flattenClaimPaths`
+  now walks a credential's merged SD-JWT/JWT payload directly, independent
+  of VCTM coverage, with real path arrays throughout. (#215)
+
+- **The engine WebSocket no longer reconnects every few seconds in
+  production.** Its ping interval was hardcoded to 30s on both client and
+  server, on the assumption that any intermediate proxy/load balancer's
+  idle timeout would be at least 60-120s; production Fly.io deployments
+  actually close an idle connection after ~5-6s, so the connection was
+  silently reconnecting continuously and could occasionally kill a flow
+  mid-flight. The interval is now 3s by default and server-configurable -
+  go-wallet-backend reports its own value to the client right after
+  authentication, so the two sides never have to independently guess a
+  number that happens to agree. (#213)
+
 ## [0.20.0] - 2026-09-21
 
 ### Fixed
