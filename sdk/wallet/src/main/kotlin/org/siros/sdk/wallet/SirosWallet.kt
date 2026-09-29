@@ -6359,6 +6359,26 @@ class SirosWallet private constructor(
             )
     }
 
+    /**
+     * Normalizes a DID URL/verification-method id for exact comparison: a
+     * RELATIVE id (just a fragment, e.g. `"#key-1"`) is resolved against
+     * [subjectId] to the full `"<subjectId>#key-1"` form; an id that's
+     * already fully-qualified (any other form) is returned unchanged.
+     * Returns `null` for a blank/missing id, so callers can fail closed on
+     * "no kid supplied" the same way as "kid didn't match anything".
+     *
+     * Comparing ONLY the fragment (as an earlier version of this fix did)
+     * let `did:other#key-1` and `did:subject#key-1` collide - a resolved
+     * document containing a verification method for a DIFFERENT DID with
+     * the same fragment could be matched instead of (or as well as) the
+     * correct one. Comparing full normalized ids closes that (review
+     * finding).
+     */
+    private fun normalizeVerificationMethodId(id: String?, subjectId: String): String? {
+        if (id.isNullOrBlank()) return null
+        return if (id.startsWith("#")) "$subjectId$id" else id
+    }
+
     private suspend fun resolveDidKeyMaterial(resolutionSubjectId: String, requestJwt: String): JsonElement {
         val signedJwt = try {
             SignedJWT.parse(requestJwt)
@@ -6366,23 +6386,28 @@ class SirosWallet private constructor(
             throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
         }
         val kid = signedJwt.header.keyID
-        if (kid.isNullOrBlank() || !kid.contains('#')) {
-            throw TrustEvaluationFailedClosedException("request_jwt header is missing a kid with a fragment")
+        // Comparing only the fragment (after `#`) is not enough: did:other#key-1
+        // and did:subject#key-1 collide on fragment alone, so a document
+        // containing both could match the WRONG DID's method. Normalize
+        // relative IDs (bare "#key-1") against resolutionSubjectId, then
+        // compare the FULL id - never just the suffix (review finding).
+        val normalizedKid = normalizeVerificationMethodId(kid, resolutionSubjectId)
+        if (normalizedKid == null || normalizedKid.substringAfter('#', missingDelimiterValue = "").isBlank()) {
+            throw TrustEvaluationFailedClosedException("request_jwt header is missing a kid with a non-empty fragment")
         }
-        val kidFragment = kid.substringAfter('#')
 
         val verificationMethods = resolveVerificationMethods(resolutionSubjectId)
 
         val matchingVm = verificationMethods.mapNotNull { it as? JsonObject }
             .firstOrNull { vm ->
                 val vmId = (vm["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
-                vmId?.substringAfter('#', missingDelimiterValue = "") == kidFragment
+                normalizeVerificationMethodId(vmId, resolutionSubjectId) == normalizedKid
             } ?: throw TrustEvaluationFailedClosedException(
-                "No verification method for $resolutionSubjectId matches kid fragment '#$kidFragment'"
+                "No verification method for $resolutionSubjectId matches kid '$normalizedKid'"
             )
         val jwkJson = matchingVm["publicKeyJwk"] as? JsonObject
             ?: throw TrustEvaluationFailedClosedException(
-                "Verification method '#$kidFragment' for $resolutionSubjectId has no publicKeyJwk"
+                "Verification method '$normalizedKid' for $resolutionSubjectId has no publicKeyJwk"
             )
 
         val verified = try {
@@ -6409,7 +6434,7 @@ class SirosWallet private constructor(
         }
         if (!verified) {
             throw TrustEvaluationFailedClosedException(
-                "request_jwt signature did not verify against the kid-matching verification method '#$kidFragment' for $resolutionSubjectId"
+                "request_jwt signature did not verify against the kid-matching verification method '$normalizedKid' for $resolutionSubjectId"
             )
         }
         return jwkJson
