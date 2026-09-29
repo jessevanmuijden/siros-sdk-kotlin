@@ -5120,19 +5120,57 @@ class SirosWallet private constructor(
             // verifier one).
             val subjectType = request?.get("subject_type")?.jsonPrimitive?.contentOrNull
             val actionName = if (subjectType == "credential_verifier") "credential-verifier" else "credential-issuer"
+
+            // requires_resolution/request_jwt/resolution_subject_id
+            // (go-wallet-backend#396/#401, this SDK's #219) - the same
+            // did:-scheme frontend-fallback support the legacy engine
+            // path's handleTrustEvaluation has, shared via
+            // resolveDidKeyMaterial/resolveIssuerDidKeyMaterial. Without
+            // this, a did:-scheme subject's trust evaluation routed over
+            // WMP (WalletConfig.useWmpProtocol) silently ignored these
+            // fields and evaluated with no key material at all (review
+            // finding).
+            val requiresResolution = request?.get("requires_resolution")?.jsonPrimitive?.booleanOrNull == true
+            val resolvedJwk: kotlinx.serialization.json.JsonElement? = if (requiresResolution) {
+                val resolutionSubjectId = request?.get("resolution_subject_id")?.jsonPrimitive?.contentOrNull
+                if (resolutionSubjectId.isNullOrBlank()) {
+                    return org.siros.sdk.transport.wmp.openid4x.TrustResult(
+                        trusted = false, reason = "Trust evaluation requires resolution but no resolution_subject_id was supplied"
+                    )
+                }
+                if (subjectType == "credential_verifier") {
+                    val requestJwt = request?.get("request_jwt")?.jsonPrimitive?.contentOrNull
+                    if (requestJwt.isNullOrBlank()) {
+                        return org.siros.sdk.transport.wmp.openid4x.TrustResult(
+                            trusted = false, reason = "Trust evaluation requires resolution but no request_jwt was supplied"
+                        )
+                    }
+                    resolveDidKeyMaterial(resolutionSubjectId, requestJwt)
+                } else {
+                    resolveIssuerDidKeyMaterial(resolutionSubjectId)
+                }
+            } else {
+                null
+            }
+
             val evaluationRequest = kotlinx.serialization.json.buildJsonObject {
                 putJsonObject("subject") {
                     put("type", kotlinx.serialization.json.JsonPrimitive("key"))
                     put("id", kotlinx.serialization.json.JsonPrimitive(subjectId))
                 }
                 putJsonObject("resource") {
-                    val kmType = keyMaterial?.get("type")?.jsonPrimitive?.contentOrNull ?: "x5c"
+                    val kmType = if (resolvedJwk != null) "jwk" else (keyMaterial?.get("type")?.jsonPrimitive?.contentOrNull ?: "x5c")
                     put("type", kotlinx.serialization.json.JsonPrimitive(kmType))
                     put("id", kotlinx.serialization.json.JsonPrimitive(subjectId))
-                    val x5c = keyMaterial?.get("x5c")
-                    val jwk = keyMaterial?.get("jwk")
-                    if (x5c != null) put("key", x5c)
-                    else if (jwk != null) put("key", kotlinx.serialization.json.buildJsonArray { add(jwk) })
+                    val x5c = if (resolvedJwk != null) null else keyMaterial?.get("x5c")
+                    val jwk = resolvedJwk ?: keyMaterial?.get("jwk")
+                    if (x5c != null) {
+                        put("key", x5c)
+                    } else if (jwk is JsonArray) {
+                        put("key", jwk)
+                    } else if (jwk != null) {
+                        put("key", kotlinx.serialization.json.buildJsonArray { add(jwk) })
+                    }
                 }
                 putJsonObject("action") {
                     put("name", kotlinx.serialization.json.JsonPrimitive(actionName))
@@ -6177,18 +6215,30 @@ class SirosWallet private constructor(
                 val resolutionSubjectId = request?.get("resolution_subject_id")?.jsonPrimitive?.contentOrNull
 
                 val keyMaterial = request?.get("key_material")?.jsonObject
-                val resolvedJwk = if (requiresResolution) {
-                    if (requestJwt.isNullOrBlank()) {
-                        throw TrustEvaluationFailedClosedException(
-                            "Trust evaluation requires resolution but no request_jwt was supplied"
-                        )
-                    }
+                val resolvedJwk: kotlinx.serialization.json.JsonElement? = if (requiresResolution) {
                     if (resolutionSubjectId.isNullOrBlank()) {
                         throw TrustEvaluationFailedClosedException(
                             "Trust evaluation requires resolution but no resolution_subject_id was supplied"
                         )
                     }
-                    resolveDidKeyMaterial(resolutionSubjectId, requestJwt)
+                    if (subjectType == "credential_verifier") {
+                        // A verifier's request_jwt is what resolution is FOR
+                        // - there's a signed authorization request to verify
+                        // against, so requiring one here is correct (unlike
+                        // the issuer branch below).
+                        if (requestJwt.isNullOrBlank()) {
+                            throw TrustEvaluationFailedClosedException(
+                                "Trust evaluation requires resolution but no request_jwt was supplied"
+                            )
+                        }
+                        resolveDidKeyMaterial(resolutionSubjectId, requestJwt)
+                    } else {
+                        // credential_issuer: OID4VCI issuance has no signed
+                        // request object to verify request_jwt against - the
+                        // backend never sends one for a DID issuer, unlike a
+                        // verifier (review finding, #219 follow-up).
+                        resolveIssuerDidKeyMaterial(resolutionSubjectId)
+                    }
                 } else {
                     null
                 }
@@ -6246,22 +6296,28 @@ class SirosWallet private constructor(
      * (go-wallet-backend#396/#401, this SDK's #219).
      *
      * The response's `context.trust_metadata` is treated as a W3C DID
-     * Document: every `verificationMethod` entry's `publicKeyJwk` is a
-     * candidate, tried against [requestJwt]'s signature - a `kid`-matching
-     * entry (by fragment, e.g. `#key-1`) first if the JWT header names one,
-     * then every other entry, so a DID document listing multiple
-     * verification methods (key rotation, multiple purposes) isn't
-     * defeated by trying only the first. Returns the first candidate whose
-     * key actually verifies the signature, as the same `jwk` JSON shape
-     * [evaluateTrustDirect] already accepts.
+     * Document. OpenID4VP requires the request's particular
+     * `verificationMethod` to be identified by the JOSE `kid`: [requestJwt]
+     * must carry a non-empty `kid` with a fragment, which is resolved to the
+     * EXACTLY matching `verificationMethod` - never any other entry, even
+     * one also present in the same document. A relative kid/id (just a
+     * fragment, e.g. `"#key-1"`) is normalized against
+     * [resolutionSubjectId] to a full id first, and FULL ids are compared,
+     * never just fragments - comparing only the fragment would let
+     * `did:other#key-1` and `did:subject#key-1` collide, matching a
+     * verification method belonging to a completely different DID. Trying
+     * every remaining method as a fallback would additionally let a JWT
+     * whose kid selects method A be accepted when a DIFFERENT method B
+     * actually signed it, as long as B was also present in the resolved
+     * document (review finding).
      *
      * Fails closed (throws [TrustEvaluationFailedClosedException], never
-     * silently falls through to unverified/no key material) when
-     * resolution fails, the response carries no usable verification
-     * method, or the JWT's signature does not verify against any of them -
-     * a DID-scheme verifier this wallet cannot actually verify must not be
-     * treated as trusted, or as absent (which callers might read as
-     * legitimately keyless x509_hash/no-attestation cases and proceed
+     * silently falls through to unverified/no key material) when resolution
+     * fails, the response carries no usable verification method, no method
+     * matches the kid, or the JWT's signature does not verify against that
+     * one method - a DID-scheme verifier this wallet cannot actually verify
+     * must not be treated as trusted, or as absent (which callers might read
+     * as legitimately keyless x509_hash/no-attestation cases and proceed
      * regardless).
      *
      * [resolutionSubjectId] is deliberately a distinct value from the
@@ -6271,23 +6327,27 @@ class SirosWallet private constructor(
      * `decentralized_identifier:` prefix), but `/v1/resolve` needs the bare
      * DID with that prefix already stripped - one field can't serve both.
      */
-    private suspend fun resolveDidKeyMaterial(resolutionSubjectId: String, requestJwt: String): JsonElement {
+    /**
+     * Shared by [resolveDidKeyMaterial] and [resolveIssuerDidKeyMaterial]:
+     * calls `POST /v1/resolve`, requires an explicit `decision: true` (never
+     * trusting `context` from a denied response - see [resolveDidKeyMaterial]'s
+     * doc comment), and extracts the resolved DID document's
+     * `verificationMethod` array. Fails closed at every step.
+     */
+    private suspend fun resolveVerificationMethods(resolutionSubjectId: String): JsonArray {
         val client = apiClient ?: throw TrustEvaluationFailedClosedException(
             "Cannot resolve $resolutionSubjectId: not authenticated"
         )
-
-        val signedJwt = try {
-            SignedJWT.parse(requestJwt)
-        } catch (e: Exception) {
-            throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
-        }
-        val kidFragment = signedJwt.header.keyID?.substringAfter('#', missingDelimiterValue = "")
-            ?.takeIf { it.isNotEmpty() }
-
         val response = try {
             client.resolveKey(resolutionSubjectId)
         } catch (e: Exception) {
             throw TrustEvaluationFailedClosedException("Failed to resolve $resolutionSubjectId via /v1/resolve: ${e.message}", e)
+        }
+        val decision = (response["decision"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull
+        if (decision != true) {
+            throw TrustEvaluationFailedClosedException(
+                "Resolution of $resolutionSubjectId via /v1/resolve was not decided true"
+            )
         }
         // `as? JsonObject`/`as? JsonArray`, not `.jsonObject`/`.jsonArray`: a
         // malformed/unexpected-shape response entry must be skipped (or fail
@@ -6295,50 +6355,125 @@ class SirosWallet private constructor(
         // that escapes to handleTrustEvaluation's generic catch - which may
         // accept a cached positive result, contradicting this path's
         // fail-closed guarantee. Same fix as #150's `.jsonObject` crash.
-        val verificationMethods = (response["context"] as? JsonObject)
+        return (response["context"] as? JsonObject)
             ?.get("trust_metadata")?.let { it as? JsonObject }
             ?.get("verificationMethod")?.let { it as? JsonArray }
             ?: throw TrustEvaluationFailedClosedException(
                 "Resolved DID document for $resolutionSubjectId has no verificationMethod entries"
             )
+    }
 
-        val candidates = verificationMethods.mapNotNull { it as? JsonObject }
-            .sortedByDescending { vm ->
-                // A kid-matching entry first, but every entry is still tried -
-                // an absent/non-matching kid is common (many DID documents
-                // predate per-purpose kids), and refusing to try the rest
-                // would fail closed on a verifier this wallet CAN actually
-                // verify.
-                val vmId = (vm["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
-                kidFragment != null && vmId?.substringAfter('#', missingDelimiterValue = "") == kidFragment
-            }
+    /**
+     * Normalizes a DID URL/verification-method id for exact comparison: a
+     * RELATIVE id (just a fragment, e.g. `"#key-1"`) is resolved against
+     * [subjectId] to the full `"<subjectId>#key-1"` form; an id that's
+     * already fully-qualified (any other form) is returned unchanged.
+     * Returns `null` for a blank/missing id, so callers can fail closed on
+     * "no kid supplied" the same way as "kid didn't match anything".
+     *
+     * Comparing ONLY the fragment (as an earlier version of this fix did)
+     * let `did:other#key-1` and `did:subject#key-1` collide - a resolved
+     * document containing a verification method for a DIFFERENT DID with
+     * the same fragment could be matched instead of (or as well as) the
+     * correct one. Comparing full normalized ids closes that (review
+     * finding).
+     */
+    private fun normalizeVerificationMethodId(id: String?, subjectId: String): String? {
+        if (id.isNullOrBlank()) return null
+        return if (id.startsWith("#")) "$subjectId$id" else id
+    }
 
-        for (vm in candidates) {
-            val jwkJson = vm["publicKeyJwk"] as? JsonObject ?: continue
-            val verified = try {
-                val jwk = JWK.parse(jwkJson.toString())
-                val verifier: JWSVerifier = when (jwk) {
-                    is ECKey -> ECDSAVerifier(jwk)
-                    is RSAKey -> RSASSAVerifier(jwk)
-                    // Ed25519 (EdDSA/OKP) verification methods are common in
-                    // did:key/did:web documents emitted by go-trust's
-                    // supported DID resolvers - without this branch every
-                    // such verifier would be unresolvable (#219 review
-                    // finding).
-                    is OctetKeyPair -> if (jwk.curve == Curve.Ed25519) Ed25519Verifier(jwk) else continue
-                    else -> continue
-                }
-                signedJwt.verify(verifier)
-            } catch (e: Exception) {
-                Timber.w(e, "Candidate verification method for $resolutionSubjectId failed to parse/verify")
-                false
-            }
-            if (verified) return jwkJson
+    private suspend fun resolveDidKeyMaterial(resolutionSubjectId: String, requestJwt: String): JsonElement {
+        val signedJwt = try {
+            SignedJWT.parse(requestJwt)
+        } catch (e: Exception) {
+            throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
+        }
+        val kid = signedJwt.header.keyID
+        // Comparing only the fragment (after `#`) is not enough: did:other#key-1
+        // and did:subject#key-1 collide on fragment alone, so a document
+        // containing both could match the WRONG DID's method. Normalize
+        // relative IDs (bare "#key-1") against resolutionSubjectId, then
+        // compare the FULL id - never just the suffix (review finding).
+        val normalizedKid = normalizeVerificationMethodId(kid, resolutionSubjectId)
+        if (normalizedKid == null || normalizedKid.substringAfter('#', missingDelimiterValue = "").isBlank()) {
+            throw TrustEvaluationFailedClosedException("request_jwt header is missing a kid with a non-empty fragment")
         }
 
-        throw TrustEvaluationFailedClosedException(
-            "request_jwt signature did not verify against any resolved verification method for $resolutionSubjectId"
-        )
+        val verificationMethods = resolveVerificationMethods(resolutionSubjectId)
+
+        val matchingVm = verificationMethods.mapNotNull { it as? JsonObject }
+            .firstOrNull { vm ->
+                val vmId = (vm["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                normalizeVerificationMethodId(vmId, resolutionSubjectId) == normalizedKid
+            } ?: throw TrustEvaluationFailedClosedException(
+                "No verification method for $resolutionSubjectId matches kid '$normalizedKid'"
+            )
+        val jwkJson = matchingVm["publicKeyJwk"] as? JsonObject
+            ?: throw TrustEvaluationFailedClosedException(
+                "Verification method '$normalizedKid' for $resolutionSubjectId has no publicKeyJwk"
+            )
+
+        val verified = try {
+            val jwk = JWK.parse(jwkJson.toString())
+            val verifier: JWSVerifier = when (jwk) {
+                is ECKey -> ECDSAVerifier(jwk)
+                is RSAKey -> RSASSAVerifier(jwk)
+                // Ed25519 (EdDSA/OKP) verification methods are common in
+                // did:key/did:web documents emitted by go-trust's
+                // supported DID resolvers - without this branch every
+                // such verifier would be unresolvable (#219 review
+                // finding).
+                is OctetKeyPair -> if (jwk.curve == Curve.Ed25519) Ed25519Verifier(jwk) else null
+                else -> null
+            } ?: throw TrustEvaluationFailedClosedException(
+                "Unsupported verification method key type for $resolutionSubjectId"
+            )
+            signedJwt.verify(verifier)
+        } catch (e: TrustEvaluationFailedClosedException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "kid-matching verification method for $resolutionSubjectId failed to parse/verify")
+            false
+        }
+        if (!verified) {
+            throw TrustEvaluationFailedClosedException(
+                "request_jwt signature did not verify against the kid-matching verification method '$normalizedKid' for $resolutionSubjectId"
+            )
+        }
+        return jwkJson
+    }
+
+    /**
+     * Resolves a `did:`-scheme ISSUER's key material via `POST /v1/resolve`,
+     * for the `requires_resolution` path in [handleTrustEvaluation] when the
+     * request is for a `credential_issuer` rather than a
+     * `credential_verifier` (review finding, #219 follow-up).
+     *
+     * Unlike [resolveDidKeyMaterial], this takes no `requestJwt` and
+     * verifies no signature: OID4VCI issuance has no signed authorization
+     * request object to verify against (that's specific to OpenID4VP
+     * presentation) - go-wallet-backend still sets `requires_resolution`/
+     * `resolution_subject_id` for a DID-scheme issuer, but never
+     * `request_jwt`, for exactly this reason. Returns every resolved
+     * `verificationMethod`'s `publicKeyJwk` (the PDP evaluates the resolved
+     * key material itself, not a possession proof of it here) - unlike the
+     * single best-candidate [resolveDidKeyMaterial] returns, there's no
+     * signature to narrow the field with, so all of them are forwarded.
+     *
+     * Still fails closed exactly like [resolveDidKeyMaterial]: throws when
+     * the AuthZEN `decision` on the resolve response isn't explicitly
+     * `true`, or no verification method is present.
+     */
+    private suspend fun resolveIssuerDidKeyMaterial(resolutionSubjectId: String): JsonArray {
+        val verificationMethods = resolveVerificationMethods(resolutionSubjectId)
+        val jwks = verificationMethods.mapNotNull { (it as? JsonObject)?.get("publicKeyJwk") as? JsonObject }
+        if (jwks.isEmpty()) {
+            throw TrustEvaluationFailedClosedException(
+                "Resolved DID document for $resolutionSubjectId has no verification method with a publicKeyJwk"
+            )
+        }
+        return kotlinx.serialization.json.JsonArray(jwks)
     }
 
     /**
@@ -6403,6 +6538,13 @@ class SirosWallet private constructor(
                 put("id", kotlinx.serialization.json.JsonPrimitive(subjectId))
                 if (x5c != null) {
                     put("key", x5c)
+                } else if (jwk is JsonArray) {
+                    // resolveIssuerDidKeyMaterial already returns every
+                    // resolved verification method's jwk as an array (no
+                    // signature to narrow the field with, unlike the
+                    // verifier path's single best-candidate) - used as-is,
+                    // not re-wrapped in another array of one.
+                    put("key", jwk)
                 } else if (jwk != null) {
                     put("key", kotlinx.serialization.json.buildJsonArray { add(jwk) })
                 }

@@ -45,6 +45,7 @@ import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.putJsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -461,6 +462,7 @@ class SirosWalletTest {
         signedJwt.sign(ECDSASigner(verifierKey))
 
         coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
             putJsonObject("context") {
                 putJsonObject("trust_metadata") {
                     put("id", "did:web:verifier.example.com")
@@ -509,6 +511,406 @@ class SirosWalletTest {
     }
 
     /**
+     * Regression (review finding): /v1/resolve is itself an AuthZEN
+     * evaluation - a denied response (decision: false) can still carry
+     * trust_metadata (populated independently of the decision), so a
+     * genuinely-verifying signature must NOT be enough on its own; the
+     * decision must be explicit true too, mirroring go-wallet-backend's own
+     * ResolveDID path.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_resolve_decision_is_not_true() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", false)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-denied",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-denied",
+                false,
+                match { it != null && it.contains("not decided true") },
+            )
+        }
+    }
+
+    /**
+     * Regression (review finding): a DID ISSUER's requires_resolution
+     * carries no request_jwt at all - OID4VCI issuance has no signed
+     * request object to verify one against. Unconditionally requiring
+     * request_jwt (as an earlier version of this fix did) rejected every
+     * DID issuer before ever calling /v1/resolve.
+     */
+    @Test
+    fun handleTrustEvaluation_resolves_issuer_did_key_material_without_request_jwt() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val issuerKey = ECKeyGenerator(Curve.P_256).keyID("did:web:issuer.example.com#key-1").generate()
+
+        coEvery { apiClient.resolveKey("did:web:issuer.example.com") } returns buildJsonObject {
+            put("decision", true)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:issuer.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(issuerKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-issuer",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:issuer.example.com")
+                    put("subject_type", "credential_issuer")
+                    put("requires_resolution", true)
+                    put("resolution_subject_id", "did:web:issuer.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { apiClient.resolveKey("did:web:issuer.example.com") }
+        val capturedResource = slot<JsonObject>()
+        coVerify(exactly = 1) {
+            apiClient.evaluateTrust(match { request ->
+                capturedResource.captured = request["resource"] as JsonObject
+                request["resource"]?.toString()?.contains("\"type\":\"jwk\"") == true
+            })
+        }
+        // resolveIssuerDidKeyMaterial's array must be forwarded as a FLAT
+        // jwk array (one entry per resolved verification method), never
+        // wrapped in another array of one the way a single verifier jwk is
+        // (review finding: this test previously only checked resource.type,
+        // so it would still pass if the jwk were omitted or nested wrong).
+        val keyArray = capturedResource.captured["key"] as JsonArray
+        assertEquals(1, keyArray.size)
+        assertEquals("EC", (keyArray[0] as JsonObject)["kty"]?.jsonPrimitive?.contentOrNull)
+        verify(exactly = 1) { engine.sendTrustResult("flow-issuer", true, null) }
+    }
+
+    /**
+     * Regression (review finding): resolveIssuerDidKeyMaterial duplicates
+     * the security-critical decision check resolveDidKeyMaterial already
+     * has its own test for - without a DEDICATED issuer-path test, removing
+     * or weakening that check in the issuer branch specifically would
+     * leave every issuer test green.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_issuer_resolve_decision_is_not_true() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val issuerKey = ECKeyGenerator(Curve.P_256).keyID("did:web:issuer.example.com#key-1").generate()
+
+        coEvery { apiClient.resolveKey("did:web:issuer.example.com") } returns buildJsonObject {
+            put("decision", false)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:issuer.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(issuerKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-issuer-denied",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:issuer.example.com")
+                    put("subject_type", "credential_issuer")
+                    put("requires_resolution", true)
+                    put("resolution_subject_id", "did:web:issuer.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-issuer-denied",
+                false,
+                match { it != null && it.contains("not decided true") },
+            )
+        }
+    }
+
+    /**
+     * Same coverage as
+     * [handleTrustEvaluation_resolves_issuer_did_key_material_without_request_jwt]
+     * but for the WMP transport's handleWmpTrustEvaluation, which never had
+     * requires_resolution/request_jwt/resolution_subject_id support at all
+     * (review finding) - a did:-scheme subject routed over WMP
+     * (WalletConfig.useWmpProtocol) silently evaluated with no key material.
+     */
+    @Test
+    fun handleWmpTrustEvaluation_resolves_issuer_did_key_material_without_request_jwt() = runTest(dispatcher) {
+        val apiClient = mockk<BackendApiClient>()
+        val issuerKey = ECKeyGenerator(Curve.P_256).keyID("did:web:issuer.example.com#key-1").generate()
+
+        coEvery { apiClient.resolveKey("did:web:issuer.example.com") } returns buildJsonObject {
+            put("decision", true)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:issuer.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(issuerKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        val result = invokeHandleWmpTrustEvaluation(
+            wallet,
+            "flow-wmp-issuer",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:issuer.example.com")
+                    put("subject_type", "credential_issuer")
+                    put("requires_resolution", true)
+                    put("resolution_subject_id", "did:web:issuer.example.com")
+                }
+            }
+        )
+
+        coVerify(exactly = 1) { apiClient.resolveKey("did:web:issuer.example.com") }
+        val capturedResource = slot<JsonObject>()
+        coVerify(exactly = 1) {
+            apiClient.evaluateTrust(match { request ->
+                capturedResource.captured = request["resource"] as JsonObject
+                request["resource"]?.toString()?.contains("\"type\":\"jwk\"") == true
+            })
+        }
+        // Same review finding as the legacy-engine issuer test: assert the
+        // FLAT jwk array shape, not just resource.type.
+        val keyArray = capturedResource.captured["key"] as JsonArray
+        assertEquals(1, keyArray.size)
+        assertEquals("EC", (keyArray[0] as JsonObject)["kty"]?.jsonPrimitive?.contentOrNull)
+        assertTrue(result.trusted)
+    }
+
+    /**
+     * Regression (review finding): the WMP transport's
+     * handleWmpTrustEvaluation had no VERIFIER-path resolution coverage at
+     * all (only the issuer path above) - proves request_jwt is required,
+     * the kid-selected resolved jwk is forwarded to /v1/evaluate, and the
+     * result is trusted.
+     */
+    @Test
+    fun handleWmpTrustEvaluation_resolves_verifier_did_key_material_with_request_jwt() = runTest(dispatcher) {
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        val result = invokeHandleWmpTrustEvaluation(
+            wallet,
+            "flow-wmp-verifier",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+
+        coVerify(exactly = 1) { apiClient.resolveKey("did:web:verifier.example.com") }
+        coVerify(exactly = 1) {
+            apiClient.evaluateTrust(match { request ->
+                request["resource"]?.toString()?.contains("\"type\":\"jwk\"") == true
+            })
+        }
+        assertTrue(result.trusted)
+    }
+
+    @Test
+    fun handleWmpTrustEvaluation_fails_closed_when_verifier_requires_resolution_but_no_request_jwt() = runTest(dispatcher) {
+        val apiClient = mockk<BackendApiClient>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        val result = invokeHandleWmpTrustEvaluation(
+            wallet,
+            "flow-wmp-verifier-no-jwt",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+
+        coVerify(exactly = 0) { apiClient.resolveKey(any()) }
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        assertFalse(result.trusted)
+        assertTrue(result.reason?.contains("request_jwt") == true)
+    }
+
+    @Test
+    fun handleWmpTrustEvaluation_fails_closed_when_resolve_decision_is_not_true() = runTest(dispatcher) {
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", false)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        val result = invokeHandleWmpTrustEvaluation(
+            wallet,
+            "flow-wmp-denied",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        assertFalse(result.trusted)
+        assertTrue(result.reason?.contains("not decided true") == true)
+    }
+
+    /**
      * go-wallet-backend#401's resolution_subject_id carries the bare DID for
      * /v1/resolve, distinct from subject_id - which, for an OpenID4VP 1.0
      * `decentralized_identifier:`-prefixed client_id, is NOT itself a
@@ -528,6 +930,7 @@ class SirosWalletTest {
         signedJwt.sign(ECDSASigner(verifierKey))
 
         coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
             putJsonObject("context") {
                 putJsonObject("trust_metadata") {
                     putJsonArray("verificationMethod") {
@@ -592,6 +995,7 @@ class SirosWalletTest {
         signedJwt.sign(Ed25519Signer(verifierKey))
 
         coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
             putJsonObject("context") {
                 putJsonObject("trust_metadata") {
                     putJsonArray("verificationMethod") {
@@ -634,6 +1038,199 @@ class SirosWalletTest {
     }
 
     /**
+     * Regression (review finding): the JWT's kid names ONE specific
+     * verification method (#key-1), but a DIFFERENT method in the SAME
+     * resolved document (#key-2) actually signed it. This must fail closed
+     * - key-2 must never be tried as a fallback just because it's also
+     * present in the document. Trying every remaining method here would
+     * accept a signature under a method the kid never named.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_signature_verifies_under_a_different_method_than_kid() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val key1 = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val key2 = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-2").generate()
+        // Signed by key2, but the header's kid names key1.
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(key2))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(key1.toPublicJWK().toJSONString()))
+                        }
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-2")
+                            put("publicKeyJwk", Json.parseToJsonElement(key2.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-kid-mismatch",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-kid-mismatch",
+                false,
+                match { it != null && it.contains("kid-matching") },
+            )
+        }
+    }
+
+    /**
+     * Regression (review finding): comparing ONLY the fragment (after `#`)
+     * lets `did:other#key-1` and `did:subject#key-1` collide - a resolved
+     * document containing a verification method for a DIFFERENT DID with
+     * the SAME fragment as the kid must not be matched. Only the full,
+     * normalized id may match.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_fragment_matches_a_different_dids_verification_method() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val otherDidKey = ECKeyGenerator(Curve.P_256).keyID("did:web:other.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(otherDidKey))
+
+        // The resolved document for did:web:verifier.example.com contains
+        // ONLY a verification method belonging to a DIFFERENT DID
+        // (did:web:other.example.com) that happens to share the "#key-1"
+        // fragment - a real document would never legitimately do this, but
+        // a fragment-only comparison would still match it.
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:other.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(otherDidKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-fragment-collision",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-fragment-collision",
+                false,
+                match { it != null && it.contains("No verification method") },
+            )
+        }
+    }
+
+    /**
+     * Regression (review finding): a request_jwt with no kid at all must be
+     * rejected outright, not resolved against an arbitrary/first
+     * verification method.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_request_jwt_has_no_kid() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID(null).generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-no-kid",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.resolveKey(any()) }
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-no-kid",
+                false,
+                match { it != null && it.contains("kid") },
+            )
+        }
+    }
+
+    /**
      * The counterpart failure case: a request_jwt that does not verify
      * against the resolved DID document's key must fail CLOSED - never
      * treated as trusted, and never as "no key material" (which some
@@ -655,6 +1252,7 @@ class SirosWalletTest {
         signedJwt.sign(ECDSASigner(attackerKey))
 
         coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
             putJsonObject("context") {
                 putJsonObject("trust_metadata") {
                     putJsonArray("verificationMethod") {
@@ -721,6 +1319,7 @@ class SirosWalletTest {
                     put("subject_id", "did:web:verifier.example.com")
                     put("subject_type", "credential_verifier")
                     put("requires_resolution", true)
+                    put("resolution_subject_id", "did:web:verifier.example.com")
                 }
             }
         )
@@ -6235,6 +6834,18 @@ class SirosWalletTest {
         )
         method.isAccessible = true
         method.invoke(wallet, engine, flowId, payload)
+    }
+
+    private fun invokeHandleWmpTrustEvaluation(
+        wallet: SirosWallet,
+        flowId: String,
+        payload: JsonObject?,
+    ): org.siros.sdk.transport.wmp.openid4x.TrustResult {
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpTrustEvaluation" }
+        method.isAccessible = true
+        return kotlinx.coroutines.runBlocking {
+            method.callSuspend(wallet, flowId, payload) as org.siros.sdk.transport.wmp.openid4x.TrustResult
+        }
     }
 
     private fun invokeCurrentWalletInstanceId(wallet: SirosWallet): String? {
