@@ -443,11 +443,21 @@ class CredentialUtilsTest {
         return com.upokecenter.cbor.CBORObject.FromObjectAndTag(item.EncodeToBytes(), 24)
     }
 
+    private fun buildTaggedItemBytes(digestId: Long, elementIdentifier: String, elementValue: ByteArray): com.upokecenter.cbor.CBORObject {
+        val item = com.upokecenter.cbor.CBORObject.NewMap()
+        item[com.upokecenter.cbor.CBORObject.FromObject("digestID")] = com.upokecenter.cbor.CBORObject.FromObject(digestId)
+        item[com.upokecenter.cbor.CBORObject.FromObject("random")] = com.upokecenter.cbor.CBORObject.FromObject(ByteArray(16))
+        item[com.upokecenter.cbor.CBORObject.FromObject("elementIdentifier")] = com.upokecenter.cbor.CBORObject.FromObject(elementIdentifier)
+        item[com.upokecenter.cbor.CBORObject.FromObject("elementValue")] = com.upokecenter.cbor.CBORObject.FromObject(elementValue)
+        return com.upokecenter.cbor.CBORObject.FromObjectAndTag(item.EncodeToBytes(), 24)
+    }
+
     /** Build a synthetic mdoc credential's raw (base64url) bytes: a DeviceResponse-shaped envelope. */
-    private fun buildMdocRaw(): String {
+    private fun buildMdocRaw(extraItems: List<com.upokecenter.cbor.CBORObject> = emptyList()): String {
         val items = com.upokecenter.cbor.CBORObject.NewArray()
         items.Add(buildTaggedItem(0, "family_name", "Doe"))
         items.Add(buildTaggedItem(1, "given_name", "Jane"))
+        extraItems.forEach { items.Add(it) }
 
         val nameSpaces = com.upokecenter.cbor.CBORObject.NewMap()
         nameSpaces[com.upokecenter.cbor.CBORObject.FromObject(mdocNamespace)] = items
@@ -566,5 +576,107 @@ class CredentialUtilsTest {
         assertEquals("Driving Licence (offer)", metadata.name)
         assertNull(metadata.doctype)
         assertNull(metadata.claims)
+    }
+
+    @Test
+    fun `buildMdocMetadata populates svgId and svgTemplates from MDDL schema rendering`() {
+        // Regression test for #229: mdoc claims never carried an svgId, so no
+        // mdoc claim could ever be substituted into an SVG rendering card.
+        val offer = CredentialOffer(
+            credentialConfigurationId = "photoid",
+            credentialIssuerIdentifier = "https://issuer.example.com",
+            credentialName = "Photo ID (offer)",
+            issuerName = "Test Issuer",
+        )
+        val schema = MddlSchema(
+            format = "mso_mdoc",
+            doctype = "eu.europa.ec.eudi.photoid.1",
+            display = listOf(
+                MddlDisplay(
+                    locale = java.util.Locale.getDefault().toLanguageTag(),
+                    name = "Photo ID",
+                    rendering = MddlRendering(
+                        svgTemplates = listOf(MddlSvgTemplate(uri = "https://issuer.example.com/photoid.svg")),
+                    ),
+                ),
+            ),
+            claims = mapOf(
+                mdocNamespace to mapOf(
+                    "portrait" to MddlClaimMeta(
+                        display = listOf(MddlClaimDisplay(locale = java.util.Locale.getDefault().toLanguageTag(), name = "Portrait")),
+                        valueType = "bstr",
+                        svgId = "portrait",
+                    ),
+                ),
+            ),
+        )
+
+        val metadata = CredentialUtils.buildMdocMetadata(offer = offer, mddlSchema = schema)
+        assertEquals("portrait", metadata.claims!![0].svgId)
+        assertEquals(1, metadata.svgTemplates?.size)
+        assertEquals("https://issuer.example.com/photoid.svg", metadata.svgTemplates!![0].uri)
+    }
+
+    @Test
+    fun `extractMdocClaims turns a JPEG portrait byte string into a data URI`() {
+        val jpegBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0x00, 0x01, 0x02)
+        val cred = StoredCredential(
+            id = 5L,
+            batchId = 5L,
+            instanceId = 0,
+            format = "mso_mdoc",
+            raw = buildMdocRaw(extraItems = listOf(buildTaggedItemBytes(2, "portrait", jpegBytes))),
+            metadata = CredentialMetadata(
+                doctype = mdocDocType,
+                claims = listOf(
+                    ClaimMeta(path = listOf(mdocNamespace, "portrait"), label = "Portrait", svgId = "portrait"),
+                ),
+            ),
+        )
+
+        val claims = CredentialUtils.extractClaims(cred)
+        val portrait = claims.first { it.key == "$mdocNamespace.portrait" }
+        val expectedBase64 = java.util.Base64.getEncoder().encodeToString(jpegBytes)
+        assertEquals("data:image/jpeg;base64,$expectedBase64", portrait.value)
+        assertEquals("portrait", portrait.svgId)
+    }
+
+    @Test
+    fun `extractMdocClaims turns a PNG portrait byte string into a data URI`() {
+        val pngBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A)
+        val cred = StoredCredential(
+            id = 6L,
+            batchId = 6L,
+            instanceId = 0,
+            format = "mso_mdoc",
+            raw = buildMdocRaw(extraItems = listOf(buildTaggedItemBytes(2, "portrait", pngBytes))),
+            metadata = null,
+        )
+
+        val claims = CredentialUtils.extractClaims(cred)
+        val portrait = claims.first { it.key == "$mdocNamespace.portrait" }
+        val expectedBase64 = java.util.Base64.getEncoder().encodeToString(pngBytes)
+        assertEquals("data:image/png;base64,$expectedBase64", portrait.value)
+    }
+
+    @Test
+    fun `extractMdocClaims leaves an undecodable byte string as the N-bytes placeholder`() {
+        // JPEG 2000 codestream magic bytes - deliberately NOT decoded, per
+        // #229's "Decision: JPEG 2000" (no image-decoding dependency added
+        // to the SDK; issuers targeting SVG cards must transcode JP2
+        // themselves).
+        val jp2Bytes = byteArrayOf(0xFF.toByte(), 0x4F.toByte(), 0xFF.toByte(), 0x51.toByte(), 0x00, 0x00)
+        val cred = StoredCredential(
+            id = 7L,
+            batchId = 7L,
+            instanceId = 0,
+            format = "mso_mdoc",
+            raw = buildMdocRaw(extraItems = listOf(buildTaggedItemBytes(2, "portrait", jp2Bytes))),
+            metadata = null,
+        )
+
+        val claims = CredentialUtils.extractClaims(cred)
+        val portrait = claims.first { it.key == "$mdocNamespace.portrait" }
+        assertEquals("<${jp2Bytes.size} bytes>", portrait.value)
     }
 }

@@ -213,6 +213,7 @@ object CredentialUtils {
                     value = formatCborValue(entry.item.elementValue),
                     description = meta?.description,
                     mandatory = meta?.mandatory ?: false,
+                    svgId = meta?.svgId,
                 )
             }
         }
@@ -265,8 +266,18 @@ object CredentialUtils {
                     path = listOf(namespace, elementId),
                     label = claimDisplay?.name,
                     mandatory = meta.mandatory,
+                    svgId = meta.svgId,
                 )
             }
+        }
+
+        val svgTemplates = display?.rendering?.svgTemplates?.map { template ->
+            SvgTemplateInfo(
+                uri = template.uri,
+                colorScheme = template.properties?.colorScheme,
+                contrast = template.properties?.contrast,
+                orientation = template.properties?.orientation,
+            )
         }
 
         return CredentialMetadata(
@@ -279,16 +290,51 @@ object CredentialUtils {
             logo = display?.logo?.let { LogoInfo(uri = it.uri, altText = it.altText) }
                 ?: offer.logoUri?.let { LogoInfo(uri = it) },
             claims = claims,
+            svgTemplates = svgTemplates,
         )
     }
 
-    /** Format a decoded CBOR element value for display. */
+    /**
+     * Format a decoded CBOR element value for display. A byte string that
+     * sniffs as a JPEG or PNG (e.g. an ISO 18013-5/23220 `portrait`) is
+     * turned into a `data:image/...;base64,...` URI so it can be embedded
+     * directly in an SVG rendering card - see [SvgTemplateRenderer]. Any
+     * other byte string (including JPEG 2000 - see this SDK's issue #229
+     * "Decision: JPEG 2000": no image-decoding dependency is added here,
+     * issuers targeting SVG cards are expected to transcode JP2 themselves)
+     * keeps today's plain `"<N bytes>"` placeholder.
+     */
     private fun formatCborValue(value: com.upokecenter.cbor.CBORObject): String {
         return when (value.type) {
             com.upokecenter.cbor.CBORType.TextString -> value.AsString()
-            com.upokecenter.cbor.CBORType.ByteString -> "<${value.GetByteString().size} bytes>"
+            com.upokecenter.cbor.CBORType.ByteString -> {
+                val bytes = value.GetByteString()
+                imageDataUri(bytes) ?: "<${bytes.size} bytes>"
+            }
             else -> value.toString()
         }
+    }
+
+    /**
+     * Sniffs [bytes] for a JPEG or PNG magic number and, if found, returns a
+     * `data:image/...;base64,...` URI. Returns null for anything else
+     * (including JPEG 2000, deliberately not decoded - see [formatCborValue]),
+     * so callers fall back to their own non-image placeholder.
+     */
+    private fun imageDataUri(bytes: ByteArray): String? {
+        val mimeType = when {
+            bytes.size >= 3 &&
+                bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() && bytes[2] == 0xFF.toByte() -> "image/jpeg"
+            bytes.size >= 4 &&
+                bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte() &&
+                bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte() -> "image/png"
+            else -> return null
+        }
+        // Defensive copy: some CBOR decoders (notably in other language
+        // runtimes this behavior was ported from) can hand back a view into
+        // a larger shared buffer rather than a standalone array.
+        val base64 = Base64.getEncoder().encodeToString(bytes.copyOf())
+        return "data:$mimeType;base64,$base64"
     }
 
     /**

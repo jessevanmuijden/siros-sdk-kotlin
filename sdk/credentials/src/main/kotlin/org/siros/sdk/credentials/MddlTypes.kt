@@ -29,12 +29,38 @@ data class MddlDisplay(
     val logo: MddlLogo? = null,
     @kotlinx.serialization.SerialName("background_color") val backgroundColor: String? = null,
     @kotlinx.serialization.SerialName("text_color") val textColor: String? = null,
+    /** SVG rendering info, mirroring `DisplayProperties.Rendering`. */
+    val rendering: MddlRendering? = null,
 )
 
 @Serializable
 data class MddlLogo(
     val uri: String? = null,
     @kotlinx.serialization.SerialName("alt_text") val altText: String? = null,
+)
+
+/**
+ * SVG-based rendering information for an MDDL display entry, mirroring
+ * `mdoc.Rendering` (`pkg/mdoc/schema.go`). mdoc has no "simple" rendering
+ * sub-object to mirror VCTM's [VctmRendering.simple] - logo/colors already
+ * live directly on [MddlDisplay].
+ */
+@Serializable
+data class MddlRendering(
+    @kotlinx.serialization.SerialName("svg_templates") val svgTemplates: List<MddlSvgTemplate>? = null,
+)
+
+@Serializable
+data class MddlSvgTemplate(
+    val uri: String,
+    val properties: MddlSvgProperties? = null,
+)
+
+@Serializable
+data class MddlSvgProperties(
+    val orientation: String? = null,
+    @kotlinx.serialization.SerialName("color_scheme") val colorScheme: String? = null,
+    val contrast: String? = null,
 )
 
 /**
@@ -49,6 +75,8 @@ data class MddlClaimMeta(
     val mandatory: Boolean = false,
     @kotlinx.serialization.SerialName("value_type") val valueType: String? = null,
     val elements: Map<String, MddlClaimMeta>? = null,
+    /** SVG template placeholder ID this claim fills, if any. */
+    @kotlinx.serialization.SerialName("svg_id") val svgId: String? = null,
 )
 
 @Serializable

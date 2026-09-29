@@ -19,17 +19,28 @@ object SvgTemplateRenderer {
     // device even though this compiled and passed fine in JVM unit tests.
     private val UNMATCHED_TOKEN = Regex("\\{\\{[^}]*\\}\\}")
 
+    /** Matches [CredentialUtils]'s "<N bytes>" placeholder for a byte-string
+     * claim that isn't a recognized/decodable image (JPEG 2000, or a
+     * filtered/undisclosed portrait) - see [substitute]. */
+    private val UNDECODABLE_BYTES_PLACEHOLDER = Regex("^<\\d+ bytes>$")
+
     /**
      * Replace every `{{claim.svgId}}` token in [svgTemplate] with that claim's
      * resolved, XML-escaped value. Any token left over (a claim the VCTM
      * defines but that isn't present in this particular credential) is
-     * blanked rather than shown to the user literally.
+     * blanked rather than shown to the user literally. A claim bound to an
+     * `svgId` whose value is a byte string that couldn't be turned into a
+     * displayable image (see [CredentialUtils.formatCborValue]) renders as
+     * `-` instead of the raw `"<N bytes>"` placeholder - showing a byte
+     * count where an image was expected would be more confusing than an
+     * explicit "not shown" marker.
      */
     fun substitute(svgTemplate: String, claims: List<DisplayClaim>): String {
         var result = svgTemplate
         for (claim in claims) {
             val id = claim.svgId ?: continue
-            result = result.replace("{{$id}}", escapeXml(claim.value))
+            val value = if (UNDECODABLE_BYTES_PLACEHOLDER.matches(claim.value)) "-" else claim.value
+            result = result.replace("{{$id}}", escapeXml(value))
         }
         return result.replace(UNMATCHED_TOKEN, "")
     }

@@ -63,6 +63,32 @@ class SvgTemplateRendererTest {
     }
 
     @Test
+    fun `substitutes a data URI image claim unescaped`() {
+        val template = """<image href="{{portrait}}"/>"""
+        val dataUri = "data:image/jpeg;base64,/9j/4AAQ"
+        val claims = listOf(
+            DisplayClaim(key = "org.iso.23220.1.portrait", label = "Portrait", value = dataUri, svgId = "portrait"),
+        )
+        val result = SvgTemplateRenderer.substitute(template, claims)
+        assertEquals("""<image href="$dataUri"/>""", result)
+    }
+
+    @Test
+    fun `renders a dash for an svg-bound claim that could not be decoded as an image`() {
+        // Mirrors CredentialUtils.formatCborValue's fallback for a byte
+        // string that isn't a recognized JPEG/PNG (e.g. JPEG 2000, or a
+        // filtered/undisclosed portrait) - showing the raw byte count where
+        // an image was expected would be more confusing than an explicit
+        // "not shown" marker.
+        val template = """<image href="{{portrait}}"/>"""
+        val claims = listOf(
+            DisplayClaim(key = "org.iso.23220.1.portrait", label = "Portrait", value = "<38000 bytes>", svgId = "portrait"),
+        )
+        val result = SvgTemplateRenderer.substitute(template, claims)
+        assertEquals("""<image href="-"/>""", result)
+    }
+
+    @Test
     fun `real dc4eu diploma template substitutes correctly`() {
         // Reproduces the actual live template fetched from
         // sirosid-leifj-vc-apigw's diploma VCTM during manual verification.
