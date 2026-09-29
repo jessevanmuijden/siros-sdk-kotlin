@@ -40,6 +40,7 @@
 
     <!-- Presentation consent screen -->
     <string name="presentation_consent_title">Intygsförfrågan</string>
+    <string name="presentation_verified_identity">Verifierad identitet</string>
 
     <!-- DC API loading screen -->
 

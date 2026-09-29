@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -32,9 +33,12 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.putJsonObject
 import com.nimbusds.jose.JWSVerifier
 import com.nimbusds.jose.crypto.ECDSAVerifier
+import com.nimbusds.jose.crypto.Ed25519Verifier
 import com.nimbusds.jose.crypto.RSASSAVerifier
+import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.ECKey
 import com.nimbusds.jose.jwk.JWK
+import com.nimbusds.jose.jwk.OctetKeyPair
 import com.nimbusds.jose.jwk.RSAKey
 import com.nimbusds.jwt.SignedJWT
 import org.siros.sdk.auth.AuthSession
@@ -6257,31 +6261,43 @@ class SirosWallet private constructor(
         } catch (e: Exception) {
             throw TrustEvaluationFailedClosedException("Failed to resolve $subjectId via /v1/resolve: ${e.message}", e)
         }
-        val verificationMethods = response["context"]?.jsonObject
-            ?.get("trust_metadata")?.jsonObject
-            ?.get("verificationMethod")?.jsonArray
+        // `as? JsonObject`/`as? JsonArray`, not `.jsonObject`/`.jsonArray`: a
+        // malformed/unexpected-shape response entry must be skipped (or fail
+        // this whole resolution closed), never throw an uncaught exception
+        // that escapes to handleTrustEvaluation's generic catch - which may
+        // accept a cached positive result, contradicting this path's
+        // fail-closed guarantee. Same fix as #150's `.jsonObject` crash.
+        val verificationMethods = (response["context"] as? JsonObject)
+            ?.get("trust_metadata")?.let { it as? JsonObject }
+            ?.get("verificationMethod")?.let { it as? JsonArray }
             ?: throw TrustEvaluationFailedClosedException(
                 "Resolved DID document for $subjectId has no verificationMethod entries"
             )
 
-        val candidates = verificationMethods.mapNotNull { it.jsonObject }
+        val candidates = verificationMethods.mapNotNull { it as? JsonObject }
             .sortedByDescending { vm ->
                 // A kid-matching entry first, but every entry is still tried -
                 // an absent/non-matching kid is common (many DID documents
                 // predate per-purpose kids), and refusing to try the rest
                 // would fail closed on a verifier this wallet CAN actually
                 // verify.
-                val vmId = vm["id"]?.jsonPrimitive?.contentOrNull
+                val vmId = (vm["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
                 kidFragment != null && vmId?.substringAfter('#', missingDelimiterValue = "") == kidFragment
             }
 
         for (vm in candidates) {
-            val jwkJson = vm["publicKeyJwk"]?.jsonObject ?: continue
+            val jwkJson = vm["publicKeyJwk"] as? JsonObject ?: continue
             val verified = try {
                 val jwk = JWK.parse(jwkJson.toString())
                 val verifier: JWSVerifier = when (jwk) {
                     is ECKey -> ECDSAVerifier(jwk)
                     is RSAKey -> RSASSAVerifier(jwk)
+                    // Ed25519 (EdDSA/OKP) verification methods are common in
+                    // did:key/did:web documents emitted by go-trust's
+                    // supported DID resolvers - without this branch every
+                    // such verifier would be unresolvable (#219 review
+                    // finding).
+                    is OctetKeyPair -> if (jwk.curve == Curve.Ed25519) Ed25519Verifier(jwk) else continue
                     else -> continue
                 }
                 signedJwt.verify(verifier)

@@ -40,6 +40,7 @@
 
     <!-- Presentation consent screen -->
     <string name="presentation_consent_title">Todistuspyyntö</string>
+    <string name="presentation_verified_identity">Vahvistettu henkilöllisyys</string>
 
     <!-- DC API loading screen -->
 

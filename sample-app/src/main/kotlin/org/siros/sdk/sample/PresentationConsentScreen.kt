@@ -289,7 +289,7 @@ private fun PreviewStep(
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
                     Text(
-                        text = "Verified identity",
+                        text = stringResource(R.string.presentation_verified_identity),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

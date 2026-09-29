@@ -112,6 +112,26 @@ class BackendApiClientTest {
     }
 
     @Test
+    fun resolve_key_posts_key_subject_type_to_resolve_endpoint() = runBlocking {
+        server.enqueue(MockResponse().setBody("{\"context\":{}}"))
+
+        val client = newClient()
+        client.setAppToken("token-resolve")
+        client.resolveKey("did:web:verifier.example.com")
+
+        val request = server.takeRequest()
+        assertEquals("/v1/resolve", request.path)
+        assertEquals("POST", request.method)
+        assertEquals("Bearer token-resolve", request.getHeader("Authorization"))
+        val body = kotlinx.serialization.json.Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("did:web:verifier.example.com", body["subject_id"]?.jsonPrimitive?.content)
+        // subject_type: "key" is the core distinction from resolveIssuer's
+        // subject_type: "url" - the two must never be confused (#219 review
+        // finding).
+        assertEquals("key", body["subject_type"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun delete_credential_uses_delete_method() = runBlocking {
         server.enqueue(MockResponse().setBody("{}"))
 

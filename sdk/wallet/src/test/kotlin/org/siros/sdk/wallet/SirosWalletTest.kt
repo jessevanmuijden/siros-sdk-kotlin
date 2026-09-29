@@ -79,8 +79,10 @@ import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jose.crypto.ECDHDecrypter
 import com.nimbusds.jose.crypto.ECDSASigner
+import com.nimbusds.jose.crypto.Ed25519Signer
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.gen.ECKeyGenerator
+import com.nimbusds.jose.jwk.gen.OctetKeyPairGenerator
 import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.SignedJWT
 import org.siros.sdk.transport.engine.CredentialNotificationEvent
@@ -503,6 +505,66 @@ class SirosWalletTest {
             })
         }
         verify(exactly = 1) { engine.sendTrustResult("flow-did", true, null) }
+    }
+
+    /**
+     * Regression (#219 review finding): an Ed25519 (EdDSA/OKP) verification
+     * method - common in did:key/did:web documents emitted by go-trust's
+     * supported DID resolvers - must resolve too, not just EC/RSA. Nimbus's
+     * `JWK.parse` yields an `OctetKeyPair` for these, which the initial fix
+     * fell through to `else -> continue` on, silently rejecting every
+     * Ed25519 verifier.
+     */
+    @Test
+    fun handleTrustEvaluation_resolves_did_key_material_with_ed25519_verification_method() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = OctetKeyPairGenerator(Curve.Ed25519).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.EdDSA).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(Ed25519Signer(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("type", "JsonWebKey2020")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-eddsa",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) { engine.sendTrustResult("flow-did-eddsa", true, null) }
     }
 
     /**
