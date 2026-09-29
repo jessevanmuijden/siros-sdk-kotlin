@@ -631,6 +631,7 @@ fun WalletScreen(viewModel: WalletViewModel) {
                         1 -> HomeScreen(
                             hasCredentials = state.credentials.isNotEmpty(),
                             onActivate = viewModel::openActivate,
+                            onActivateProximity = viewModel::switchToProximityEngagement,
                             onAddCredential = viewModel::openAddCredential,
                         )
                         2 -> SettingsTab(

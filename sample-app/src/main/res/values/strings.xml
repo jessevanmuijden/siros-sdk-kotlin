@@ -111,7 +111,7 @@
     <string name="qr_scanner_grant_permission">Grant Permission</string>
     <string name="qr_scanner_paste_label">Or paste a credential offer URI</string>
     <string name="qr_scanner_paste_button">Redeem Offer</string>
-    <string name="activate_use_proximity_instead">Use proximity instead</string>
+    <string name="activate_use_proximity_instead">Tap to share instead</string>
     <string name="home_activate_button">Activate</string>
     <string name="home_add_credential_button">Add a credential</string>
     <string name="qr_scanner_detected">QR code detected</string>

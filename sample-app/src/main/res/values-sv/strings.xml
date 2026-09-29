@@ -105,7 +105,7 @@
     <string name="qr_scanner_grant_permission">Ge behörighet</string>
     <string name="qr_scanner_paste_label">Eller klistra in en URI för intygserbjudande</string>
     <string name="qr_scanner_paste_button">Lös in erbjudande</string>
-    <string name="activate_use_proximity_instead">Använd närhet i stället</string>
+    <string name="activate_use_proximity_instead">Tryck för att dela i stället</string>
     <string name="home_activate_button">Aktivera</string>
     <string name="home_add_credential_button">Lägg till ett intyg</string>
     <string name="qr_scanner_detected">QR-kod identifierad</string>

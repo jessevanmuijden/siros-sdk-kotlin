@@ -105,7 +105,7 @@
     <string name="qr_scanner_grant_permission">Conceder Permissão</string>
     <string name="qr_scanner_paste_label">Ou cole um URI de oferta de credencial</string>
     <string name="qr_scanner_paste_button">Resgatar Oferta</string>
-    <string name="activate_use_proximity_instead">Usar proximidade em vez disso</string>
+    <string name="activate_use_proximity_instead">Toque para compartilhar em vez disso</string>
     <string name="home_activate_button">Ativar</string>
     <string name="home_add_credential_button">Adicionar uma credencial</string>
     <string name="qr_scanner_detected">Código QR detectado</string>
