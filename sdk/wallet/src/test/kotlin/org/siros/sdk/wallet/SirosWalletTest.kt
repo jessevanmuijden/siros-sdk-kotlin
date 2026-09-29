@@ -819,6 +819,129 @@ class SirosWalletTest {
     }
 
     /**
+     * Regression (review finding): the JWT's kid names ONE specific
+     * verification method (#key-1), but a DIFFERENT method in the SAME
+     * resolved document (#key-2) actually signed it. This must fail closed
+     * - key-2 must never be tried as a fallback just because it's also
+     * present in the document. Trying every remaining method here would
+     * accept a signature under a method the kid never named.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_signature_verifies_under_a_different_method_than_kid() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val key1 = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val key2 = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-2").generate()
+        // Signed by key2, but the header's kid names key1.
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(key2))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            put("decision", true)
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(key1.toPublicJWK().toJSONString()))
+                        }
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-2")
+                            put("publicKeyJwk", Json.parseToJsonElement(key2.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-kid-mismatch",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-kid-mismatch",
+                false,
+                match { it != null && it.contains("kid-matching") },
+            )
+        }
+    }
+
+    /**
+     * Regression (review finding): a request_jwt with no kid at all must be
+     * rejected outright, not resolved against an arbitrary/first
+     * verification method.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_request_jwt_has_no_kid() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID(null).generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-no-kid",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.resolveKey(any()) }
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-no-kid",
+                false,
+                match { it != null && it.contains("kid") },
+            )
+        }
+    }
+
+    /**
      * The counterpart failure case: a request_jwt that does not verify
      * against the resolved DID document's key must fail CLOSED - never
      * treated as trusted, and never as "no key material" (which some

@@ -6296,22 +6296,24 @@ class SirosWallet private constructor(
      * (go-wallet-backend#396/#401, this SDK's #219).
      *
      * The response's `context.trust_metadata` is treated as a W3C DID
-     * Document: every `verificationMethod` entry's `publicKeyJwk` is a
-     * candidate, tried against [requestJwt]'s signature - a `kid`-matching
-     * entry (by fragment, e.g. `#key-1`) first if the JWT header names one,
-     * then every other entry, so a DID document listing multiple
-     * verification methods (key rotation, multiple purposes) isn't
-     * defeated by trying only the first. Returns the first candidate whose
-     * key actually verifies the signature, as the same `jwk` JSON shape
-     * [evaluateTrustDirect] already accepts.
+     * Document. OpenID4VP requires the request's particular
+     * `verificationMethod` to be identified by the JOSE `kid`: [requestJwt]
+     * must carry a non-empty `kid` with a fragment, which is resolved to the
+     * EXACTLY matching `verificationMethod` (comparing only the fragment,
+     * which handles a fully-qualified kid and one relative to
+     * [resolutionSubjectId] identically) - never any other entry, even one
+     * also present in the same document. Trying every remaining method as a
+     * fallback would let a JWT whose kid selects method A be accepted when a
+     * DIFFERENT method B actually signed it, as long as B was also present
+     * in the resolved document (review finding).
      *
      * Fails closed (throws [TrustEvaluationFailedClosedException], never
-     * silently falls through to unverified/no key material) when
-     * resolution fails, the response carries no usable verification
-     * method, or the JWT's signature does not verify against any of them -
-     * a DID-scheme verifier this wallet cannot actually verify must not be
-     * treated as trusted, or as absent (which callers might read as
-     * legitimately keyless x509_hash/no-attestation cases and proceed
+     * silently falls through to unverified/no key material) when resolution
+     * fails, the response carries no usable verification method, no method
+     * matches the kid, or the JWT's signature does not verify against that
+     * one method - a DID-scheme verifier this wallet cannot actually verify
+     * must not be treated as trusted, or as absent (which callers might read
+     * as legitimately keyless x509_hash/no-attestation cases and proceed
      * regardless).
      *
      * [resolutionSubjectId] is deliberately a distinct value from the
@@ -6331,8 +6333,11 @@ class SirosWallet private constructor(
         } catch (e: Exception) {
             throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
         }
-        val kidFragment = signedJwt.header.keyID?.substringAfter('#', missingDelimiterValue = "")
-            ?.takeIf { it.isNotEmpty() }
+        val kid = signedJwt.header.keyID
+        if (kid.isNullOrBlank() || !kid.contains('#')) {
+            throw TrustEvaluationFailedClosedException("request_jwt header is missing a kid with a fragment")
+        }
+        val kidFragment = kid.substringAfter('#')
 
         val response = try {
             client.resolveKey(resolutionSubjectId)
@@ -6366,43 +6371,46 @@ class SirosWallet private constructor(
                 "Resolved DID document for $resolutionSubjectId has no verificationMethod entries"
             )
 
-        val candidates = verificationMethods.mapNotNull { it as? JsonObject }
-            .sortedByDescending { vm ->
-                // A kid-matching entry first, but every entry is still tried -
-                // an absent/non-matching kid is common (many DID documents
-                // predate per-purpose kids), and refusing to try the rest
-                // would fail closed on a verifier this wallet CAN actually
-                // verify.
+        val matchingVm = verificationMethods.mapNotNull { it as? JsonObject }
+            .firstOrNull { vm ->
                 val vmId = (vm["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
-                kidFragment != null && vmId?.substringAfter('#', missingDelimiterValue = "") == kidFragment
-            }
+                vmId?.substringAfter('#', missingDelimiterValue = "") == kidFragment
+            } ?: throw TrustEvaluationFailedClosedException(
+                "No verification method for $resolutionSubjectId matches kid fragment '#$kidFragment'"
+            )
+        val jwkJson = matchingVm["publicKeyJwk"] as? JsonObject
+            ?: throw TrustEvaluationFailedClosedException(
+                "Verification method '#$kidFragment' for $resolutionSubjectId has no publicKeyJwk"
+            )
 
-        for (vm in candidates) {
-            val jwkJson = vm["publicKeyJwk"] as? JsonObject ?: continue
-            val verified = try {
-                val jwk = JWK.parse(jwkJson.toString())
-                val verifier: JWSVerifier = when (jwk) {
-                    is ECKey -> ECDSAVerifier(jwk)
-                    is RSAKey -> RSASSAVerifier(jwk)
-                    // Ed25519 (EdDSA/OKP) verification methods are common in
-                    // did:key/did:web documents emitted by go-trust's
-                    // supported DID resolvers - without this branch every
-                    // such verifier would be unresolvable (#219 review
-                    // finding).
-                    is OctetKeyPair -> if (jwk.curve == Curve.Ed25519) Ed25519Verifier(jwk) else continue
-                    else -> continue
-                }
-                signedJwt.verify(verifier)
-            } catch (e: Exception) {
-                Timber.w(e, "Candidate verification method for $resolutionSubjectId failed to parse/verify")
-                false
-            }
-            if (verified) return jwkJson
+        val verified = try {
+            val jwk = JWK.parse(jwkJson.toString())
+            val verifier: JWSVerifier = when (jwk) {
+                is ECKey -> ECDSAVerifier(jwk)
+                is RSAKey -> RSASSAVerifier(jwk)
+                // Ed25519 (EdDSA/OKP) verification methods are common in
+                // did:key/did:web documents emitted by go-trust's
+                // supported DID resolvers - without this branch every
+                // such verifier would be unresolvable (#219 review
+                // finding).
+                is OctetKeyPair -> if (jwk.curve == Curve.Ed25519) Ed25519Verifier(jwk) else null
+                else -> null
+            } ?: throw TrustEvaluationFailedClosedException(
+                "Unsupported verification method key type for $resolutionSubjectId"
+            )
+            signedJwt.verify(verifier)
+        } catch (e: TrustEvaluationFailedClosedException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "kid-matching verification method for $resolutionSubjectId failed to parse/verify")
+            false
         }
-
-        throw TrustEvaluationFailedClosedException(
-            "request_jwt signature did not verify against any resolved verification method for $resolutionSubjectId"
-        )
+        if (!verified) {
+            throw TrustEvaluationFailedClosedException(
+                "request_jwt signature did not verify against the kid-matching verification method '#$kidFragment' for $resolutionSubjectId"
+            )
+        }
+        return jwkJson
     }
 
     /**
