@@ -493,6 +493,7 @@ class SirosWalletTest {
                     put("subject_type", "credential_verifier")
                     put("requires_resolution", true)
                     put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
                 }
             }
         )
@@ -505,6 +506,70 @@ class SirosWalletTest {
             })
         }
         verify(exactly = 1) { engine.sendTrustResult("flow-did", true, null) }
+    }
+
+    /**
+     * go-wallet-backend#401's resolution_subject_id carries the bare DID for
+     * /v1/resolve, distinct from subject_id - which, for an OpenID4VP 1.0
+     * `decentralized_identifier:`-prefixed client_id, is NOT itself a
+     * resolvable DID. Passing subject_id to /v1/resolve here would send the
+     * still-prefixed value and fail to resolve; evaluateTrust must still see
+     * the unstripped subject_id, unchanged.
+     */
+    @Test
+    fun handleTrustEvaluation_uses_resolution_subject_id_not_subject_id() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-prefixed",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "decentralized_identifier:did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { apiClient.resolveKey("did:web:verifier.example.com") }
+        coVerify(exactly = 1) {
+            apiClient.evaluateTrust(match { request ->
+                request["subject"]?.toString()?.contains("decentralized_identifier:did:web:verifier.example.com") == true
+            })
+        }
     }
 
     /**
@@ -558,6 +623,7 @@ class SirosWalletTest {
                     put("subject_type", "credential_verifier")
                     put("requires_resolution", true)
                     put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
                 }
             }
         )
@@ -618,6 +684,7 @@ class SirosWalletTest {
                     put("subject_type", "credential_verifier")
                     put("requires_resolution", true)
                     put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
                 }
             }
         )
@@ -666,6 +733,52 @@ class SirosWalletTest {
                 "flow-did-missing-jwt",
                 false,
                 match { it != null && it.contains("request_jwt") },
+            )
+        }
+    }
+
+    /**
+     * Regression: go-wallet-backend#401's own TrustEvaluationRequest.Validate()
+     * makes resolution_subject_id mandatory whenever requires_resolution is
+     * true, so an engine that omits it is itself non-conformant - falling
+     * back to the (possibly decentralized_identifier:-prefixed) subject_id
+     * would silently attempt resolution with the wrong identifier instead of
+     * surfacing that clearly.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_requires_resolution_but_no_resolution_subject_id() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-missing-resolution-subject-id",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "decentralized_identifier:did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", "header.payload.sig")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.resolveKey(any()) }
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-did-missing-resolution-subject-id",
+                false,
+                match { it != null && it.contains("resolution_subject_id") },
             )
         }
     }
