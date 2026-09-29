@@ -6323,35 +6323,22 @@ class SirosWallet private constructor(
      * `decentralized_identifier:` prefix), but `/v1/resolve` needs the bare
      * DID with that prefix already stripped - one field can't serve both.
      */
-    private suspend fun resolveDidKeyMaterial(resolutionSubjectId: String, requestJwt: String): JsonElement {
+    /**
+     * Shared by [resolveDidKeyMaterial] and [resolveIssuerDidKeyMaterial]:
+     * calls `POST /v1/resolve`, requires an explicit `decision: true` (never
+     * trusting `context` from a denied response - see [resolveDidKeyMaterial]'s
+     * doc comment), and extracts the resolved DID document's
+     * `verificationMethod` array. Fails closed at every step.
+     */
+    private suspend fun resolveVerificationMethods(resolutionSubjectId: String): JsonArray {
         val client = apiClient ?: throw TrustEvaluationFailedClosedException(
             "Cannot resolve $resolutionSubjectId: not authenticated"
         )
-
-        val signedJwt = try {
-            SignedJWT.parse(requestJwt)
-        } catch (e: Exception) {
-            throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
-        }
-        val kid = signedJwt.header.keyID
-        if (kid.isNullOrBlank() || !kid.contains('#')) {
-            throw TrustEvaluationFailedClosedException("request_jwt header is missing a kid with a fragment")
-        }
-        val kidFragment = kid.substringAfter('#')
-
         val response = try {
             client.resolveKey(resolutionSubjectId)
         } catch (e: Exception) {
             throw TrustEvaluationFailedClosedException("Failed to resolve $resolutionSubjectId via /v1/resolve: ${e.message}", e)
         }
-        // /v1/resolve is itself an AuthZEN evaluation, not a plain lookup -
-        // its decision must be explicitly true before trusting anything in
-        // context. A denied response (decision: false) can still carry
-        // trust_metadata (context is populated independently of the
-        // decision), so skipping this check would extract and use a denied
-        // subject's key material whenever the signature happened to verify.
-        // go-wallet-backend's own ResolveDID path rejects decision == false
-        // the same way (review finding).
         val decision = (response["decision"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull
         if (decision != true) {
             throw TrustEvaluationFailedClosedException(
@@ -6364,12 +6351,27 @@ class SirosWallet private constructor(
         // that escapes to handleTrustEvaluation's generic catch - which may
         // accept a cached positive result, contradicting this path's
         // fail-closed guarantee. Same fix as #150's `.jsonObject` crash.
-        val verificationMethods = (response["context"] as? JsonObject)
+        return (response["context"] as? JsonObject)
             ?.get("trust_metadata")?.let { it as? JsonObject }
             ?.get("verificationMethod")?.let { it as? JsonArray }
             ?: throw TrustEvaluationFailedClosedException(
                 "Resolved DID document for $resolutionSubjectId has no verificationMethod entries"
             )
+    }
+
+    private suspend fun resolveDidKeyMaterial(resolutionSubjectId: String, requestJwt: String): JsonElement {
+        val signedJwt = try {
+            SignedJWT.parse(requestJwt)
+        } catch (e: Exception) {
+            throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
+        }
+        val kid = signedJwt.header.keyID
+        if (kid.isNullOrBlank() || !kid.contains('#')) {
+            throw TrustEvaluationFailedClosedException("request_jwt header is missing a kid with a fragment")
+        }
+        val kidFragment = kid.substringAfter('#')
+
+        val verificationMethods = resolveVerificationMethods(resolutionSubjectId)
 
         val matchingVm = verificationMethods.mapNotNull { it as? JsonObject }
             .firstOrNull { vm ->
@@ -6435,26 +6437,7 @@ class SirosWallet private constructor(
      * `true`, or no verification method is present.
      */
     private suspend fun resolveIssuerDidKeyMaterial(resolutionSubjectId: String): JsonArray {
-        val client = apiClient ?: throw TrustEvaluationFailedClosedException(
-            "Cannot resolve $resolutionSubjectId: not authenticated"
-        )
-        val response = try {
-            client.resolveKey(resolutionSubjectId)
-        } catch (e: Exception) {
-            throw TrustEvaluationFailedClosedException("Failed to resolve $resolutionSubjectId via /v1/resolve: ${e.message}", e)
-        }
-        val decision = (response["decision"] as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull
-        if (decision != true) {
-            throw TrustEvaluationFailedClosedException(
-                "Resolution of $resolutionSubjectId via /v1/resolve was not decided true"
-            )
-        }
-        val verificationMethods = (response["context"] as? JsonObject)
-            ?.get("trust_metadata")?.let { it as? JsonObject }
-            ?.get("verificationMethod")?.let { it as? JsonArray }
-            ?: throw TrustEvaluationFailedClosedException(
-                "Resolved DID document for $resolutionSubjectId has no verificationMethod entries"
-            )
+        val verificationMethods = resolveVerificationMethods(resolutionSubjectId)
         val jwks = verificationMethods.mapNotNull { (it as? JsonObject)?.get("publicKeyJwk") as? JsonObject }
         if (jwks.isEmpty()) {
             throw TrustEvaluationFailedClosedException(
