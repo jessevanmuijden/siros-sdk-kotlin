@@ -164,6 +164,17 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _showDiagnosticMessages: MutableStateFlow<Boolean>
     val showDiagnosticMessages: StateFlow<Boolean> get() = _showDiagnosticMessages
 
+    /**
+     * Sample-app-local setting gating Home's "Get your PhotoID" onboarding
+     * CTA (see [HomeScreen]). Deliberately NOT derived from any real
+     * per-tenant server capability yet - `facetec-api`'s availability isn't
+     * discoverable today, so this is a manual toggle a tester flips in
+     * Settings, standing in for what a future backend-driven capability
+     * flag would decide automatically.
+     */
+    private val _showPhotoIdOnboarding: MutableStateFlow<Boolean>
+    val showPhotoIdOnboarding: StateFlow<Boolean> get() = _showPhotoIdOnboarding
+
     private val _credentialConsumptionPolicy: MutableStateFlow<CredentialConsumptionPolicy>
     val credentialConsumptionPolicy: StateFlow<CredentialConsumptionPolicy> get() = _credentialConsumptionPolicy
 
@@ -214,6 +225,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         // debugging (was default true during initial rollout).
         _showDiagnosticMessages = MutableStateFlow(
             prefs.getBoolean("show_diagnostic_messages", false)
+        )
+        _showPhotoIdOnboarding = MutableStateFlow(
+            prefs.getBoolean("show_photo_id_onboarding", false)
         )
         // Core wallet policy (not a UI-only preference like the toggles
         // above) - persisted here, but enforced by SirosWallet itself. Can't
@@ -292,6 +306,23 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             .putBoolean("show_diagnostic_messages", enabled)
             .apply()
     }
+
+    fun updateShowPhotoIdOnboarding(enabled: Boolean) {
+        _showPhotoIdOnboarding.value = enabled
+        activity.getSharedPreferences("siros_test_overrides", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("show_photo_id_onboarding", enabled)
+            .apply()
+    }
+
+    /**
+     * Whether [credentials] already includes the PhotoID credential (see
+     * [SIROS_ID_CREDENTIAL_CONFIGURATION_ID]'s doc comment) - Home's
+     * onboarding CTA (gated by [showPhotoIdOnboarding]) only makes sense
+     * to offer when it's still missing.
+     */
+    fun hasPhotoIdCredential(credentials: List<StoredCredential>): Boolean =
+        credentials.any { it.credentialConfigurationId == SIROS_ID_CREDENTIAL_CONFIGURATION_ID }
 
     fun updateCredentialConsumptionPolicy(policy: CredentialConsumptionPolicy) {
         _credentialConsumptionPolicy.value = policy

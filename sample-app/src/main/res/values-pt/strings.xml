@@ -81,6 +81,8 @@
     <string name="settings_credential_details_description">Mostrar atributos brutos e dados de credencial assinados ao tocar em uma credencial</string>
     <string name="settings_diagnostic_messages">Mensagens de diagnóstico</string>
     <string name="settings_diagnostic_messages_description">Mostrar o token de etapa bruto do servidor junto com o rótulo de progresso amigável durante um fluxo</string>
+    <string name="settings_photo_id_onboarding">Integração de PhotoID</string>
+    <string name="settings_photo_id_onboarding_description">Mostrar um atalho "Obtenha seu PhotoID" na Início quando este locatário oferecer emissão de PhotoID com verificação de identidade</string>
     <string name="settings_credential_consumption_title">Consumo de credencial</string>
     <string name="settings_credential_consumption_description">Controla se a apresentação de uma credencial consome uma das cópias do lote</string>
     <string name="credential_consumption_consume_all">Consumir em toda apresentação</string>
@@ -108,6 +110,8 @@
     <string name="activate_use_proximity_instead">Toque para compartilhar em vez disso</string>
     <string name="home_activate_button">Ativar</string>
     <string name="home_add_credential_button">Adicionar uma credencial</string>
+    <string name="home_photo_id_onboarding_title">Obtenha seu PhotoID</string>
+    <string name="home_photo_id_onboarding_description">Verifique sua identidade para adicionar uma credencial PhotoID de nível governamental</string>
     <string name="qr_scanner_detected">Código QR detectado</string>
 
     <!-- Flow states -->

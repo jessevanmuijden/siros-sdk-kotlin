@@ -81,6 +81,8 @@
     <string name="settings_credential_details_description">Εμφάνιση ακατέργαστων δεδομένων και υπογεγραμμένων στοιχείων πιστοποιητικού όταν πατάτε ένα πιστοποιητικό</string>
     <string name="settings_diagnostic_messages">Διαγνωστικά μηνύματα</string>
     <string name="settings_diagnostic_messages_description">Εμφάνιση του ακατέργαστου διακριτικού βήματος του διακομιστή μαζί με τη φιλική ετικέτα προόδου κατά τη διάρκεια μιας ροής</string>
+    <string name="settings_photo_id_onboarding">Ένταξη PhotoID</string>
+    <string name="settings_photo_id_onboarding_description">Εμφάνιση συντόμευσης "Αποκτήστε το PhotoID σας" στην αρχική οθόνη όταν αυτός ο ενοικιαστής προσφέρει έκδοση PhotoID με επαλήθευση ταυτότητας</string>
     <string name="settings_credential_consumption_title">Κατανάλωση πιστοποιητικού</string>
     <string name="settings_credential_consumption_description">Ελέγχει αν η παρουσίαση ενός πιστοποιητικού καταναλώνει ένα από τα αντίγραφα της παρτίδας του</string>
     <string name="credential_consumption_consume_all">Κατανάλωση σε κάθε παρουσίαση</string>
@@ -108,6 +110,8 @@
     <string name="activate_use_proximity_instead">Πατήστε για κοινή χρήση αντ\' αυτού</string>
     <string name="home_activate_button">Ενεργοποίηση</string>
     <string name="home_add_credential_button">Προσθήκη πιστοποιητικού</string>
+    <string name="home_photo_id_onboarding_title">Αποκτήστε το PhotoID σας</string>
+    <string name="home_photo_id_onboarding_description">Επαληθεύστε την ταυτότητά σας για να προσθέσετε ένα κρατικού επιπέδου πιστοποιητικό PhotoID</string>
     <string name="qr_scanner_detected">Εντοπίστηκε κωδικός QR</string>
 
     <!-- Flow states -->

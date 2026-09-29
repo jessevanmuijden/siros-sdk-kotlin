@@ -81,6 +81,8 @@
     <string name="settings_credential_details_description">Näytä raakadata ja allekirjoitetut todistustiedot, kun painat todistusta</string>
     <string name="settings_diagnostic_messages">Diagnostiikkaviestit</string>
     <string name="settings_diagnostic_messages_description">Näytä palvelimen raaka vaihetunniste ystävällisen edistymismerkinnän rinnalla prosessin aikana</string>
+    <string name="settings_photo_id_onboarding">PhotoID-käyttöönotto</string>
+    <string name="settings_photo_id_onboarding_description">Näytä etusivulla "Hanki PhotoID" -pikakuvake, kun tämä vuokraaja tarjoaa henkilöllisyyden tarkistetun PhotoID-myöntämisen</string>
     <string name="settings_credential_consumption_title">Todistuksen kuluminen</string>
     <string name="settings_credential_consumption_description">Määrittää, kuluttaako esittäminen yhden todistuksen erän kopioista</string>
     <string name="credential_consumption_consume_all">Kuluta jokaisella esityksellä</string>
@@ -108,6 +110,8 @@
     <string name="activate_use_proximity_instead">Napauta jakaaksesi sen sijaan</string>
     <string name="home_activate_button">Aktivoi</string>
     <string name="home_add_credential_button">Lisää todistus</string>
+    <string name="home_photo_id_onboarding_title">Hanki PhotoID</string>
+    <string name="home_photo_id_onboarding_description">Vahvista henkilöllisyytesi lisätäksesi valtion tason PhotoID-todistuksen</string>
     <string name="qr_scanner_detected">QR-koodi tunnistettu</string>
 
     <!-- Flow states -->

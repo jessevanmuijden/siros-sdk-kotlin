@@ -87,6 +87,8 @@
     <string name="settings_credential_details_description">Show raw claims and signed credential data when tapping a credential</string>
     <string name="settings_diagnostic_messages">Diagnostic messages</string>
     <string name="settings_diagnostic_messages_description">Show the raw backend step token alongside the friendly progress label during a flow</string>
+    <string name="settings_photo_id_onboarding">PhotoID onboarding</string>
+    <string name="settings_photo_id_onboarding_description">Show a "Get your PhotoID" shortcut on Home when this tenant offers identity-verified PhotoID issuance</string>
     <string name="settings_credential_consumption_title">Credential consumption</string>
     <string name="settings_credential_consumption_description">Controls whether presenting a credential uses up one of its batch copies</string>
     <string name="credential_consumption_consume_all">Consume on every presentation</string>
@@ -114,6 +116,8 @@
     <string name="activate_use_proximity_instead">Tap to share instead</string>
     <string name="home_activate_button">Activate</string>
     <string name="home_add_credential_button">Add a credential</string>
+    <string name="home_photo_id_onboarding_title">Get your PhotoID</string>
+    <string name="home_photo_id_onboarding_description">Verify your identity to add a government-grade PhotoID credential</string>
     <string name="qr_scanner_detected">QR code detected</string>
 
     <!-- Flow states -->

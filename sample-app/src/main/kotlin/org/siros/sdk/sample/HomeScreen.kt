@@ -3,19 +3,30 @@ package org.siros.sdk.sample
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -25,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 /**
@@ -39,6 +51,15 @@ import androidx.compose.ui.unit.dp
  * Credential is also shown - it disappears once the wallet holds at least
  * one credential, since the Credentials tab's own "+" action (and its
  * empty-state card) cover that case from then on.
+ *
+ * [showPhotoIdOnboarding] independently shows a labeled card offering the
+ * FaceTec-backed PhotoID onboarding flow directly from Home (bypassing the
+ * Credentials tab's Add Credential list entirely) - the caller is
+ * responsible for deciding when that's true (currently: a local sample-app
+ * setting, since this isn't gated by any real per-tenant server capability
+ * yet - see [WalletViewModel.showPhotoIdOnboarding]) combined with the
+ * wallet not already holding a PhotoID credential (see
+ * [WalletViewModel.hasPhotoIdCredential]).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -47,6 +68,8 @@ fun HomeScreen(
     onActivate: () -> Unit,
     onActivateProximity: () -> Unit,
     onAddCredential: () -> Unit,
+    showPhotoIdOnboarding: Boolean = false,
+    onStartPhotoIdOnboarding: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -80,6 +103,61 @@ fun HomeScreen(
             TextButton(onClick = onAddCredential) {
                 Text(stringResource(R.string.home_add_credential_button))
             }
+        }
+        if (showPhotoIdOnboarding) {
+            Spacer(modifier = Modifier.height(24.dp))
+            PhotoIdOnboardingCard(onClick = onStartPhotoIdOnboarding)
+        }
+    }
+}
+
+@Composable
+private fun PhotoIdOnboardingCard(onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.home_photo_id_onboarding_title),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    text = stringResource(R.string.home_photo_id_onboarding_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }

@@ -81,6 +81,8 @@
     <string name="settings_credential_details_description">Visa rådata och signerade intygsuppgifter när du trycker på ett intyg</string>
     <string name="settings_diagnostic_messages">Diagnostikmeddelanden</string>
     <string name="settings_diagnostic_messages_description">Visa den råa steg-token från servern tillsammans med den vänliga förloppsetiketten under ett flöde</string>
+    <string name="settings_photo_id_onboarding">PhotoID-registrering</string>
+    <string name="settings_photo_id_onboarding_description">Visa en genväg "Skaffa ditt PhotoID" på hemskärmen när denna klient erbjuder identitetsverifierad PhotoID-utfärdande</string>
     <string name="settings_credential_consumption_title">Förbrukning av intyg</string>
     <string name="settings_credential_consumption_description">Styr om en presentation förbrukar en av intygets kopior</string>
     <string name="credential_consumption_consume_all">Förbruka vid varje presentation</string>
@@ -108,6 +110,8 @@
     <string name="activate_use_proximity_instead">Tryck för att dela i stället</string>
     <string name="home_activate_button">Aktivera</string>
     <string name="home_add_credential_button">Lägg till ett intyg</string>
+    <string name="home_photo_id_onboarding_title">Skaffa ditt PhotoID</string>
+    <string name="home_photo_id_onboarding_description">Verifiera din identitet för att lägga till ett PhotoID-intyg av statlig kvalitet</string>
     <string name="qr_scanner_detected">QR-kod identifierad</string>
 
     <!-- Flow states -->

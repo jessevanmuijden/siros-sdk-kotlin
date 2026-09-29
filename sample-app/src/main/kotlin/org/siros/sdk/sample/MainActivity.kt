@@ -643,6 +643,9 @@ fun WalletScreen(viewModel: WalletViewModel) {
                             onActivate = viewModel::openActivate,
                             onActivateProximity = viewModel::switchToProximityEngagement,
                             onAddCredential = viewModel::openAddCredential,
+                            showPhotoIdOnboarding = viewModel.showPhotoIdOnboarding.collectAsState().value &&
+                                !viewModel.hasPhotoIdCredential(state.credentials),
+                            onStartPhotoIdOnboarding = viewModel::openIDVPreparation,
                         )
                         2 -> SettingsTab(
                             state = state,
@@ -663,6 +666,8 @@ fun WalletScreen(viewModel: WalletViewModel) {
                             onUpdateShowCredentialDetails = viewModel::updateShowCredentialDetails,
                             showDiagnosticMessages = viewModel.showDiagnosticMessages.collectAsState().value,
                             onUpdateShowDiagnosticMessages = viewModel::updateShowDiagnosticMessages,
+                            showPhotoIdOnboarding = viewModel.showPhotoIdOnboarding.collectAsState().value,
+                            onUpdateShowPhotoIdOnboarding = viewModel::updateShowPhotoIdOnboarding,
                             credentialConsumptionPolicy = viewModel.credentialConsumptionPolicy.collectAsState().value,
                             onUpdateCredentialConsumptionPolicy = viewModel::updateCredentialConsumptionPolicy,
                             preferLocalReaderTrustEvaluation = viewModel.preferLocalReaderTrustEvaluation.collectAsState().value,
@@ -1342,6 +1347,8 @@ fun SettingsTab(
     onUpdateShowCredentialDetails: ((Boolean) -> Unit)? = null,
     showDiagnosticMessages: Boolean = true,
     onUpdateShowDiagnosticMessages: ((Boolean) -> Unit)? = null,
+    showPhotoIdOnboarding: Boolean = false,
+    onUpdateShowPhotoIdOnboarding: ((Boolean) -> Unit)? = null,
     credentialConsumptionPolicy: org.siros.sdk.credentials.CredentialConsumptionPolicy =
         org.siros.sdk.credentials.CredentialConsumptionPolicy.NEVER_CONSUME,
     onUpdateCredentialConsumptionPolicy: ((org.siros.sdk.credentials.CredentialConsumptionPolicy) -> Unit)? = null,
@@ -1436,6 +1443,29 @@ fun SettingsTab(
                         checked = showDiagnosticMessages,
                         onCheckedChange = onUpdateShowDiagnosticMessages,
                         enabled = onUpdateShowDiagnosticMessages != null,
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            stringResource(R.string.settings_photo_id_onboarding),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            stringResource(R.string.settings_photo_id_onboarding_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = showPhotoIdOnboarding,
+                        onCheckedChange = onUpdateShowPhotoIdOnboarding,
+                        enabled = onUpdateShowPhotoIdOnboarding != null,
                     )
                 }
             }
