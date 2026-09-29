@@ -627,11 +627,21 @@ class SirosWalletTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { apiClient.resolveKey("did:web:issuer.example.com") }
+        val capturedResource = slot<JsonObject>()
         coVerify(exactly = 1) {
             apiClient.evaluateTrust(match { request ->
+                capturedResource.captured = request["resource"] as JsonObject
                 request["resource"]?.toString()?.contains("\"type\":\"jwk\"") == true
             })
         }
+        // resolveIssuerDidKeyMaterial's array must be forwarded as a FLAT
+        // jwk array (one entry per resolved verification method), never
+        // wrapped in another array of one the way a single verifier jwk is
+        // (review finding: this test previously only checked resource.type,
+        // so it would still pass if the jwk were omitted or nested wrong).
+        val keyArray = capturedResource.captured["key"] as JsonArray
+        assertEquals(1, keyArray.size)
+        assertEquals("EC", (keyArray[0] as JsonObject)["kty"]?.jsonPrimitive?.contentOrNull)
         verify(exactly = 1) { engine.sendTrustResult("flow-issuer", true, null) }
     }
 
@@ -743,11 +753,18 @@ class SirosWalletTest {
         )
 
         coVerify(exactly = 1) { apiClient.resolveKey("did:web:issuer.example.com") }
+        val capturedResource = slot<JsonObject>()
         coVerify(exactly = 1) {
             apiClient.evaluateTrust(match { request ->
+                capturedResource.captured = request["resource"] as JsonObject
                 request["resource"]?.toString()?.contains("\"type\":\"jwk\"") == true
             })
         }
+        // Same review finding as the legacy-engine issuer test: assert the
+        // FLAT jwk array shape, not just resource.type.
+        val keyArray = capturedResource.captured["key"] as JsonArray
+        assertEquals(1, keyArray.size)
+        assertEquals("EC", (keyArray[0] as JsonObject)["kty"]?.jsonPrimitive?.contentOrNull)
         assertTrue(result.trusted)
     }
 

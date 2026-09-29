@@ -6299,13 +6299,17 @@ class SirosWallet private constructor(
      * Document. OpenID4VP requires the request's particular
      * `verificationMethod` to be identified by the JOSE `kid`: [requestJwt]
      * must carry a non-empty `kid` with a fragment, which is resolved to the
-     * EXACTLY matching `verificationMethod` (comparing only the fragment,
-     * which handles a fully-qualified kid and one relative to
-     * [resolutionSubjectId] identically) - never any other entry, even one
-     * also present in the same document. Trying every remaining method as a
-     * fallback would let a JWT whose kid selects method A be accepted when a
-     * DIFFERENT method B actually signed it, as long as B was also present
-     * in the resolved document (review finding).
+     * EXACTLY matching `verificationMethod` - never any other entry, even
+     * one also present in the same document. A relative kid/id (just a
+     * fragment, e.g. `"#key-1"`) is normalized against
+     * [resolutionSubjectId] to a full id first, and FULL ids are compared,
+     * never just fragments - comparing only the fragment would let
+     * `did:other#key-1` and `did:subject#key-1` collide, matching a
+     * verification method belonging to a completely different DID. Trying
+     * every remaining method as a fallback would additionally let a JWT
+     * whose kid selects method A be accepted when a DIFFERENT method B
+     * actually signed it, as long as B was also present in the resolved
+     * document (review finding).
      *
      * Fails closed (throws [TrustEvaluationFailedClosedException], never
      * silently falls through to unverified/no key material) when resolution
