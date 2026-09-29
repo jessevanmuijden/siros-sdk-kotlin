@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-09-29
+
+### Fixed
+- **CI: a GitHub Packages publish failure no longer blocks the Maven Central
+  publish.** 0.20.2's Maven Central Portal publish never ran because a
+  single module's GitHub Packages upload hit a transient 409 Conflict
+  (most likely a network retry racing its own earlier success), which
+  stopped the release job before it ever reached the Maven Central step.
+  The two publish targets no longer gate each other; a genuine GitHub
+  Packages failure still fails the job rather than being silently masked.
+- **`did:`-scheme trust evaluation now fails closed on a denied `/v1/resolve`
+  decision, and correctly resolves DID issuers.** `/v1/resolve` is itself
+  an AuthZEN evaluation - a denied response (`decision: false`) could
+  still carry a usable DID document, so a signature that happened to
+  verify against it was being accepted regardless of the decision.
+  Separately, `requires_resolution` for a `credential_issuer` never
+  carries a `request_jwt` (OID4VCI issuance has no signed request object
+  to verify one against, unlike OpenID4VP presentation), but both trust-
+  evaluation paths required one unconditionally, failing every DID issuer
+  resolution before `/v1/resolve` was ever called. Also closes a
+  fragment-only verification-method matching gap: comparing only the
+  fragment after `#` let a verification method belonging to a completely
+  different DID match if it happened to share the same fragment as the
+  request's `kid` - full, normalized identifiers are now compared instead.
+
 ## [0.20.2] - 2026-09-29
 
 ### Fixed
