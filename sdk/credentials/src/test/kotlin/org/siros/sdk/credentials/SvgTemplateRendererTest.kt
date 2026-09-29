@@ -76,16 +76,49 @@ class SvgTemplateRendererTest {
     @Test
     fun `renders a dash for an svg-bound claim that could not be decoded as an image`() {
         // Mirrors CredentialUtils.formatCborValue's fallback for a byte
-        // string that isn't a recognized JPEG/PNG (e.g. JPEG 2000, or a
-        // filtered/undisclosed portrait) - showing the raw byte count where
-        // an image was expected would be more confusing than an explicit
-        // "not shown" marker.
+        // string that isn't a recognized JPEG/PNG (e.g. JPEG 2000) - showing
+        // the raw byte count where an image was expected would be more
+        // confusing than an explicit "not shown" marker. isUndecodableBytes
+        // is read directly (not inferred from `value`'s text - see
+        // `does not misclassify a text claim that coincidentally looks like the bytes placeholder`).
         val template = """<image href="{{portrait}}"/>"""
         val claims = listOf(
-            DisplayClaim(key = "org.iso.23220.1.portrait", label = "Portrait", value = "<38000 bytes>", svgId = "portrait"),
+            DisplayClaim(
+                key = "org.iso.23220.1.portrait", label = "Portrait", value = "<38000 bytes>",
+                svgId = "portrait", isUndecodableBytes = true,
+            ),
         )
         val result = SvgTemplateRenderer.substitute(template, claims)
         assertEquals("""<image href="-"/>""", result)
+    }
+
+    @Test
+    fun `substitutes imageDataUri rather than value when claim carries one`() {
+        val template = """<image href="{{portrait}}"/>"""
+        val claims = listOf(
+            DisplayClaim(
+                key = "org.iso.18013.5.1.portrait", label = "Portrait", value = "<1234 bytes>",
+                svgId = "portrait", imageDataUri = "data:image/jpeg;base64,AAAA",
+            ),
+        )
+        val result = SvgTemplateRenderer.substitute(template, claims)
+        assertEquals("""<image href="data:image/jpeg;base64,AAAA"/>""", result)
+    }
+
+    @Test
+    fun `does not misclassify a text claim that coincidentally looks like the bytes placeholder`() {
+        // Per Copilot review of siros-sdk-swift#178: a legitimate text claim
+        // whose value happens to look exactly like CredentialUtils.formatCborValue's
+        // "<N bytes>" placeholder must NOT be misclassified as an undecodable
+        // byte string - substitute reads isUndecodableBytes directly rather
+        // than inferring provenance from value's text, so this is now
+        // impossible by construction rather than by coincidence.
+        val template = "<text>{{serial}}</text>"
+        val claims = listOf(
+            DisplayClaim(key = "serial", label = "Serial", value = "<12 bytes>", svgId = "serial"),
+        )
+        val result = SvgTemplateRenderer.substitute(template, claims)
+        assertEquals("<text>&lt;12 bytes&gt;</text>", result)
     }
 
     @Test

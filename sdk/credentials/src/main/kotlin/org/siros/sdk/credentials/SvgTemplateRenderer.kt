@@ -19,27 +19,33 @@ object SvgTemplateRenderer {
     // device even though this compiled and passed fine in JVM unit tests.
     private val UNMATCHED_TOKEN = Regex("\\{\\{[^}]*\\}\\}")
 
-    /** Matches [CredentialUtils]'s "<N bytes>" placeholder for a byte-string
-     * claim that isn't a recognized/decodable image (JPEG 2000, or a
-     * filtered/undisclosed portrait) - see [substitute]. */
-    private val UNDECODABLE_BYTES_PLACEHOLDER = Regex("^<\\d+ bytes>$")
-
     /**
      * Replace every `{{claim.svgId}}` token in [svgTemplate] with that claim's
      * resolved, XML-escaped value. Any token left over (a claim the VCTM
      * defines but that isn't present in this particular credential) is
-     * blanked rather than shown to the user literally. A claim bound to an
-     * `svgId` whose value is a byte string that couldn't be turned into a
-     * displayable image (see [CredentialUtils.formatCborValue]) renders as
-     * `-` instead of the raw `"<N bytes>"` placeholder - showing a byte
-     * count where an image was expected would be more confusing than an
-     * explicit "not shown" marker.
+     * blanked rather than shown to the user literally.
+     *
+     * A claim carrying [DisplayClaim.imageDataUri] (a byte-string that
+     * decoded to a displayable image - see [CredentialUtils.extractMdocClaims])
+     * substitutes that URI rather than its concise [DisplayClaim.value]
+     * placeholder. A claim marked [DisplayClaim.isUndecodableBytes] (a byte
+     * string present but not recognized as an image, e.g. JPEG 2000) renders
+     * as `-` instead - showing a byte count where an image was expected
+     * would be more confusing than an explicit "not shown" marker. Note
+     * these two fields are read directly rather than inferred from `value`'s
+     * text: a legitimate text claim could otherwise coincidentally equal
+     * [CredentialUtils.formatCborValue]'s placeholder shape (e.g. a claim
+     * literally valued `"<12 bytes>"`) and be misclassified.
      */
     fun substitute(svgTemplate: String, claims: List<DisplayClaim>): String {
         var result = svgTemplate
         for (claim in claims) {
             val id = claim.svgId ?: continue
-            val value = if (UNDECODABLE_BYTES_PLACEHOLDER.matches(claim.value)) "-" else claim.value
+            val value = when {
+                claim.imageDataUri != null -> claim.imageDataUri
+                claim.isUndecodableBytes -> "-"
+                else -> claim.value
+            }
             result = result.replace("{{$id}}", escapeXml(value))
         }
         return result.replace(UNMATCHED_TOKEN, "")

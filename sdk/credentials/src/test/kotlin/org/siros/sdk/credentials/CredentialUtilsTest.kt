@@ -2,6 +2,7 @@ package org.siros.sdk.credentials
 
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -637,7 +638,14 @@ class CredentialUtilsTest {
         val claims = CredentialUtils.extractClaims(cred)
         val portrait = claims.first { it.key == "$mdocNamespace.portrait" }
         val expectedBase64 = java.util.Base64.getEncoder().encodeToString(jpegBytes)
-        assertEquals("data:image/jpeg;base64,$expectedBase64", portrait.value)
+        // The generic display `value` stays the concise placeholder - only
+        // `imageDataUri` carries the (potentially huge) base64 URI, so a
+        // credential's Claims tab never renders a giant base64 blob for a
+        // portrait (see SvgTemplateRenderer, which is the only consumer of
+        // imageDataUri).
+        assertEquals("<${jpegBytes.size} bytes>", portrait.value)
+        assertEquals("data:image/jpeg;base64,$expectedBase64", portrait.imageDataUri)
+        assertFalse(portrait.isUndecodableBytes)
         assertEquals("portrait", portrait.svgId)
     }
 
@@ -656,7 +664,9 @@ class CredentialUtilsTest {
         val claims = CredentialUtils.extractClaims(cred)
         val portrait = claims.first { it.key == "$mdocNamespace.portrait" }
         val expectedBase64 = java.util.Base64.getEncoder().encodeToString(pngBytes)
-        assertEquals("data:image/png;base64,$expectedBase64", portrait.value)
+        assertEquals("<${pngBytes.size} bytes>", portrait.value)
+        assertEquals("data:image/png;base64,$expectedBase64", portrait.imageDataUri)
+        assertFalse(portrait.isUndecodableBytes)
     }
 
     @Test
@@ -678,5 +688,7 @@ class CredentialUtilsTest {
         val claims = CredentialUtils.extractClaims(cred)
         val portrait = claims.first { it.key == "$mdocNamespace.portrait" }
         assertEquals("<${jp2Bytes.size} bytes>", portrait.value)
+        assertNull(portrait.imageDataUri)
+        assertTrue(portrait.isUndecodableBytes)
     }
 }

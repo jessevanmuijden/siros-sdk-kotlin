@@ -75,6 +75,46 @@ class MddlSchemaFetcherTest {
         assertNull(fetcher.parseMddlSchema("{not valid json"))
     }
 
+    /**
+     * Regression test for #229 fix review (mirrors siros-sdk-swift#178's
+     * identical Copilot finding): CredentialUtilsTest only constructs
+     * MddlSchema/MddlClaimMeta programmatically, so a @SerialName mismatch
+     * against real issuer JSON (e.g. svg_templates, color_scheme, svg_id)
+     * would never be caught by any test. This decodes the actual raw JSON
+     * shape (mirroring `vc`'s pkg/mdoc/schema.go) through the real parse path.
+     */
+    @Test
+    fun `parseMddlSchema decodes svg_templates and svg_id from raw JSON`() {
+        val json = """
+            {
+              "format": "mso_mdoc",
+              "doctype": "eu.europa.ec.eudi.photoid.1",
+              "display": [
+                {
+                  "locale": "en",
+                  "name": "Photo ID",
+                  "rendering": {
+                    "svg_templates": [
+                      { "uri": "https://issuer.example.com/photoid.svg", "properties": { "color_scheme": "light" } }
+                    ]
+                  }
+                }
+              ],
+              "claims": {
+                "org.iso.23220.photoid.1": {
+                  "portrait": { "value_type": "bstr", "svg_id": "portrait" }
+                }
+              }
+            }
+        """.trimIndent()
+        val fetcher = MddlSchemaFetcher()
+        val schema = fetcher.parseMddlSchema(json)
+
+        assertEquals("https://issuer.example.com/photoid.svg", schema?.display?.first()?.rendering?.svgTemplates?.first()?.uri)
+        assertEquals("light", schema?.display?.first()?.rendering?.svgTemplates?.first()?.properties?.colorScheme)
+        assertEquals("portrait", schema?.claims?.get("org.iso.23220.photoid.1")?.get("portrait")?.svgId)
+    }
+
     @Test
     fun `fetch returns MDDL schema from registry service when registryUrl and vct are known`() = runTest {
         var calledUrl: String? = null
