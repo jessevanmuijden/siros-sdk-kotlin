@@ -500,10 +500,28 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _showHistory = MutableStateFlow(false)
     val showHistory: StateFlow<Boolean> = _showHistory
 
-    // ── QR scanner state ────────────────────────────────────────────
+    // ── Activate (QR scan + proximity engagement) state ─────────────
 
-    private val _showQrScanner = MutableStateFlow(false)
-    val showQrScanner: StateFlow<Boolean> = _showQrScanner
+    /** Which mode the merged Activate screen is showing; null means Activate is closed. */
+    enum class ActivateMode { Qr, Proximity }
+
+    private val _activateMode = MutableStateFlow<ActivateMode?>(null)
+    val activateMode: StateFlow<ActivateMode?> = _activateMode
+
+    /** Opens Activate, always starting in QR mode (the default engagement path). */
+    fun openActivate() {
+        _activateMode.value = ActivateMode.Qr
+    }
+
+    /** Switches an already-open Activate screen into proximity/BLE mode. */
+    fun switchToProximityEngagement() {
+        _activateMode.value = ActivateMode.Proximity
+    }
+
+    /** Leaves Activate entirely, from either mode. */
+    fun closeActivate() {
+        _activateMode.value = null
+    }
 
     /**
      * Non-null while a QR-triggered flow has been handed off to the wallet/engine
@@ -532,18 +550,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         wallet.cancelCurrentFlow()
     }
 
-    // ── Proximity (ISO 18013-5) engagement state ────────────────────
-
-    private val _showProximityEngagement = MutableStateFlow(false)
-    val showProximityEngagement: StateFlow<Boolean> = _showProximityEngagement
-
-    fun openProximityEngagement() {
-        _showProximityEngagement.value = true
-    }
-
-    fun closeProximityEngagement() {
-        _showProximityEngagement.value = false
-    }
+    // ── Proximity (ISO 18013-5) engagement dependencies ──────────────
+    // Navigation state lives above in `activateMode` - proximity is one of
+    // Activate's two modes, not its own independent screen.
 
     /** For `BlePeripheralServer`'s injected `getCredentials` dependency - see its constructor doc comment. */
     suspend fun getCredentialsForProximity() = wallet.getCredentials()
@@ -1069,6 +1078,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         // instead of the wallet tabs.
         _showDevices.value = false
         _walletInstances.value = emptyList()
+        _activateMode.value = null
     }
 
     /** Delete the current account - also removes it from the cached "Welcome back" list. */
@@ -1078,6 +1088,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         _availableCredentials.value = emptyList()
         _showDevices.value = false
         _walletInstances.value = emptyList()
+        _activateMode.value = null
     }
 
     // ── Account & Passkey management ────────────────────────────────
@@ -2190,16 +2201,8 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
 
     // ── QR scanner ──────────────────────────────────────────────────
 
-    fun openQrScanner() {
-        _showQrScanner.value = true
-    }
-
-    fun closeQrScanner() {
-        _showQrScanner.value = false
-    }
-
     fun handleQrResult(uri: String) {
-        _showQrScanner.value = false
+        closeActivate()
         lastFlowRetry = { handleQrResult(uri) }
 
         // Classification is pure/synchronous (see DeepLinkClassifier.kt), so it's

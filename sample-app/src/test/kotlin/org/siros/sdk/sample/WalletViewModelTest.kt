@@ -150,11 +150,11 @@ class WalletViewModelTest {
         every { SirosWallet.create(any(), any()) } returns wallet
         val viewModel = WalletViewModel(mockk<Activity>(relaxed = true))
 
-        viewModel.openQrScanner()
+        viewModel.openActivate()
         viewModel.handleQrResult("openid-credential-offer://offer?credential_offer=test")
         advanceUntilIdle()
 
-        assertFalse(viewModel.showQrScanner.value)
+        assertNull(viewModel.activateMode.value)
         coVerify(exactly = 1) { wallet.startIssuance("openid-credential-offer://offer?credential_offer=test") }
         coVerify(exactly = 0) { wallet.startPresentation(any()) }
     }
@@ -166,11 +166,11 @@ class WalletViewModelTest {
         every { SirosWallet.create(any(), any()) } returns wallet
         val viewModel = WalletViewModel(mockk<Activity>(relaxed = true))
 
-        viewModel.openQrScanner()
+        viewModel.openActivate()
         viewModel.handleQrResult("openid4vp://request?client_id=verifier")
         advanceUntilIdle()
 
-        assertFalse(viewModel.showQrScanner.value)
+        assertNull(viewModel.activateMode.value)
         coVerify(exactly = 0) { wallet.startIssuance(any()) }
         coVerify(exactly = 1) { wallet.startPresentation("openid4vp://request?client_id=verifier") }
     }

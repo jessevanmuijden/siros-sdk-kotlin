@@ -249,9 +249,8 @@ fun WalletScreen(viewModel: WalletViewModel) {
     val presentationHistory by viewModel.presentationHistory.collectAsState()
     val selectedCredential by viewModel.selectedCredential.collectAsState()
     val showHistory by viewModel.showHistory.collectAsState()
-    val showQrScanner by viewModel.showQrScanner.collectAsState()
+    val activateMode by viewModel.activateMode.collectAsState()
     val flowStarting by viewModel.flowStarting.collectAsState()
-    val showProximityEngagement by viewModel.showProximityEngagement.collectAsState()
     val pendingPresentation by viewModel.pendingPresentationRequest.collectAsState()
     val useWmpProtocol by viewModel.useWmpProtocol.collectAsState()
     val showCredentialDetails by viewModel.showCredentialDetails.collectAsState()
@@ -517,11 +516,22 @@ fun WalletScreen(viewModel: WalletViewModel) {
                 )
             }
 
-            // QR scanner sub-screen
-            showQrScanner -> QrScannerScreen(
-                onQrScanned = viewModel::handleQrResult,
-                onBack = viewModel::closeQrScanner,
-            )
+            // Activate sub-screen: QR scan and ISO 18013-5 proximity (BLE)
+            // engagement are two modes of one merged entry point - see
+            // WalletViewModel.ActivateMode's doc comment.
+            activateMode != null -> when (activateMode!!) {
+                WalletViewModel.ActivateMode.Qr -> QrScannerScreen(
+                    onQrScanned = viewModel::handleQrResult,
+                    onBack = viewModel::closeActivate,
+                )
+                WalletViewModel.ActivateMode.Proximity -> ProximityEngagementScreen(
+                    getCredentials = viewModel::getCredentialsForProximity,
+                    signPresentation = viewModel::signMdocPresentationForProximity,
+                    filterEligible = viewModel::filterEligibleForProximity,
+                    evaluateReaderTrust = viewModel::evaluateReaderTrustForProximity,
+                    onBack = viewModel::closeActivate,
+                )
+            }
 
             // Transitional "starting…" sub-screen: shown the instant a QR-triggered
             // flow is handed off to the wallet/engine, until a real subsequent state
@@ -530,15 +540,6 @@ fun WalletScreen(viewModel: WalletViewModel) {
             flowStarting != null -> FlowStartingView(
                 flowType = flowStarting,
                 onCancel = viewModel::cancelFlowStarting,
-            )
-
-            // ISO 18013-5 proximity engagement (QR + NFC + BLE) sub-screen
-            showProximityEngagement -> ProximityEngagementScreen(
-                getCredentials = viewModel::getCredentialsForProximity,
-                signPresentation = viewModel::signMdocPresentationForProximity,
-                filterEligible = viewModel::filterEligibleForProximity,
-                evaluateReaderTrust = viewModel::evaluateReaderTrustForProximity,
-                onBack = viewModel::closeProximityEngagement,
             )
 
             // Add credential sub-screen
@@ -601,13 +602,13 @@ fun WalletScreen(viewModel: WalletViewModel) {
                 titleContentColor = MaterialTheme.colorScheme.onSurface,
             ),
             actions = {
-                IconButton(onClick = viewModel::openProximityEngagement) {
+                IconButton(onClick = viewModel::switchToProximityEngagement) {
                     Icon(
                         Icons.Filled.Contactless,
                         "Proximity Engagement (Interop Test)",
                     )
                 }
-                IconButton(onClick = viewModel::openQrScanner) {
+                IconButton(onClick = viewModel::openActivate) {
                     Icon(
                         ImageVector.vectorResource(R.drawable.ic_qr_scan),
                         stringResource(R.string.qr_scan_button),
