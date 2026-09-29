@@ -39,6 +39,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -75,6 +76,7 @@ import java.util.concurrent.Executors
 fun QrScannerScreen(
     onQrScanned: (String) -> Unit,
     onBack: () -> Unit,
+    onUseProximityInstead: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var hasCameraPermission by remember {
@@ -142,6 +144,17 @@ fun QrScannerScreen(
                     ) {
                         Text(stringResource(R.string.qr_scanner_grant_permission))
                     }
+                }
+            }
+
+            // Alternative engagement mode - low-emphasis so it never competes
+            // with the viewfinder above or the paste-URI fallback below.
+            if (onUseProximityInstead != null) {
+                TextButton(
+                    onClick = onUseProximityInstead,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.activate_use_proximity_instead))
                 }
             }
 

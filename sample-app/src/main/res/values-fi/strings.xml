@@ -105,6 +105,7 @@
     <string name="qr_scan_button">Skannaa QR-koodi</string>
     <string name="qr_scanner_paste_label">Tai liitä todistustarjouksen URI</string>
     <string name="qr_scanner_paste_button">Lunasta tarjous</string>
+    <string name="activate_use_proximity_instead">Käytä lähitunnistusta sen sijaan</string>
     <string name="qr_scanner_detected">QR-koodi tunnistettu</string>
 
     <!-- Flow states -->

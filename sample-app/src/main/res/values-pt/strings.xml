@@ -105,6 +105,7 @@
     <string name="qr_scan_button">Escanear Código QR</string>
     <string name="qr_scanner_paste_label">Ou cole um URI de oferta de credencial</string>
     <string name="qr_scanner_paste_button">Resgatar Oferta</string>
+    <string name="activate_use_proximity_instead">Usar proximidade em vez disso</string>
     <string name="qr_scanner_detected">Código QR detectado</string>
 
     <!-- Flow states -->

@@ -105,6 +105,7 @@
     <string name="qr_scan_button">Σάρωση Κωδικού QR</string>
     <string name="qr_scanner_paste_label">Ή επικολλήστε ένα URI προσφοράς πιστοποιητικού</string>
     <string name="qr_scanner_paste_button">Εξαργύρωση Προσφοράς</string>
+    <string name="activate_use_proximity_instead">Χρήση εγγύτητας αντ\' αυτού</string>
     <string name="qr_scanner_detected">Εντοπίστηκε κωδικός QR</string>
 
     <!-- Flow states -->

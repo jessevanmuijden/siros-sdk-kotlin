@@ -105,6 +105,7 @@
     <string name="qr_scan_button">Skanna QR-kod</string>
     <string name="qr_scanner_paste_label">Eller klistra in en URI för intygserbjudande</string>
     <string name="qr_scanner_paste_button">Lös in erbjudande</string>
+    <string name="activate_use_proximity_instead">Använd närhet i stället</string>
     <string name="qr_scanner_detected">QR-kod identifierad</string>
 
     <!-- Flow states -->

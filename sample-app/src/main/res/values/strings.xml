@@ -111,6 +111,7 @@
     <string name="qr_scan_button">Scan QR Code</string>
     <string name="qr_scanner_paste_label">Or paste a credential offer URI</string>
     <string name="qr_scanner_paste_button">Redeem Offer</string>
+    <string name="activate_use_proximity_instead">Use proximity instead</string>
     <string name="qr_scanner_detected">QR code detected</string>
 
     <!-- Flow states -->

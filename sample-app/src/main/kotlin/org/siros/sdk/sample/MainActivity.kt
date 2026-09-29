@@ -519,19 +519,16 @@ fun WalletScreen(viewModel: WalletViewModel) {
             // Activate sub-screen: QR scan and ISO 18013-5 proximity (BLE)
             // engagement are two modes of one merged entry point - see
             // WalletViewModel.ActivateMode's doc comment.
-            activateMode != null -> when (activateMode!!) {
-                WalletViewModel.ActivateMode.Qr -> QrScannerScreen(
-                    onQrScanned = viewModel::handleQrResult,
-                    onBack = viewModel::closeActivate,
-                )
-                WalletViewModel.ActivateMode.Proximity -> ProximityEngagementScreen(
-                    getCredentials = viewModel::getCredentialsForProximity,
-                    signPresentation = viewModel::signMdocPresentationForProximity,
-                    filterEligible = viewModel::filterEligibleForProximity,
-                    evaluateReaderTrust = viewModel::evaluateReaderTrustForProximity,
-                    onBack = viewModel::closeActivate,
-                )
-            }
+            activateMode != null -> ActivateScreen(
+                mode = activateMode!!,
+                onQrScanned = viewModel::handleQrResult,
+                onUseProximityInstead = viewModel::switchToProximityEngagement,
+                getCredentials = viewModel::getCredentialsForProximity,
+                signPresentation = viewModel::signMdocPresentationForProximity,
+                filterEligible = viewModel::filterEligibleForProximity,
+                evaluateReaderTrust = viewModel::evaluateReaderTrustForProximity,
+                onBack = viewModel::closeActivate,
+            )
 
             // Transitional "starting…" sub-screen: shown the instant a QR-triggered
             // flow is handed off to the wallet/engine, until a real subsequent state
