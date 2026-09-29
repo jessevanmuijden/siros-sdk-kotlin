@@ -120,7 +120,21 @@ jobs:
       # is the NEXT release's) - so a re-tag can never publish under a stale
       # number, and a failure here fails the job: the `|| echo skipping` that
       # used to follow this hid the fact that no publish task existed at all.
+      #
+      # continue-on-error, with the job failed explicitly at the end if this
+      # step failed: v0.20.2 lost its Maven Central publish this way - a
+      # single module's upload hit a 409 (GitHub Packages returned it for an
+      # artifact that turned out to already be present, most likely a
+      # network retry racing its own earlier success rather than a real
+      # duplicate), which stopped the job before it ever reached the Maven
+      # Central step below, even though every other module's GitHub Packages
+      # upload - and Maven Central itself - had nothing to do with that
+      # failure. The two publish targets must not gate each other, same
+      # reasoning as this job's own doc comment above about not depending on
+      # the build job.
       - name: Publish SDK to GitHub Packages
+        id: gh_packages
+        continue-on-error: true
         run: ./gradlew publish -PsdkVersion="${GITHUB_REF_NAME#v}" -x test -x lint
         env:
           GITHUB_ACTOR: ${{ github.actor }}
@@ -129,7 +143,8 @@ jobs:
       # Maven Central, via the Central Portal publisher API (Nmcp, see
       # settings.gradle.kts): every module plus the BOM in ONE deployment,
       # signed with the org's SDK signing key. AUTOMATIC: published as soon
-      # as Central's validation passes, no portal step.
+      # as Central's validation passes, no portal step. Runs regardless of
+      # the GitHub Packages step's outcome (see that step's comment).
       - name: Publish SDK to Maven Central
         run: ./gradlew nmcpPublishAggregationToCentralPortal -PsdkVersion="${GITHUB_REF_NAME#v}" -x test -x lint
         env:
@@ -137,3 +152,13 @@ jobs:
           CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
           SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+
+      # The `continue-on-error` above must not silently mask a genuine
+      # GitHub Packages publish failure - only decouple it from Maven
+      # Central. Fails the job now that Maven Central has had its chance to
+      # run either way.
+      - name: Fail the job if GitHub Packages publish failed
+        if: steps.gh_packages.outcome == 'failure'
+        run: |
+          echo "::error::Publish SDK to GitHub Packages failed - see that step's log above."
+          exit 1
