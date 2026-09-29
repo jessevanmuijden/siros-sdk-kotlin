@@ -222,6 +222,7 @@ public final class org/siros/sdk/auth/BackendApiClient {
 	public final fun requestWIAChallenge (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun resolveIssuer (Ljava/lang/String;Ljava/util/List;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun resolveIssuer$default (Lorg/siros/sdk/auth/BackendApiClient;Ljava/lang/String;Ljava/util/List;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
+	public final fun resolveKey (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun revokeAllWalletInstances (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun revokeAllWalletInstances$default (Lorg/siros/sdk/auth/BackendApiClient;Ljava/lang/String;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun setAppToken (Ljava/lang/String;)V

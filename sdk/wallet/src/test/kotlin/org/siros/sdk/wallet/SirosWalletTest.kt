@@ -41,6 +41,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.putJsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -78,8 +79,10 @@ import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jose.crypto.ECDHDecrypter
 import com.nimbusds.jose.crypto.ECDSASigner
+import com.nimbusds.jose.crypto.Ed25519Signer
 import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.gen.ECKeyGenerator
+import com.nimbusds.jose.jwk.gen.OctetKeyPairGenerator
 import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.SignedJWT
 import org.siros.sdk.transport.engine.CredentialNotificationEvent
@@ -435,6 +438,349 @@ class SirosWalletTest {
         advanceUntilIdle()
 
         verify(exactly = 1) { engine.sendTrustResult("flow-3", false, "trust backend offline") }
+    }
+
+    /**
+     * Regression (#219): go-wallet-backend#396/#401 sets
+     * requires_resolution/request_jwt for a did:-scheme verifier when the
+     * engine could not resolve the DID itself (no verifier PDP configured).
+     * The handler must call /v1/resolve, extract a verificationMethod's
+     * publicKeyJwk from the resulting DID document, verify request_jwt
+     * against it, and evaluate trust using THAT key - never the request's
+     * own (absent) key_material.
+     */
+    @Test
+    fun handleTrustEvaluation_resolves_did_key_material_when_requires_resolution() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    put("id", "did:web:verifier.example.com")
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("type", "JsonWebKey2020")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { apiClient.resolveKey("did:web:verifier.example.com") }
+        coVerify(exactly = 1) {
+            apiClient.evaluateTrust(match { request ->
+                request["resource"]?.toString()?.contains("\"type\":\"jwk\"") == true
+            })
+        }
+        verify(exactly = 1) { engine.sendTrustResult("flow-did", true, null) }
+    }
+
+    /**
+     * go-wallet-backend#401's resolution_subject_id carries the bare DID for
+     * /v1/resolve, distinct from subject_id - which, for an OpenID4VP 1.0
+     * `decentralized_identifier:`-prefixed client_id, is NOT itself a
+     * resolvable DID. Passing subject_id to /v1/resolve here would send the
+     * still-prefixed value and fail to resolve; evaluateTrust must still see
+     * the unstripped subject_id, unchanged.
+     */
+    @Test
+    fun handleTrustEvaluation_uses_resolution_subject_id_not_subject_id() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-prefixed",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "decentralized_identifier:did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { apiClient.resolveKey("did:web:verifier.example.com") }
+        coVerify(exactly = 1) {
+            apiClient.evaluateTrust(match { request ->
+                request["subject"]?.toString()?.contains("decentralized_identifier:did:web:verifier.example.com") == true
+            })
+        }
+    }
+
+    /**
+     * Regression (#219 review finding): an Ed25519 (EdDSA/OKP) verification
+     * method - common in did:key/did:web documents emitted by go-trust's
+     * supported DID resolvers - must resolve too, not just EC/RSA. Nimbus's
+     * `JWK.parse` yields an `OctetKeyPair` for these, which the initial fix
+     * fell through to `else -> continue` on, silently rejecting every
+     * Ed25519 verifier.
+     */
+    @Test
+    fun handleTrustEvaluation_resolves_did_key_material_with_ed25519_verification_method() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val verifierKey = OctetKeyPairGenerator(Curve.Ed25519).keyID("did:web:verifier.example.com#key-1").generate()
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.EdDSA).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(Ed25519Signer(verifierKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("type", "JsonWebKey2020")
+                            put("publicKeyJwk", Json.parseToJsonElement(verifierKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        coEvery { apiClient.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-eddsa",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) { engine.sendTrustResult("flow-did-eddsa", true, null) }
+    }
+
+    /**
+     * The counterpart failure case: a request_jwt that does not verify
+     * against the resolved DID document's key must fail CLOSED - never
+     * treated as trusted, and never as "no key material" (which some
+     * caller might read as a legitimately keyless scheme and proceed
+     * regardless).
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_resolved_key_does_not_verify_request_jwt() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val realKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        val attackerKey = ECKeyGenerator(Curve.P_256).keyID("did:web:verifier.example.com#key-1").generate()
+        // Signed by attackerKey, but the DID document (below) only lists
+        // realKey - verification against the resolved key must fail.
+        val signedJwt = SignedJWT(
+            JWSHeader.Builder(JWSAlgorithm.ES256).keyID("did:web:verifier.example.com#key-1").build(),
+            JWTClaimsSet.Builder().claim("client_id", "did:web:verifier.example.com").build(),
+        )
+        signedJwt.sign(ECDSASigner(attackerKey))
+
+        coEvery { apiClient.resolveKey("did:web:verifier.example.com") } returns buildJsonObject {
+            putJsonObject("context") {
+                putJsonObject("trust_metadata") {
+                    putJsonArray("verificationMethod") {
+                        addJsonObject {
+                            put("id", "did:web:verifier.example.com#key-1")
+                            put("publicKeyJwk", Json.parseToJsonElement(realKey.toPublicJWK().toJSONString()))
+                        }
+                    }
+                }
+            }
+        }
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-bad",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", signedJwt.serialize())
+                    put("resolution_subject_id", "did:web:verifier.example.com")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-did-bad",
+                false,
+                match { it != null && it.contains("did not verify") },
+            )
+        }
+    }
+
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_requires_resolution_but_no_request_jwt() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-missing-jwt",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.resolveKey(any()) }
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-did-missing-jwt",
+                false,
+                match { it != null && it.contains("request_jwt") },
+            )
+        }
+    }
+
+    /**
+     * Regression: go-wallet-backend#401's own TrustEvaluationRequest.Validate()
+     * makes resolution_subject_id mandatory whenever requires_resolution is
+     * true, so an engine that omits it is itself non-conformant - falling
+     * back to the (possibly decentralized_identifier:-prefixed) subject_id
+     * would silently attempt resolution with the wrong identifier instead of
+     * surfacing that clearly.
+     */
+    @Test
+    fun handleTrustEvaluation_fails_closed_when_requires_resolution_but_no_resolution_subject_id() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "trustCache" to TrustCache(),
+        )
+
+        invokeHandleTrustEvaluation(
+            wallet,
+            engine,
+            "flow-did-missing-resolution-subject-id",
+            buildJsonObject {
+                putJsonObject("request") {
+                    put("subject_id", "decentralized_identifier:did:web:verifier.example.com")
+                    put("subject_type", "credential_verifier")
+                    put("requires_resolution", true)
+                    put("request_jwt", "header.payload.sig")
+                }
+            }
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 0) { apiClient.resolveKey(any()) }
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+        verify(exactly = 1) {
+            engine.sendTrustResult(
+                "flow-did-missing-resolution-subject-id",
+                false,
+                match { it != null && it.contains("resolution_subject_id") },
+            )
+        }
     }
 
     @Test
@@ -3520,6 +3866,7 @@ class SirosWalletTest {
             "keystore" to keystore,
             "eventListener" to listener,
             "_presentationHistory" to mutableListOf<PresentationRecord>(),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
         )
 
         invokeConnectEngine(wallet, "app-token")
@@ -3589,6 +3936,7 @@ class SirosWalletTest {
             "keystore" to keystore,
             "eventListener" to listener,
             "_presentationHistory" to mutableListOf<PresentationRecord>(),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
         )
         val zkQuery = buildJsonObject {
             put("credentials", JsonArray(listOf(buildJsonObject {
@@ -3620,6 +3968,72 @@ class SirosWalletTest {
             )
         }
         assertTrue(wallet.presentationHistory.single().zkProof)
+    }
+
+    /**
+     * Regression (#218): handleWmpTrustEvaluation caches the trust result
+     * under lastTrustResults[flowId] before the match_request for that same
+     * flow ever arrives, but the match_request handler never read it back -
+     * the consent screen got neither a verifier name NOR (once #218's
+     * sample-app fallback ships) the verified identity a missing name could
+     * fall back to. It must reach PresentationRequest.trustResult, and
+     * verifierName must be derived from it the same way the legacy
+     * (non-WMP) credential_selection path already does.
+     */
+    @Test
+    fun connectEngine_matchRequest_forwards_cached_trust_result_to_listener() = runTest(dispatcher) {
+        val matchFlow = MutableSharedFlow<MatchRequestMessage>()
+        val listener = mockk<WalletEventListener>()
+        val store = FakeCredentialStore(
+            mutableListOf(
+                StoredCredential(
+                    id = 1L,
+                    format = "dc+sd-jwt",
+                    raw = "raw-1",
+                    metadata = CredentialMetadata(name = "Credential One", vct = "urn:example:vct"),
+                    batchId = 1L,
+                    instanceId = 0,
+                ),
+            )
+        )
+        coEvery { listener.onCredentialSelectionRequired(any()) } returns listOf(1L)
+        val engine = mockEngineConstructor(matchRequests = matchFlow)
+        val keystore = mockk<KeystoreManager>()
+        every { keystore.isUnlocked } returns false
+        every { keystore.listKeys() } returns listOf(KeyInfo("test-kid", "ES256", 0L))
+        val cachedTrustResult = TrustResult(
+            trusted = true,
+            entityName = null,
+            clientIdScheme = "did",
+            identifier = "did:web:verifier.example.com",
+        )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(
+                WalletState.Ready(userId = "user-1", displayName = "Alice", credentials = store.getAll())
+            ),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to store,
+            "keystore" to keystore,
+            "eventListener" to listener,
+            "_presentationHistory" to mutableListOf<PresentationRecord>(),
+            "lastTrustResults" to mutableMapOf("flow-match" to cachedTrustResult),
+        )
+
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        matchFlow.emit(MatchRequestMessage(flowId = "flow-match", dcqlQuery = null))
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            listener.onCredentialSelectionRequired(
+                match<PresentationRequest> { request ->
+                    request.trustResult === cachedTrustResult &&
+                        request.verifierName == null &&
+                        request.trustResult?.identifier == "did:web:verifier.example.com"
+                },
+            )
+        }
     }
 
     /**

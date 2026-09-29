@@ -46,6 +46,7 @@
 
     <!-- Presentation consent screen -->
     <string name="presentation_consent_title">Credential Request</string>
+    <string name="presentation_verified_identity">Verified identity</string>
 
     <!-- DC API loading screen -->
 

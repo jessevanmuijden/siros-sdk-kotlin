@@ -140,6 +140,33 @@ class BackendApiClient(
         return post("/v1/resolve", body)
     }
 
+    /**
+     * POST /v1/resolve — resolve a "key" subject (a `did:` identifier) to
+     * its verification key material, proxied by the backend directly to
+     * the PDP (see go-wallet-backend's `AuthZENProxyHandler.Resolve`).
+     *
+     * Distinct from [resolveIssuer], which always sends
+     * `subject_type: "url"` for OpenID4VCI issuer metadata resolution -
+     * this is the counterpart for a DID-scheme verifier's
+     * `TrustEvaluationRequest.requires_resolution`
+     * (go-wallet-backend#396/#401): when the engine cannot resolve the DID
+     * itself (no verifier PDP configured), it defers to the frontend/SDK,
+     * which must call this before `evaluateTrust`.
+     *
+     * The response's `context.trust_metadata` is the resolved DID
+     * Document - the caller is responsible for extracting a
+     * `verificationMethod` entry's `publicKeyJwk` and verifying the
+     * accompanying `request_jwt` against it (see
+     * [org.siros.sdk.wallet.SirosWallet]'s `resolveDidKeyMaterial`).
+     */
+    suspend fun resolveKey(subjectId: String): JsonObject {
+        val body = kotlinx.serialization.json.buildJsonObject {
+            put("subject_id", kotlinx.serialization.json.JsonPrimitive(subjectId))
+            put("subject_type", kotlinx.serialization.json.JsonPrimitive("key"))
+        }
+        return post("/v1/resolve", body)
+    }
+
     /** POST /user/session/refresh — refresh appToken using refreshToken */
     suspend fun refreshSession(refreshToken: String): JsonObject = withContext(Dispatchers.IO) {
         val body = kotlinx.serialization.json.buildJsonObject {

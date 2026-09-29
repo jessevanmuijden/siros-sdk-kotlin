@@ -251,6 +251,16 @@ private fun PreviewStep(
         // Verifier identity - the screen title itself now lives in the
         // TopAppBar, so this just surfaces who's asking.
         val vName = request.verifierName
+        // The verified identity (client_id/DID/certificate subject) a
+        // trust evaluation actually vouches for - shown, labeled as such,
+        // when there's no declared display name to show instead. Never
+        // used to replace a real name: a verifier with no PDP-validated
+        // name gets a checkable identifier, not something that reads like
+        // a friendly name it never earned. See #218 - the backend no
+        // longer trusts/caches an unvalidated client-supplied
+        // client_metadata.client_name, so a nil name here is now common,
+        // not just a rare edge case.
+        val verifiedIdentity = request.trustResult?.identifier?.takeIf { vName == null }
         if (vName != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -268,9 +278,33 @@ private fun PreviewStep(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+        } else if (verifiedIdentity != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Filled.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(32.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = stringResource(R.string.presentation_verified_identity),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = verifiedIdentity,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
 
-        val verifier = request.verifierName ?: "A verifier"
+        val verifier = request.verifierName ?: request.trustResult?.identifier ?: "A verifier"
         Text(
             text = "$verifier is requesting the following credentials:",
             style = MaterialTheme.typography.bodyMedium,
@@ -438,7 +472,7 @@ private fun SummaryStep(
             fontWeight = FontWeight.Bold,
         )
 
-        val verifier = request.verifierName ?: "the verifier"
+        val verifier = request.verifierName ?: request.trustResult?.identifier ?: "the verifier"
         Text(
             text = "You will share the following with $verifier:",
             style = MaterialTheme.typography.bodyMedium,

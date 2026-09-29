@@ -18,6 +18,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -30,6 +31,16 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.putJsonObject
+import com.nimbusds.jose.JWSVerifier
+import com.nimbusds.jose.crypto.ECDSAVerifier
+import com.nimbusds.jose.crypto.Ed25519Verifier
+import com.nimbusds.jose.crypto.RSASSAVerifier
+import com.nimbusds.jose.jwk.Curve
+import com.nimbusds.jose.jwk.ECKey
+import com.nimbusds.jose.jwk.JWK
+import com.nimbusds.jose.jwk.OctetKeyPair
+import com.nimbusds.jose.jwk.RSAKey
+import com.nimbusds.jwt.SignedJWT
 import org.siros.sdk.auth.AuthSession
 import org.siros.sdk.auth.AuthServerClient
 import org.siros.sdk.auth.AuthTokens
@@ -5473,9 +5484,17 @@ class SirosWallet private constructor(
 
                     // Let the app filter further via user selection
                     val selectedIds = if (listener != null) {
+                        // trustResult was already computed and cached by
+                        // handleWmpTrustEvaluation for this same flow, but
+                        // this construction site never read it back - the
+                        // consent screen got neither a verifier name NOR the
+                        // verified identity (client_id/DID/cert subject) a
+                        // missing name could otherwise fall back to. See #218.
+                        val trustResultForFlow = lastTrustResults[msg.flowId]
                         listener.onCredentialSelectionRequired(
                             PresentationRequest(
-                                verifierName = null,
+                                verifierName = trustResultForFlow?.entityName,
+                                trustResult = trustResultForFlow,
                                 matchResults = matchResults,
                                 candidates = candidates,
                                 credentialSets = dcqlOutput.credentialSets,
@@ -6131,13 +6150,55 @@ class SirosWallet private constructor(
 
                 Timber.d("Trust evaluation: subject=$subjectId type=$subjectType")
 
+                // requires_resolution/request_jwt/resolution_subject_id
+                // (go-wallet-backend#396/#401, this SDK's #219): set when the
+                // engine could not resolve a did:-scheme verifier's key
+                // material itself (no verifier PDP configured - an
+                // intentional dev/permissive mode) and defers to the
+                // frontend/SDK instead. key_material is absent in that case -
+                // resolveDidKeyMaterial below is what supplies it, never
+                // key_material from the request.
+                //
+                // resolution_subject_id is a DIFFERENT identifier from
+                // subject_id: subject_id is the original wire-form client_id
+                // (still carrying OpenID4VP 1.0's decentralized_identifier:
+                // prefix, when the verifier used it) that evaluateTrustDirect
+                // below must keep seeing unchanged, but /v1/resolve needs the
+                // bare DID with that prefix already stripped. Required, not
+                // defaulted to subjectId: #401's own
+                // TrustEvaluationRequest.Validate() makes ResolutionSubjectID
+                // mandatory whenever RequiresResolution is true, so an engine
+                // that omits it is itself non-conformant - falling back to
+                // the (possibly prefixed) subjectId would silently attempt
+                // resolution with the wrong identifier instead of surfacing
+                // that clearly.
+                val requiresResolution = request?.get("requires_resolution")?.jsonPrimitive?.booleanOrNull == true
+                val requestJwt = request?.get("request_jwt")?.jsonPrimitive?.contentOrNull
+                val resolutionSubjectId = request?.get("resolution_subject_id")?.jsonPrimitive?.contentOrNull
+
                 val keyMaterial = request?.get("key_material")?.jsonObject
+                val resolvedJwk = if (requiresResolution) {
+                    if (requestJwt.isNullOrBlank()) {
+                        throw TrustEvaluationFailedClosedException(
+                            "Trust evaluation requires resolution but no request_jwt was supplied"
+                        )
+                    }
+                    if (resolutionSubjectId.isNullOrBlank()) {
+                        throw TrustEvaluationFailedClosedException(
+                            "Trust evaluation requires resolution but no resolution_subject_id was supplied"
+                        )
+                    }
+                    resolveDidKeyMaterial(resolutionSubjectId, requestJwt)
+                } else {
+                    null
+                }
+
                 val trustResult = evaluateTrustDirect(
                     subjectId = subjectId,
                     subjectType = subjectType,
-                    keyMaterialType = keyMaterial?.get("type")?.jsonPrimitive?.contentOrNull,
-                    x5c = keyMaterial?.get("x5c"),
-                    jwk = keyMaterial?.get("jwk"),
+                    keyMaterialType = if (resolvedJwk != null) "jwk" else keyMaterial?.get("type")?.jsonPrimitive?.contentOrNull,
+                    x5c = if (resolvedJwk != null) null else keyMaterial?.get("x5c"),
+                    jwk = resolvedJwk ?: keyMaterial?.get("jwk"),
                     context = request?.get("context"),
                 ).copy(
                     clientIdScheme = request?.get("context")?.jsonObject
@@ -6176,6 +6237,108 @@ class SirosWallet private constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Resolves a `did:`-scheme verifier's key material via
+     * `POST /v1/resolve` and verifies [requestJwt] against it, for the
+     * `requires_resolution` path in [handleTrustEvaluation]
+     * (go-wallet-backend#396/#401, this SDK's #219).
+     *
+     * The response's `context.trust_metadata` is treated as a W3C DID
+     * Document: every `verificationMethod` entry's `publicKeyJwk` is a
+     * candidate, tried against [requestJwt]'s signature - a `kid`-matching
+     * entry (by fragment, e.g. `#key-1`) first if the JWT header names one,
+     * then every other entry, so a DID document listing multiple
+     * verification methods (key rotation, multiple purposes) isn't
+     * defeated by trying only the first. Returns the first candidate whose
+     * key actually verifies the signature, as the same `jwk` JSON shape
+     * [evaluateTrustDirect] already accepts.
+     *
+     * Fails closed (throws [TrustEvaluationFailedClosedException], never
+     * silently falls through to unverified/no key material) when
+     * resolution fails, the response carries no usable verification
+     * method, or the JWT's signature does not verify against any of them -
+     * a DID-scheme verifier this wallet cannot actually verify must not be
+     * treated as trusted, or as absent (which callers might read as
+     * legitimately keyless x509_hash/no-attestation cases and proceed
+     * regardless).
+     *
+     * [resolutionSubjectId] is deliberately a distinct value from the
+     * `subject_id` used elsewhere for `/v1/evaluate` (go-wallet-backend#401's
+     * `ResolutionSubjectID`): `/v1/evaluate`'s subject must stay the
+     * original, wire-form identifier (e.g. still carrying OpenID4VP 1.0's
+     * `decentralized_identifier:` prefix), but `/v1/resolve` needs the bare
+     * DID with that prefix already stripped - one field can't serve both.
+     */
+    private suspend fun resolveDidKeyMaterial(resolutionSubjectId: String, requestJwt: String): JsonElement {
+        val client = apiClient ?: throw TrustEvaluationFailedClosedException(
+            "Cannot resolve $resolutionSubjectId: not authenticated"
+        )
+
+        val signedJwt = try {
+            SignedJWT.parse(requestJwt)
+        } catch (e: Exception) {
+            throw TrustEvaluationFailedClosedException("request_jwt is not a valid JWS: ${e.message}", e)
+        }
+        val kidFragment = signedJwt.header.keyID?.substringAfter('#', missingDelimiterValue = "")
+            ?.takeIf { it.isNotEmpty() }
+
+        val response = try {
+            client.resolveKey(resolutionSubjectId)
+        } catch (e: Exception) {
+            throw TrustEvaluationFailedClosedException("Failed to resolve $resolutionSubjectId via /v1/resolve: ${e.message}", e)
+        }
+        // `as? JsonObject`/`as? JsonArray`, not `.jsonObject`/`.jsonArray`: a
+        // malformed/unexpected-shape response entry must be skipped (or fail
+        // this whole resolution closed), never throw an uncaught exception
+        // that escapes to handleTrustEvaluation's generic catch - which may
+        // accept a cached positive result, contradicting this path's
+        // fail-closed guarantee. Same fix as #150's `.jsonObject` crash.
+        val verificationMethods = (response["context"] as? JsonObject)
+            ?.get("trust_metadata")?.let { it as? JsonObject }
+            ?.get("verificationMethod")?.let { it as? JsonArray }
+            ?: throw TrustEvaluationFailedClosedException(
+                "Resolved DID document for $resolutionSubjectId has no verificationMethod entries"
+            )
+
+        val candidates = verificationMethods.mapNotNull { it as? JsonObject }
+            .sortedByDescending { vm ->
+                // A kid-matching entry first, but every entry is still tried -
+                // an absent/non-matching kid is common (many DID documents
+                // predate per-purpose kids), and refusing to try the rest
+                // would fail closed on a verifier this wallet CAN actually
+                // verify.
+                val vmId = (vm["id"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                kidFragment != null && vmId?.substringAfter('#', missingDelimiterValue = "") == kidFragment
+            }
+
+        for (vm in candidates) {
+            val jwkJson = vm["publicKeyJwk"] as? JsonObject ?: continue
+            val verified = try {
+                val jwk = JWK.parse(jwkJson.toString())
+                val verifier: JWSVerifier = when (jwk) {
+                    is ECKey -> ECDSAVerifier(jwk)
+                    is RSAKey -> RSASSAVerifier(jwk)
+                    // Ed25519 (EdDSA/OKP) verification methods are common in
+                    // did:key/did:web documents emitted by go-trust's
+                    // supported DID resolvers - without this branch every
+                    // such verifier would be unresolvable (#219 review
+                    // finding).
+                    is OctetKeyPair -> if (jwk.curve == Curve.Ed25519) Ed25519Verifier(jwk) else continue
+                    else -> continue
+                }
+                signedJwt.verify(verifier)
+            } catch (e: Exception) {
+                Timber.w(e, "Candidate verification method for $resolutionSubjectId failed to parse/verify")
+                false
+            }
+            if (verified) return jwkJson
+        }
+
+        throw TrustEvaluationFailedClosedException(
+            "request_jwt signature did not verify against any resolved verification method for $resolutionSubjectId"
+        )
     }
 
     /**
