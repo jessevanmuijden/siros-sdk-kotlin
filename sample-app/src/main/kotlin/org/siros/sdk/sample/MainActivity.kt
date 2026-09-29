@@ -232,6 +232,7 @@ fun WalletScreen(viewModel: WalletViewModel) {
     val walletState by viewModel.state.collectAsState()
     val r2psServerUrl by viewModel.r2psServerUrl.collectAsState()
     val showAddCredential by viewModel.showAddCredential.collectAsState()
+    val showIDVPreparation by viewModel.showIDVPreparation.collectAsState()
     val availableCredentials by viewModel.availableCredentials.collectAsState()
     val isLoadingOffers by viewModel.isLoadingOffers.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
@@ -538,6 +539,15 @@ fun WalletScreen(viewModel: WalletViewModel) {
                 onCancel = viewModel::cancelFlowStarting,
             )
 
+            // IDV (FaceTec) preparation/consent sub-screen - the real entry
+            // point for the "Scan Physical ID card" row below (previously
+            // wired straight to startIDV(), skipping this explainer/consent
+            // screen entirely) and, later, Home's PhotoID onboarding CTA.
+            showIDVPreparation -> IDVPreparationScreen(
+                onStartScan = viewModel::startIDV,
+                onBack = viewModel::closeIDVPreparation,
+            )
+
             // Add credential sub-screen
             showAddCredential -> {
                 Scaffold(
@@ -564,7 +574,7 @@ fun WalletScreen(viewModel: WalletViewModel) {
                         pendingOffer = pendingOffer,
                         onConfirmIssuance = viewModel::confirmIssuance,
                         onCancelIssuance = viewModel::cancelIssuance,
-                        onStartIDV = viewModel::startIDV,
+                        onStartIDV = viewModel::openIDVPreparation,
                         onRetry = viewModel::openAddCredential,
                         modifier = Modifier.padding(padding),
                     )

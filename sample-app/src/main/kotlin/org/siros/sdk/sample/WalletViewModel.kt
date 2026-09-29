@@ -1079,6 +1079,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         _showDevices.value = false
         _walletInstances.value = emptyList()
         _activateMode.value = null
+        _showIDVPreparation.value = false
     }
 
     /** Delete the current account - also removes it from the cached "Welcome back" list. */
@@ -1089,6 +1090,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         _showDevices.value = false
         _walletInstances.value = emptyList()
         _activateMode.value = null
+        _showIDVPreparation.value = false
     }
 
     // ── Account & Passkey management ────────────────────────────────
@@ -1222,8 +1224,28 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     /** IDV server URL — defaults to facetec-api co-hosted with the backend. */
     val idvServerUrl: String get() = _backendUrl.value.trimEnd('/') + "/idv"
 
+    private val _showIDVPreparation = MutableStateFlow(false)
+    val showIDVPreparation: StateFlow<Boolean> = _showIDVPreparation
+
+    /**
+     * Opens the IDV preparation/consent screen - the real entry point for
+     * FaceTec-driven onboarding, reachable both from the Add Credential
+     * list's "Scan Physical ID card" row and directly from Home (see
+     * HomeScreen's PhotoID onboarding CTA). A top-level, ViewModel-owned
+     * flag rather than screen-local state, deliberately, so Home doesn't
+     * need to route through the Add Credential screen just to reach it.
+     */
+    fun openIDVPreparation() {
+        _showIDVPreparation.value = true
+    }
+
+    fun closeIDVPreparation() {
+        _showIDVPreparation.value = false
+    }
+
     fun startIDV() {
         _showAddCredential.value = false
+        _showIDVPreparation.value = false
         viewModelScope.launch {
             try {
                 _isLoading.value = true
