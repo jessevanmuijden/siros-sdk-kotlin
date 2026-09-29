@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Contactless
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
@@ -411,7 +410,7 @@ fun WalletScreen(viewModel: WalletViewModel) {
     // WSCA developer sub-screen state (read here so it's available in the `when` below)
     val showWscaDeveloper by viewModel.showWscaDeveloper.collectAsState()
     val showDevices by viewModel.showDevices.collectAsState()
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(1) }
 
     // Measured height of the custom bottom tab bar Row below, so the shared
     // SnackbarHost (which spans every sub-screen in the Box below - see its
@@ -577,42 +576,43 @@ fun WalletScreen(viewModel: WalletViewModel) {
         DisposableEffect(Unit) {
             onDispose { bottomNavBarHeightPx = 0 }
         }
-        // Top bar
-        TopAppBar(
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Image(
-                        painter = painterResource(R.drawable.ic_siros_mark),
-                        contentDescription = stringResource(R.string.topbar_logo_description),
-                        modifier = Modifier.size(28.dp),
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = stringResource(R.string.topbar_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-                titleContentColor = MaterialTheme.colorScheme.onSurface,
-            ),
-            actions = {
-                IconButton(onClick = viewModel::switchToProximityEngagement) {
-                    Icon(
-                        Icons.Filled.Contactless,
-                        "Proximity Engagement (Interop Test)",
-                    )
-                }
-                IconButton(onClick = viewModel::openActivate) {
-                    Icon(
-                        ImageVector.vectorResource(R.drawable.ic_qr_scan),
-                        stringResource(R.string.qr_scan_button),
-                    )
-                }
-            },
-        )
+        // Top bar - hidden on the Home tab, which already shows the logo
+        // centered in its own body (see HomeScreen); showing it there too
+        // would just duplicate the branding.
+        if (selectedTab != 1) {
+            TopAppBar(
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Image(
+                            painter = painterResource(R.drawable.ic_siros_mark),
+                            contentDescription = stringResource(R.string.topbar_logo_description),
+                            modifier = Modifier.size(28.dp),
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = stringResource(R.string.topbar_title),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                ),
+                actions = {
+                    // Credentials tab's add-credential entry point now that the
+                    // bottom nav's center slot is Home, not "+" - see HomeScreen
+                    // for the parallel (less prominent) entry point shown there
+                    // only when the wallet is empty.
+                    if (selectedTab == 0) {
+                        IconButton(onClick = viewModel::openAddCredential) {
+                            Icon(Icons.Filled.Add, stringResource(R.string.nav_add))
+                        }
+                    }
+                },
+            )
+        }
 
         // Recomputed whenever wallet state changes (new credential, key
         // restored after unlock, etc.) so the credential list's "shadow"
@@ -628,6 +628,11 @@ fun WalletScreen(viewModel: WalletViewModel) {
             when (val state = walletState) {
                 is WalletState.Ready -> {
                     when (selectedTab) {
+                        1 -> HomeScreen(
+                            hasCredentials = state.credentials.isNotEmpty(),
+                            onActivate = viewModel::openActivate,
+                            onAddCredential = viewModel::openAddCredential,
+                        )
                         2 -> SettingsTab(
                             state = state,
                             backendUrl = viewModel.backendUrl.collectAsState().value,
@@ -654,10 +659,6 @@ fun WalletScreen(viewModel: WalletViewModel) {
                             readerTrustRootCertificatePem = viewModel.readerTrustRootCertificatePem.collectAsState().value,
                             onUpdateReaderTrustRootCertificatePem = viewModel::updateReaderTrustRootCertificatePem,
                         )
-                        // selectedTab can transiently be 1 (the "Add" action, not a
-                        // real persisted tab) right as a flow finishes and the state
-                        // drops back to Ready - fall through to the credentials list
-                        // rather than rendering nothing.
                         else -> CredentialsTab(
                             state = state,
                             presentationHistory = presentationHistory,
@@ -710,18 +711,20 @@ fun WalletScreen(viewModel: WalletViewModel) {
             }
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.clickable {
-                    selectedTab = 1
-                    viewModel.openAddCredential()
-                },
+                modifier = Modifier.clickable { selectedTab = 1 },
             ) {
-                Icon(
-                    Icons.Filled.Add,
-                    stringResource(R.string.nav_add),
-                    tint = if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                // The SIROS mark is two-tone (navy star on white), so it's
+                // rendered untinted via Image rather than Icon(tint = ...) -
+                // Icon would flatten both colors to one, per the other two
+                // tabs' single-color vector icons. Slightly larger than
+                // those, since this is the app's primary "home" anchor.
+                Image(
+                    painter = painterResource(R.drawable.ic_siros_mark),
+                    contentDescription = stringResource(R.string.nav_home),
+                    modifier = Modifier.size(32.dp),
                 )
                 Text(
-                    stringResource(R.string.nav_add),
+                    stringResource(R.string.nav_home),
                     style = MaterialTheme.typography.labelSmall,
                     color = if (selectedTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )

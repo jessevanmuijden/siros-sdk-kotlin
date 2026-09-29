@@ -14,6 +14,7 @@
     <!-- Navigation -->
     <string name="nav_credentials">Credenciais</string>
     <string name="nav_add">Adicionar</string>
+    <string name="nav_home">Início</string>
     <string name="nav_settings">Configurações</string>
 
     <!-- Top bar -->
@@ -102,10 +103,11 @@
     <string name="qr_scanner_hint">Aponte a câmera para um código QR de credencial ou apresentação</string>
     <string name="qr_scanner_permission_required">Permissão de câmera é necessária para escanear códigos QR</string>
     <string name="qr_scanner_grant_permission">Conceder Permissão</string>
-    <string name="qr_scan_button">Escanear Código QR</string>
     <string name="qr_scanner_paste_label">Ou cole um URI de oferta de credencial</string>
     <string name="qr_scanner_paste_button">Resgatar Oferta</string>
     <string name="activate_use_proximity_instead">Usar proximidade em vez disso</string>
+    <string name="home_activate_button">Ativar</string>
+    <string name="home_add_credential_button">Adicionar uma credencial</string>
     <string name="qr_scanner_detected">Código QR detectado</string>
 
     <!-- Flow states -->

@@ -14,6 +14,7 @@
     <!-- Navigation -->
     <string name="nav_credentials">Todistukset</string>
     <string name="nav_add">Lisää</string>
+    <string name="nav_home">Koti</string>
     <string name="nav_settings">Asetukset</string>
 
     <!-- Top bar -->
@@ -102,10 +103,11 @@
     <string name="qr_scanner_hint">Osoita kamera todistuksen tai esityksen QR-koodiin</string>
     <string name="qr_scanner_permission_required">Kameralupa vaaditaan QR-koodien skannaamiseen</string>
     <string name="qr_scanner_grant_permission">Myönnä lupa</string>
-    <string name="qr_scan_button">Skannaa QR-koodi</string>
     <string name="qr_scanner_paste_label">Tai liitä todistustarjouksen URI</string>
     <string name="qr_scanner_paste_button">Lunasta tarjous</string>
     <string name="activate_use_proximity_instead">Käytä lähitunnistusta sen sijaan</string>
+    <string name="home_activate_button">Aktivoi</string>
+    <string name="home_add_credential_button">Lisää todistus</string>
     <string name="qr_scanner_detected">QR-koodi tunnistettu</string>
 
     <!-- Flow states -->

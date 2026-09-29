@@ -14,6 +14,7 @@
     <!-- Navigation -->
     <string name="nav_credentials">Intyg</string>
     <string name="nav_add">Lägg till</string>
+    <string name="nav_home">Hem</string>
     <string name="nav_settings">Inställningar</string>
 
     <!-- Top bar -->
@@ -102,10 +103,11 @@
     <string name="qr_scanner_hint">Rikta kameran mot en QR-kod för intyg eller presentation</string>
     <string name="qr_scanner_permission_required">Kamerabehörighet krävs för att skanna QR-koder</string>
     <string name="qr_scanner_grant_permission">Ge behörighet</string>
-    <string name="qr_scan_button">Skanna QR-kod</string>
     <string name="qr_scanner_paste_label">Eller klistra in en URI för intygserbjudande</string>
     <string name="qr_scanner_paste_button">Lös in erbjudande</string>
     <string name="activate_use_proximity_instead">Använd närhet i stället</string>
+    <string name="home_activate_button">Aktivera</string>
+    <string name="home_add_credential_button">Lägg till ett intyg</string>
     <string name="qr_scanner_detected">QR-kod identifierad</string>
 
     <!-- Flow states -->

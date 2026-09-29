@@ -14,6 +14,7 @@
     <!-- Navigation -->
     <string name="nav_credentials">Πιστοποιητικά</string>
     <string name="nav_add">Προσθήκη</string>
+    <string name="nav_home">Αρχική</string>
     <string name="nav_settings">Ρυθμίσεις</string>
 
     <!-- Top bar -->
@@ -102,10 +103,11 @@
     <string name="qr_scanner_hint">Στρέψτε την κάμερα σε κωδικό QR πιστοποιητικού ή παρουσίασης</string>
     <string name="qr_scanner_permission_required">Απαιτείται άδεια κάμερας για τη σάρωση κωδικών QR</string>
     <string name="qr_scanner_grant_permission">Παραχώρηση Άδειας</string>
-    <string name="qr_scan_button">Σάρωση Κωδικού QR</string>
     <string name="qr_scanner_paste_label">Ή επικολλήστε ένα URI προσφοράς πιστοποιητικού</string>
     <string name="qr_scanner_paste_button">Εξαργύρωση Προσφοράς</string>
     <string name="activate_use_proximity_instead">Χρήση εγγύτητας αντ\' αυτού</string>
+    <string name="home_activate_button">Ενεργοποίηση</string>
+    <string name="home_add_credential_button">Προσθήκη πιστοποιητικού</string>
     <string name="qr_scanner_detected">Εντοπίστηκε κωδικός QR</string>
 
     <!-- Flow states -->
