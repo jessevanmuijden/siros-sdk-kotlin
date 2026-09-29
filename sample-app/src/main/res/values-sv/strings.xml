@@ -82,7 +82,7 @@
     <string name="settings_diagnostic_messages">Diagnostikmeddelanden</string>
     <string name="settings_diagnostic_messages_description">Visa den råa steg-token från servern tillsammans med den vänliga förloppsetiketten under ett flöde</string>
     <string name="settings_photo_id_onboarding">PhotoID-registrering</string>
-    <string name="settings_photo_id_onboarding_description">Visa en genväg "Skaffa ditt PhotoID" på hemskärmen när denna klient erbjuder identitetsverifierad PhotoID-utfärdande</string>
+    <string name="settings_photo_id_onboarding_description">Visa en genväg "Skaffa ditt PhotoID" på hemskärmen när denna klient erbjuder identitetsverifierat PhotoID-utfärdande</string>
     <string name="settings_credential_consumption_title">Förbrukning av intyg</string>
     <string name="settings_credential_consumption_description">Styr om en presentation förbrukar en av intygets kopior</string>
     <string name="credential_consumption_consume_all">Förbruka vid varje presentation</string>
