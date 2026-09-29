@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-09-29
+
+### Fixed
+- **Presentation consent screen now shows a verified identity when there's
+  no declared display name.** The backend no longer trusts/caches an
+  unvalidated client-supplied `client_metadata.client_name` for the
+  verifier consent screen, so a `null` verifier name is now common. The
+  WMP credential-matching path never read back the `TrustResult` already
+  cached for the flow, so the consent screen got neither a display name
+  nor a fallback. Fixed by wiring the cached `TrustResult` through to
+  `PresentationRequest`, with the consent screen falling back to the
+  verified `client_id`/DID/certificate subject, labeled "Verified
+  identity", when there's no declared name (#218).
+- **`did:`-scheme verifiers can now be resolved when the engine defers to
+  the frontend.** go-wallet-backend sets `requires_resolution: true` /
+  `request_jwt` / `resolution_subject_id` on a trust evaluation when it
+  cannot resolve a `did:`-scheme verifier's key material itself (no
+  verifier PDP configured). This SDK previously ignored those fields
+  entirely. Added `BackendApiClient.resolveKey` (`POST /v1/resolve`,
+  `subject_type: "key"`) and `SirosWallet.resolveDidKeyMaterial`, which
+  resolves the DID document and verifies `request_jwt` against each
+  `verificationMethod`'s `publicKeyJwk` (EC/P-256, RSA, and Ed25519/EdDSA
+  keys), failing closed if resolution fails, no usable verification
+  method is found, or the signature doesn't verify (#219).
+
 ## [0.20.1] - 2026-09-28
 
 ### Fixed
