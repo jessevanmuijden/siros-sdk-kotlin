@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`IDVException.DocumentChipNotVerified`: a refused issuance because the
+  document's NFC chip was not read and authenticated.** facetec-api now
+  issues nothing without an authenticated chip read
+  (sirosfoundation/facetec-api#65) and answers with an `nfc_*` code:
+  `nfc_not_supported_by_document`, `nfc_device_not_capable`, `nfc_skipped`,
+  `nfc_chip_read_failed` or `nfc_not_authenticated`. `RemoteIDVClient` turns
+  those 422s into this exception, with `reason` set to the code and
+  `errorCode` to `idv_<code>`, instead of a generic `VerificationFailed`
+  carrying the raw body; the sample app explains each one.
+
 ## [0.20.3] - 2026-09-29
 
 ### Fixed
