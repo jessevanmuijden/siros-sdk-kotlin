@@ -309,7 +309,14 @@ object CredentialUtils {
             backgroundColor = display?.backgroundColor ?: offer.backgroundColor,
             textColor = display?.textColor ?: offer.textColor,
             logo = display?.logo?.let { LogoInfo(uri = it.uri, altText = it.altText) }
-                ?: offer.logoUri?.let { LogoInfo(uri = it) },
+                ?: offer.logoUri?.let { LogoInfo(uri = it) }
+                // The issuer's own logo, last. The card draws this beside the
+                // issuer's name, so the issuer's mark is the right thing to
+                // fall back to when the type publishes none - and a type from
+                // someone else's catalog usually does publish none. Without
+                // it the card lands on a circle holding one letter of a
+                // hostname, identical for every type from that issuer.
+                ?: offer.issuerLogoUri?.let { LogoInfo(uri = it) },
             claims = claims,
             svgTemplates = svgTemplates,
         )
@@ -499,7 +506,9 @@ object CredentialUtils {
             textColor = simple?.textColor
                 ?: offer.textColor,
             logo = (simple?.logo?.let { LogoInfo(uri = it.uri, altText = it.altText) })
-                ?: offer.logoUri?.let { LogoInfo(uri = it) },
+                ?: offer.logoUri?.let { LogoInfo(uri = it) }
+                // Then the issuer's own, as in buildMdocMetadata above.
+                ?: offer.issuerLogoUri?.let { LogoInfo(uri = it) },
             claims = claims,
             svgTemplates = svgTemplates,
         )
