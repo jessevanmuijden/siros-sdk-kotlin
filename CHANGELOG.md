@@ -29,12 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`IDVException.DocumentChipNotVerified`: a refused issuance because the
   document's NFC chip was not read and authenticated.** facetec-api now
   issues nothing without an authenticated chip read
-  (sirosfoundation/facetec-api#65) and answers with an `nfc_*` code:
-  `nfc_not_supported_by_document`, `nfc_device_not_capable`, `nfc_skipped`,
-  `nfc_chip_read_failed` or `nfc_not_authenticated`. `RemoteIDVClient` turns
-  those 422s into this exception, with `reason` set to the code and
-  `errorCode` to `idv_<code>`, instead of a generic `VerificationFailed`
-  carrying the raw body; the sample app explains each one.
+  (sirosfoundation/facetec-api#65) and refuses with an `nfc_*` code.
+  `RemoteIDVClient` turns such a 422 into this exception, with `reason` set
+  to the code and `errorCode` to `idv_<code>`, instead of a generic
+  `VerificationFailed` carrying the raw body. Its `/v1/id-scan` endpoint
+  only tells verified from not, so the reason there is always
+  `nfc_skipped`; any other `nfc_*` code a backend sends maps the same way,
+  and the sample app has a message for each.
 
 ### Changed
 - **Legacy `/user/*` webauthn auth is now gated behind an explicit config
