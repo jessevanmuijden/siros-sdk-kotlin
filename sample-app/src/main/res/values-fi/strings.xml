@@ -171,7 +171,7 @@
     <string name="error_idv_liveness_failed">Elävyystarkistus epäonnistui. Yritä uudelleen.</string>
     <string name="error_idv_verification_failed">Henkilöllisyyden todentaminen epäonnistui. Yritä uudelleen.</string>
     <string name="error_idv_network_error">Verkkovirhe henkilöllisyyden todentamisen aikana.</string>
-    <string name="error_idv_nfc_not_supported_by_document">Tässä asiakirjassa ei ole luettavaa sirua. Käytä sirullista passia tai henkilökorttia.</string>
+    <string name="error_idv_nfc_not_requested">Tätä asiakirjaa ei voi varmentaa sen sirun avulla. Käytä sirullista passia tai henkilökorttia, jonka siru voidaan lukea.</string>
     <string name="error_idv_nfc_device_not_capable">Laite ei pystynyt lukemaan sirua. Varmista, että NFC on käytössä, ja yritä uudelleen.</string>
     <string name="error_idv_nfc_skipped">Asiakirjan siru on luettava. Yritä uudelleen ja pidä asiakirjaa puhelinta vasten pyydettäessä.</string>
     <string name="error_idv_nfc_chip_read_failed">Asiakirjan sirua ei voitu lukea. Yritä uudelleen ja pidä asiakirja paikallaan puhelinta vasten.</string>

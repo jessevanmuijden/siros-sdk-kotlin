@@ -171,7 +171,7 @@
     <string name="error_idv_liveness_failed">Ο έλεγχος ζωντάνιας απέτυχε. Δοκιμάστε ξανά.</string>
     <string name="error_idv_verification_failed">Η επαλήθευση ταυτότητας απέτυχε. Δοκιμάστε ξανά.</string>
     <string name="error_idv_network_error">Σφάλμα δικτύου κατά την επαλήθευση ταυτότητας.</string>
-    <string name="error_idv_nfc_not_supported_by_document">Αυτό το έγγραφο δεν έχει τσιπ που μπορεί να διαβαστεί. Χρησιμοποιήστε ηλεκτρονικό διαβατήριο ή ταυτότητα με τσιπ.</string>
+    <string name="error_idv_nfc_not_requested">Αυτό το έγγραφο δεν μπορεί να επαληθευτεί μέσω του τσιπ του. Χρησιμοποιήστε ηλεκτρονικό διαβατήριο ή ταυτότητα της οποίας το τσιπ μπορεί να διαβαστεί.</string>
     <string name="error_idv_nfc_device_not_capable">Η συσκευή δεν μπόρεσε να διαβάσει το τσιπ. Βεβαιωθείτε ότι το NFC είναι ενεργοποιημένο και δοκιμάστε ξανά.</string>
     <string name="error_idv_nfc_skipped">Απαιτείται η ανάγνωση του τσιπ του εγγράφου σας. Δοκιμάστε ξανά και κρατήστε το έγγραφο πάνω στο τηλέφωνο όταν σας ζητηθεί.</string>
     <string name="error_idv_nfc_chip_read_failed">Δεν ήταν δυνατή η ανάγνωση του τσιπ του εγγράφου σας. Δοκιμάστε ξανά κρατώντας το έγγραφο σταθερό πάνω στο τηλέφωνο.</string>

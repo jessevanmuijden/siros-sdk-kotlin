@@ -19,7 +19,7 @@ class RemoteIDVClientTest {
     fun `an nfc code becomes DocumentChipNotVerified with a per-reason error code`() {
         for (reason in listOf(
             "nfc_skipped",
-            "nfc_not_supported_by_document",
+            "nfc_not_requested",
             "nfc_device_not_capable",
             "nfc_chip_read_failed",
             "nfc_not_authenticated",

@@ -2529,7 +2529,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             "idv_liveness_failed" to R.string.error_idv_liveness_failed,
             "idv_verification_failed" to R.string.error_idv_verification_failed,
             "idv_network_error" to R.string.error_idv_network_error,
-            "idv_nfc_not_supported_by_document" to R.string.error_idv_nfc_not_supported_by_document,
+            "idv_nfc_not_requested" to R.string.error_idv_nfc_not_requested,
             "idv_nfc_device_not_capable" to R.string.error_idv_nfc_device_not_capable,
             "idv_nfc_skipped" to R.string.error_idv_nfc_skipped,
             "idv_nfc_chip_read_failed" to R.string.error_idv_nfc_chip_read_failed,
