@@ -44,6 +44,16 @@ sealed class IDVException(
     /** Network or backend error. */
     class NetworkError(cause: Throwable) : IDVException("Network error during IDV", cause, errorCode = "idv_network_error")
 
+    /**
+     * The backend refused to issue because the document's NFC chip was not read and
+     * authenticated, which facetec-api requires for every credential
+     * (sirosfoundation/facetec-api#65). [reason] is the backend's code, e.g.
+     * `nfc_skipped`, `nfc_not_supported_by_document`, `nfc_device_not_capable`,
+     * `nfc_chip_read_failed` or `nfc_not_authenticated`; [errorCode] is `idv_<reason>`,
+     * so each can be explained to the user.
+     */
+    class DocumentChipNotVerified(val reason: String, message: String) : IDVException(message, errorCode = "idv_$reason")
+
     /** Provider-specific error with vendor-specific code. */
     class ProviderError(val providerCode: String, message: String) : IDVException("[$providerCode] $message", errorCode = "idv_provider_$providerCode")
 }
