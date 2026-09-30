@@ -502,8 +502,8 @@ public final class org/siros/sdk/wallet/WalletCapabilities {
 
 public final class org/siros/sdk/wallet/WalletConfig {
 	public static final field Companion Lorg/siros/sdk/wallet/WalletConfig$Companion;
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Z)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component10 ()Lorg/siros/sdk/keystore/NativeAttestationProvider;
 	public final fun component11 ()Ljava/lang/String;
@@ -523,6 +523,7 @@ public final class org/siros/sdk/wallet/WalletConfig {
 	public final fun component24 ()Lkotlin/jvm/functions/Function1;
 	public final fun component25 ()Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;
 	public final fun component26 ()Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;
+	public final fun component27 ()Z
 	public final fun component3 ()Ljava/lang/String;
 	public final fun component4 ()Z
 	public final fun component5 ()Lorg/siros/sdk/credentials/CredentialStore;
@@ -530,8 +531,8 @@ public final class org/siros/sdk/wallet/WalletConfig {
 	public final fun component7 ()Lkotlin/jvm/functions/Function1;
 	public final fun component8 ()Z
 	public final fun component9 ()Lorg/siros/sdk/keystore/KeystoreManager;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;)Lorg/siros/sdk/wallet/WalletConfig;
-	public static synthetic fun copy$default (Lorg/siros/sdk/wallet/WalletConfig;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;ILjava/lang/Object;)Lorg/siros/sdk/wallet/WalletConfig;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Z)Lorg/siros/sdk/wallet/WalletConfig;
+	public static synthetic fun copy$default (Lorg/siros/sdk/wallet/WalletConfig;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLorg/siros/sdk/credentials/CredentialStore;Lokhttp3/OkHttpClient;Lkotlin/jvm/functions/Function1;ZLorg/siros/sdk/keystore/KeystoreManager;Lorg/siros/sdk/keystore/NativeAttestationProvider;Ljava/lang/String;ZLjava/util/Map;Ljava/util/Map;Lkotlin/jvm/functions/Function4;Ljava/lang/String;Ljava/util/List;Ljava/util/Set;Ljava/util/List;ZLjava/util/List;ZLkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;Lorg/siros/sdk/wallet/MdocTrustEvaluationMode;ZILjava/lang/Object;)Lorg/siros/sdk/wallet/WalletConfig;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAvailableKeystores ()Ljava/util/Map;
 	public final fun getBackendUrl ()Ljava/lang/String;
@@ -558,6 +559,7 @@ public final class org/siros/sdk/wallet/WalletConfig {
 	public final fun getRequireUserAuth ()Z
 	public final fun getTenantId ()Ljava/lang/String;
 	public final fun getUrlRewriter ()Lkotlin/jvm/functions/Function1;
+	public final fun getUseLegacyAuth ()Z
 	public final fun getUseSystemCredentialManager ()Z
 	public final fun getUseWmpProtocol ()Z
 	public final fun getZkCircuitUrls ()Ljava/util/List;
