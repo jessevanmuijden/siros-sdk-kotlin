@@ -2946,7 +2946,7 @@ class SirosWallet private constructor(
 
         val allCreds = credentialStore.getAll()
         val dcqlOutput = if (request.dcqlQuery != null) {
-            CredentialMatcher.matchDcql(request.dcqlQuery, allCreds)
+            CredentialMatcher.matchDcql(request.dcqlQuery, allCreds, zkSystemIds)
         } else {
             CredentialMatcher.DcqlMatchOutput(
                 queryResults = listOf(CredentialMatcher.MatchResult(
@@ -5019,7 +5019,7 @@ class SirosWallet private constructor(
             )
         }
 
-        val matchResults = CredentialMatcher.match(dcqlQuery, allCreds)
+        val matchResults = CredentialMatcher.match(dcqlQuery, allCreds, zkSystemIds)
         // The query each candidate is answered under - first match wins, the
         // same rule the other two transports apply.
         val matchResultByCredentialId = buildMap {
@@ -5448,7 +5448,7 @@ class SirosWallet private constructor(
                     // Filter credentials using DCQL query from the verifier
                     val dcqlQuery = msg.dcqlQuery?.jsonObject
                     val dcqlOutput = if (dcqlQuery != null) {
-                        CredentialMatcher.matchDcql(dcqlQuery, allCreds)
+                        CredentialMatcher.matchDcql(dcqlQuery, allCreds, zkSystemIds)
                     } else {
                         // No DCQL query — fall back to all credentials
                         CredentialMatcher.DcqlMatchOutput(
@@ -7029,7 +7029,7 @@ class SirosWallet private constructor(
                 // ZK branch serves this transport, and reads these results
                 // back from pendingMatchResultsByFlow below.
                 val matchResults = if (dcqlQuery != null) {
-                    CredentialMatcher.match(dcqlQuery, allCreds)
+                    CredentialMatcher.match(dcqlQuery, allCreds, zkSystemIds)
                 } else {
                     listOf(CredentialMatcher.MatchResult(
                         queryId = "_default",

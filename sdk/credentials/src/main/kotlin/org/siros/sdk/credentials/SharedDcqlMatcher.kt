@@ -3,6 +3,7 @@ package org.siros.sdk.credentials
 
 import kotlinx.serialization.json.JsonObject
 import timber.log.Timber
+import uniffi.siros_dc_matcher_ffi.FfiCapability
 import uniffi.siros_dc_matcher_ffi.FfiClaim
 import uniffi.siros_dc_matcher_ffi.FfiCredential
 import uniffi.siros_dc_matcher_ffi.SirosBlobBuilder
@@ -62,11 +63,26 @@ internal object SharedDcqlMatcher {
     fun evaluate(
         dcqlQuery: JsonObject,
         credentials: List<StoredCredential>,
+        // The wallet's registered ZK proof systems (see
+        // `SirosWallet.zkSystemIds`/`ZkProofSystemRegistry.systemIds`) - MUST
+        // be declared to the blob via `addZkSystem` before matching, or the
+        // shared engine has no way to know this wallet can satisfy a
+        // ZK-format/`zk_system_type` request and declines every one of them
+        // regardless of which credentials are stored. Nominal capability
+        // (empty params) - see `SirosWallet.zkSystemIds`'s doc comment for
+        // why params aren't declared here: fetchability is only known at
+        // proof time. Mirrors `SirosCredentialRegistry.buildWith`'s
+        // identical `addZkSystem` call for the DC API/OS-picker blob - this
+        // is the openid4vp:// deep-link flow's equivalent, which lacked it
+        // entirely until now (found via a real-device Vega presentation
+        // failure: correct credential, correct claims, declined anyway).
+        zkSystemIds: List<String> = emptyList(),
     ): Outcome? {
         return try {
             // `use`: the builder holds a native handle, and matching runs on every
             // presentation.
             val blob = SirosBlobBuilder().use { builder ->
+                zkSystemIds.forEach { builder.addZkSystem(FfiCapability(it, emptyMap())) }
                 credentials.forEach { builder.addCredential(toFfi(it)) }
                 builder.build()
             }
