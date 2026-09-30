@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WalletConfig.useLegacyAuth` (default `false`): every wallet talks only
   to the new AS unless a host app deliberately opts a pinned/old backend
   in (#235).
+- **ZK (Vega) presentations were always declined, regardless of which
+  credentials the wallet held.** `SharedDcqlMatcher` never told the
+  shared DCQL matching engine what ZK proof systems this wallet can
+  satisfy - the capability registration call (`addZkSystem`) was only
+  ever made for DC API/OS-picker registration, not for the direct
+  `openid4vp://` deep-link presentation path, so a `mso_mdoc_zk` request
+  was declined outright even when a genuinely matching credential was
+  present. Fixed by threading the wallet's registered ZK systems
+  (`SirosWallet.zkSystemIds`) into `SharedDcqlMatcher.evaluate` too.
 
 ## [0.20.3] - 2026-09-29
 
