@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Legacy `/user/*` webauthn auth is now gated behind an explicit config
+  flag instead of being auto-detected per backend.** `SirosWallet` used to
+  probe the AS's login-begin endpoint on first connect and fall back to
+  the legacy flow on a 404 - an extra network round-trip on every first
+  login/register, and an implicit runtime guess for something this
+  security-sensitive. go-wallet-backend is retiring the legacy HMAC
+  session tokens (`as.legacy.enabled=false` now answers legacy endpoints
+  with HTTP 410 `legacy_tokens_disabled`), and every backend this SDK
+  talks to already runs the new AS, so the probe is gone. Added
+  `WalletConfig.useLegacyAuth` (default `false`): every wallet talks only
+  to the new AS unless a host app deliberately opts a pinned/old backend
+  in (#235).
+
 ## [0.20.3] - 2026-09-29
 
 ### Fixed
