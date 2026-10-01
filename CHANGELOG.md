@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK**
+  (#246). FaceTec 10 replaced the FaceScan/IDScan processors the SDK's
+  FaceTec support was written against with one opaque blob relay, so the
+  existing `FaceTecCaptureDelegate` could not run a scan with any current
+  FaceTec SDK: its availability check called a method FaceTec 10 removed,
+  and so always reported FaceTec unavailable. The new provider runs FaceTec's
+  liveness → document scan (with NFC chip read) → photo match session in an
+  invisible host Activity. It relays each blob to facetec-api's
+  `/v1/process-request` with a per-session `externalDatabaseRefID`, and
+  returns the credential offer facetec-api issues. facetec-api's refusal
+  codes and FaceTec's session statuses map to `IDVException`s. Configure it
+  with `FaceTecIDVConfig(processRequestUrl, authToken, deviceKeyIdentifier)`.
+  As before, the app supplies the FaceTec AAR; the SDK reaches it by
+  reflection. The FaceTec code now has unit tests, including a check of every
+  reflected class and method against a real FaceTec 10 AAR. That check runs
+  where one is available (`FACETEC_SDK_AAR` or the Gradle cache) and is
+  skipped elsewhere. The sample app uses the new provider
+  (`-PfacetecDeviceKeyIdentifier=...`), and now shows its localized messages
+  for IDV error codes.
 - **`IDVException.DocumentChipNotVerified`: a refused issuance because the
   document's NFC chip was not read and authenticated.** facetec-api now
   issues nothing without an authenticated chip read
@@ -18,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only tells verified from not, so the reason there is always
   `nfc_skipped`; any other `nfc_*` code a backend sends maps the same way,
   and the sample app has a message for each.
+
+### Deprecated
+- **`FaceTecCaptureDelegate`**: it targets the FaceTec 9 API and cannot run
+  with FaceTec 10 (#246). Use `FaceTecIDVProvider`.
 
 ## [0.20.3] - 2026-09-29
 
