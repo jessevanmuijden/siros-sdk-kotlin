@@ -238,6 +238,23 @@ data class WalletConfig(
      * [effectiveIssuerTrustEvaluationMode] rather than this.
      */
     val issuerTrustEvaluationMode: MdocTrustEvaluationMode? = null,
+    /**
+     * Talk to [backendUrl] using the legacy `/user` webauthn + HMAC
+     * `appToken` auth flow instead of the standalone Authorization Server's
+     * session-mode passkey flow (the `/auth/passkey` endpoints with
+     * `X-Token-Mode: session`). `false` (default): every wallet talks only
+     * to the new AS.
+     *
+     * `SirosWallet` used to auto-detect this per-backend by probing the AS's
+     * login-begin endpoint at connect time (a 404 meant "legacy backend").
+     * That probe is gone - go-wallet-backend is retiring the legacy
+     * endpoints (`as.legacy.enabled=false` answers HTTP 410
+     * `legacy_tokens_disabled`), and every backend this SDK talks to already
+     * runs the new AS, so auto-detection is no longer needed and the extra
+     * round-trip on every connect was pure waste. Set `true` only to reach a
+     * deliberately old/pinned backend still running with legacy enabled.
+     */
+    val useLegacyAuth: Boolean = false,
 ) {
     /**
      * The reader-trust mode actually in force: [readerTrustEvaluationMode] if

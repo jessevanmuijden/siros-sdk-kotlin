@@ -6788,6 +6788,19 @@ class SirosWalletTest {
         if ("credentialConsumptionPolicy" !in values) {
             values["credentialConsumptionPolicy"] = CredentialConsumptionPolicy.NEVER_CONSUME
         }
+        // allocateInstance bypasses property initializers entirely, so
+        // zkPresentation's default (ZkMdocPresentation.standard(...)) never
+        // runs unless set here explicitly - without this, any call site that
+        // reads zkSystemIds (matchDcql/match, since this fix threads the
+        // wallet's registered ZK systems into the shared DCQL matcher) NPEs
+        // on the null backing field. An empty registry matches every
+        // existing test's expectation of "no ZK systems registered" unless a
+        // test explicitly overrides it.
+        if ("zkPresentation" !in values) {
+            values["zkPresentation"] = org.siros.sdk.keystore.ZkMdocPresentation(
+                org.siros.sdk.credentials.ZkProofSystemRegistry(emptyList())
+            )
+        }
         values.forEach { (name, value) -> setField(wallet, name, value) }
         // allocateInstance bypasses property initializers entirely, so a
         // `by lazy { ... }` property's synthetic backing field (a Lazy<T>,

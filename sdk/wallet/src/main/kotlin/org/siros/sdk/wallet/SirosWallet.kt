@@ -1376,35 +1376,17 @@ class SirosWallet private constructor(
     }
 
     /**
-     * Detect whether the backend uses the new standalone AS or the legacy
-     * wallet-backend-integrated auth endpoints.
-     *
-     * Probes `/auth/passkey/login/begin`. A 404 means the backend predates
-     * the new AS and we should fall back to `/user/login-webauthn-*`.
+     * Resolves which auth flow to use from [WalletConfig.useLegacyAuth]
+     * alone - no longer auto-detected by probing the backend. See that
+     * field's doc comment for why: every backend this SDK talks to already
+     * runs the new AS, so the probe was pure per-connect overhead, and an
+     * explicit config gate is more auditable than an implicit runtime guess
+     * for something this security-sensitive anyway.
      */
-    private suspend fun detectAuthMode(): AuthMode {
-        Timber.i("Detecting auth mode for ${config.backendUrl} (tenant=${config.tenantId})")
-        return try {
-            authServerClient.loginBegin()
-            Timber.i("Detected new AS at ${config.backendUrl}")
-            AuthMode.NEW_AS
-        } catch (e: AuthException) {
-            if (e.code == 404) {
-                Timber.i("Detected legacy AS at ${config.backendUrl} (404 on /auth/passkey/login/begin)")
-                AuthMode.LEGACY_AS
-            } else {
-                Timber.e(e, "Auth mode probe failed with HTTP ${e.code} at ${config.backendUrl}; surfacing error")
-                throw e
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "Auth mode detection failed at ${config.backendUrl}; surfacing error")
-            throw e
-        }
-    }
-
-    private suspend fun ensureAuthMode() {
+    private fun ensureAuthMode() {
         if (authMode == AuthMode.UNKNOWN) {
-            authMode = detectAuthMode()
+            authMode = if (config.useLegacyAuth) AuthMode.LEGACY_AS else AuthMode.NEW_AS
+            Timber.i("Auth mode for ${config.backendUrl} (tenant=${config.tenantId}): $authMode")
         }
     }
 
@@ -2964,7 +2946,7 @@ class SirosWallet private constructor(
 
         val allCreds = credentialStore.getAll()
         val dcqlOutput = if (request.dcqlQuery != null) {
-            CredentialMatcher.matchDcql(request.dcqlQuery, allCreds)
+            CredentialMatcher.matchDcql(request.dcqlQuery, allCreds, zkSystemIds)
         } else {
             CredentialMatcher.DcqlMatchOutput(
                 queryResults = listOf(CredentialMatcher.MatchResult(
@@ -5037,7 +5019,7 @@ class SirosWallet private constructor(
             )
         }
 
-        val matchResults = CredentialMatcher.match(dcqlQuery, allCreds)
+        val matchResults = CredentialMatcher.match(dcqlQuery, allCreds, zkSystemIds)
         // The query each candidate is answered under - first match wins, the
         // same rule the other two transports apply.
         val matchResultByCredentialId = buildMap {
@@ -5466,7 +5448,7 @@ class SirosWallet private constructor(
                     // Filter credentials using DCQL query from the verifier
                     val dcqlQuery = msg.dcqlQuery?.jsonObject
                     val dcqlOutput = if (dcqlQuery != null) {
-                        CredentialMatcher.matchDcql(dcqlQuery, allCreds)
+                        CredentialMatcher.matchDcql(dcqlQuery, allCreds, zkSystemIds)
                     } else {
                         // No DCQL query — fall back to all credentials
                         CredentialMatcher.DcqlMatchOutput(
@@ -7047,7 +7029,7 @@ class SirosWallet private constructor(
                 // ZK branch serves this transport, and reads these results
                 // back from pendingMatchResultsByFlow below.
                 val matchResults = if (dcqlQuery != null) {
-                    CredentialMatcher.match(dcqlQuery, allCreds)
+                    CredentialMatcher.match(dcqlQuery, allCreds, zkSystemIds)
                 } else {
                     listOf(CredentialMatcher.MatchResult(
                         queryId = "_default",

@@ -4,6 +4,7 @@ package org.siros.sdk.sample
 import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +17,175 @@ import org.junit.Test
  * silently failed to render before this fix.
  */
 class CredentialCardTest {
+
+    /**
+     * The card used to decide its three text slots separately, so a
+     * credential with no metadata read "dc+sd-jwt" as its name and
+     * "DC+SD-JWT" again underneath it.
+     */
+    @Test
+    fun `card labels never say the same thing twice`() {
+        val everyShape = listOf(
+            cardLabels("Company Certificate", "dc+sd-jwt", "urn:eudi:eucc:1"),
+            cardLabels(null, "dc+sd-jwt", "uri:eu.ebw.oid.1"),
+            cardLabels("dc+sd-jwt", "dc+sd-jwt", "uri:eu.ebw.oid.1"),
+            cardLabels("uri:eu.ebw.oid.1", "dc+sd-jwt", "uri:eu.ebw.oid.1"),
+            cardLabels(null, "dc+sd-jwt", null),
+            cardLabels("  ", "mso_mdoc", null),
+        )
+        everyShape.forEach { labels ->
+            val shown = listOfNotNull(labels.title, labels.typeBadge)
+            assertEquals("$labels repeats itself", shown.size, shown.distinct().size)
+        }
+    }
+
+    @Test
+    fun `card labels prefer a real name, then the type, then the format`() {
+        assertEquals(
+            CardLabels("Company Certificate", "urn:eudi:eucc:1"),
+            cardLabels("Company Certificate", "dc+sd-jwt", "urn:eudi:eucc:1"),
+        )
+        // No name: the type is the most identifying thing left, and the badge
+        // beneath drops out rather than repeating it.
+        assertEquals(
+            CardLabels("uri:eu.ebw.oid.1", null),
+            cardLabels(null, "dc+sd-jwt", "uri:eu.ebw.oid.1"),
+        )
+        // Nothing at all: the format, said once, because something must name
+        // the card.
+        assertEquals(CardLabels("dc+sd-jwt", null), cardLabels(null, "dc+sd-jwt", null))
+    }
+
+    @Test
+    fun `issuer label falls back to the host of the issuer URL`() {
+        assertEquals("SIROS ID (dev)", issuerLabel("SIROS ID (dev)", "https://issuer.example"))
+        assertEquals("issuer.example", issuerLabel(null, "https://issuer.example/path"))
+        assertEquals("issuer.example", issuerLabel("  ", "https://issuer.example"))
+        assertEquals("not a url", issuerLabel(null, "not a url"))
+        assertNull(issuerLabel(null, null))
+        assertNull(issuerLabel(null, "  "))
+    }
+
+    private val realTypes = listOf(
+        "uri:eu.ebw.oid.1", "urn:eudi:eucc:1", "uri:eu.eudi.eu-poa.1",
+        "eu.we-build.iban-ov.1", "urn:eudi:pid:arf-1.8:1", "eu.europa.ec.eudi.pid.1",
+    )
+
+    /** The colour is part of what a credential looks like to its holder. */
+    @Test
+    fun `type tint is the same every time for the same type`() {
+        realTypes.forEach { type ->
+            assertEquals(typeTintColor(type, dark = false), typeTintColor(type, dark = false))
+            assertEquals(typeTintColor(type, dark = true), typeTintColor(type, dark = true))
+        }
+    }
+
+    /**
+     * The point of the change: the four EU Business Wallet types declare no
+     * colour of their own and used to draw as four copies of one card.
+     *
+     * This is not a claim that no two types ever collide - with a fixed
+     * number of slots and no coordination between types, two can share one.
+     * It is a claim about the types this wallet actually carries.
+     */
+    @Test
+    fun `type tint separates the types that rely on it`() {
+        val noColourOfTheirOwn = listOf(
+            "uri:eu.ebw.oid.1", "urn:eudi:eucc:1", "uri:eu.eudi.eu-poa.1", "eu.we-build.iban-ov.1",
+        )
+        listOf(false, true).forEach { dark ->
+            val tints = noColourOfTheirOwn.map { typeTintColor(it, dark) }
+            assertEquals("dark=$dark", noColourOfTheirOwn.size, tints.distinct().size)
+        }
+    }
+
+    /**
+     * Two different tints must also LOOK different. An earlier version took
+     * the hue straight from the hash and put two types 2 degrees apart, which
+     * passes an equality check and fails a person.
+     */
+    @Test
+    fun `two type tints are never a near miss`() {
+        listOf(false, true).forEach { dark ->
+            val tints = realTypes.mapNotNull { typeTintColor(it, dark) }
+            for (i in tints.indices) {
+                for (j in i + 1 until tints.size) {
+                    if (tints[i] == tints[j]) continue
+                    val distance = kotlin.math.abs(tints[i].red - tints[j].red) +
+                        kotlin.math.abs(tints[i].green - tints[j].green) +
+                        kotlin.math.abs(tints[i].blue - tints[j].blue)
+                    assertTrue(
+                        "tints differ but only by $distance (dark=$dark)",
+                        distance >= 0.06f,
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `type tint has no colour to offer without an identifier`() {
+        assertNull(typeTintColor(null, dark = false))
+        assertNull(typeTintColor("", dark = false))
+        assertNull(typeTintColor("   ", dark = false))
+    }
+
+    /**
+     * Every generated tint sits in one lightness band per theme, so the
+     * existing contrast logic resolves against it exactly as it does against
+     * an issuer-declared colour. No hash can produce an unreadable card.
+     */
+    @Test
+    fun `every type tint carries readable text`() {
+        listOf(false, true).forEach { dark ->
+            // Every slot, not just the types we happen to carry today: the
+            // next credential type is someone else's identifier.
+            (0 until 400).forEach { i ->
+                val type = "urn:probe:$i"
+                val bg = typeTintColor(type, dark)!!
+                val fg = contrastingTextColor(bg)
+                assertTrue(
+                    "$type (dark=$dark) must carry readable text",
+                    contrastRatio(fg, bg) >= MIN_READABLE_CONTRAST_RATIO,
+                )
+            }
+        }
+    }
+
+    /**
+     * The floor holds for any colour at all, including one an issuer
+     * declares: black and white are equally readable at luminance 0.179, and
+     * that worst case is still 4.6:1.
+     */
+    @Test
+    fun `text is readable on any background`() {
+        val steps = 12
+        for (r in 0..steps) for (g in 0..steps) for (b in 0..steps) {
+            val bg = Color(r.toFloat() / steps, g.toFloat() / steps, b.toFloat() / steps)
+            assertTrue(
+                "unreadable on $bg",
+                contrastRatio(contrastingTextColor(bg), bg) >= MIN_READABLE_CONTRAST_RATIO,
+            )
+        }
+    }
+
+    @Test
+    fun `the two themes tint differently`() {
+        realTypes.forEach { type ->
+            assertTrue(typeTintColor(type, dark = false) != typeTintColor(type, dark = true))
+        }
+    }
+
+    @Test
+    fun `hsl conversion hits the primaries`() {
+        assertEquals(Color(1f, 0f, 0f), hslColor(0f, 1f, 0.5f))
+        assertEquals(Color(0f, 1f, 0f), hslColor(120f, 1f, 0.5f))
+        assertEquals(Color(0f, 0f, 1f), hslColor(240f, 1f, 0.5f))
+        assertEquals(Color(0f, 0f, 0f), hslColor(0f, 1f, 0f))
+        assertEquals(Color(1f, 1f, 1f), hslColor(0f, 1f, 1f))
+        // Hue wraps rather than clamping.
+        assertEquals(hslColor(10f, 0.5f, 0.5f), hslColor(370f, 0.5f, 0.5f))
+    }
 
     /**
      * The badge names the type. Cutting at the last dot - what this used to
