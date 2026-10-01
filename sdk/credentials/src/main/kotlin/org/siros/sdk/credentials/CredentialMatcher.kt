@@ -126,10 +126,18 @@ object CredentialMatcher {
      *
      * @param dcqlQuery The DCQL query JSON from the verifier
      * @param credentials All stored credentials
+     * @param zkSystemIds The wallet's registered ZK proof systems (see
+     *   [org.siros.sdk.wallet.SirosWallet.zkSystemIds]) - required for the
+     *   shared engine to recognize a ZK-format/`zk_system_type` request as
+     *   satisfiable at all; see [SharedDcqlMatcher.evaluate]'s doc comment.
      * @return A list of [MatchResult] — one per credential query in the DCQL
      */
-    fun match(dcqlQuery: JsonObject, credentials: List<StoredCredential>): List<MatchResult> {
-        return matchDcql(dcqlQuery, credentials).queryResults
+    fun match(
+        dcqlQuery: JsonObject,
+        credentials: List<StoredCredential>,
+        zkSystemIds: List<String> = emptyList(),
+    ): List<MatchResult> {
+        return matchDcql(dcqlQuery, credentials, zkSystemIds).queryResults
     }
 
     /**
@@ -156,9 +164,17 @@ object CredentialMatcher {
      *
      * @param dcqlQuery The DCQL query JSON from the verifier
      * @param credentials All stored credentials
+     * @param zkSystemIds The wallet's registered ZK proof systems (see
+     *   [org.siros.sdk.wallet.SirosWallet.zkSystemIds]) - required for the
+     *   shared engine to recognize a ZK-format/`zk_system_type` request as
+     *   satisfiable at all; see [SharedDcqlMatcher.evaluate]'s doc comment.
      * @return A [DcqlMatchOutput] with full matching information
      */
-    fun matchDcql(dcqlQuery: JsonObject, credentials: List<StoredCredential>): DcqlMatchOutput {
+    fun matchDcql(
+        dcqlQuery: JsonObject,
+        credentials: List<StoredCredential>,
+        zkSystemIds: List<String> = emptyList(),
+    ): DcqlMatchOutput {
         val credentialQueries = dcqlQuery["credentials"]?.jsonArray ?: run {
             Timber.w("DCQL query has no 'credentials' array, returning all credentials")
             return DcqlMatchOutput(
@@ -188,7 +204,7 @@ object CredentialMatcher {
         // asked for is no longer offered. OID4VP 1.0 §6.4.1 requires that; the
         // parsing path above never checked it, so such a credential would be
         // offered, consented to, and then fail to satisfy the verifier.
-        val shared = SharedDcqlMatcher.evaluate(dcqlQuery, credentials)
+        val shared = SharedDcqlMatcher.evaluate(dcqlQuery, credentials, zkSystemIds)
         val queryResults = when {
             shared == null -> {
                 // No answer, not an empty answer. Falling back keeps
