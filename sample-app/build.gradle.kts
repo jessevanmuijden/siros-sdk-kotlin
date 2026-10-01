@@ -28,6 +28,14 @@ android {
             "STOCK_DC_MATCHER",
             (project.findProperty("stockDcMatcher") == "true").toString(),
         )
+
+        // FaceTec device key identifier for identity verification
+        // (FaceTecIDVProvider). Issued by FaceTec; empty disables the flow.
+        buildConfigField(
+            "String",
+            "FACETEC_DEVICE_KEY_IDENTIFIER",
+            "\"${project.findProperty("facetecDeviceKeyIdentifier") ?: ""}\"",
+        )
     }
 
     signingConfigs {
