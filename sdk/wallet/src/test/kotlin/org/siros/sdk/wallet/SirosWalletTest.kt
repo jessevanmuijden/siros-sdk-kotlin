@@ -68,6 +68,8 @@ import org.siros.sdk.credentials.NetworkException
 import org.siros.sdk.credentials.PresentationRecord
 import org.siros.sdk.credentials.SignerSecurityProperties
 import org.siros.sdk.credentials.StoredCredential
+import org.siros.sdk.credentials.interop.HolderBinding
+import org.siros.sdk.credentials.interop.InteropProfile
 import org.siros.sdk.credentials.WalletException
 import org.siros.sdk.keystore.AttestationChain
 import org.siros.sdk.keystore.KeyInfo
@@ -1768,6 +1770,7 @@ class SirosWalletTest {
                 },
                 credentialOfferUri = null,
                 redirectUri = "siros-sample://callback",
+                authorizationDetails = any(),
             )
         }
     }
@@ -1992,7 +1995,14 @@ class SirosWalletTest {
             assertEquals("Mobile Driving License", activeOffer?.credentialName)
             assertEquals(issuerUrl, activeOffer?.credentialIssuerIdentifier)
             assertEquals("org.iso.18013.5.1.mDL", activeOffer?.credentialConfigurationId)
-            verify(exactly = 1) { engine.startIssuance(offer = offerJson, credentialOfferUri = null, redirectUri = "siros-sample://callback") }
+            verify(exactly = 1) {
+            engine.startIssuance(
+                offer = offerJson,
+                credentialOfferUri = null,
+                redirectUri = "siros-sample://callback",
+                authorizationDetails = any(),
+            )
+        }
         } finally {
             server.shutdown()
         }
@@ -2046,7 +2056,14 @@ class SirosWalletTest {
         advanceUntilIdle()
 
         assertEquals(null, getField(wallet, "activeOffer"))
-        verify(exactly = 1) { engine.startIssuance(offer = offerJson, credentialOfferUri = null, redirectUri = "siros-sample://callback") }
+        verify(exactly = 1) {
+            engine.startIssuance(
+                offer = offerJson,
+                credentialOfferUri = null,
+                redirectUri = "siros-sample://callback",
+                authorizationDetails = any(),
+            )
+        }
     }
 
     /**
@@ -2090,7 +2107,14 @@ class SirosWalletTest {
         wallet.startIssuance(offerJson)
         advanceUntilIdle()
 
-        verify(exactly = 2) { engine.startIssuance(offer = offerJson, credentialOfferUri = null, redirectUri = "siros-sample://callback") }
+        verify(exactly = 2) {
+            engine.startIssuance(
+                offer = offerJson,
+                credentialOfferUri = null,
+                redirectUri = "siros-sample://callback",
+                authorizationDetails = any(),
+            )
+        }
     }
 
     /**
@@ -2205,6 +2229,7 @@ class SirosWalletTest {
                     redirectUri = "siros-sample://callback",
                     clientAttestation = null,
                     clientAttestationPoP = null,
+                    authorizationDetails = any(),
                 )
             }
             coVerify(exactly = 0) { apiClient.requestWIAChallenge() }
@@ -2804,7 +2829,7 @@ class SirosWalletTest {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val defaultKeystore = mockk<KeystoreManager>(relaxed = true)
         val fido2Keystore = mockk<KeystoreManager>()
-        coEvery { fido2Keystore.generateProof(audience = any(), nonce = any(), freshKey = any()) } returns "fido2-signed-proof-jwt"
+        coEvery { fido2Keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) } returns "fido2-signed-proof-jwt"
         val engine = mockEngineConstructor(signRequests = signFlow)
         val config = WalletConfig(
             backendUrl = "https://wallet.example.com",
@@ -2849,8 +2874,14 @@ class SirosWalletTest {
         )
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { fido2Keystore.generateProof(audience = "https://issuer.example.com", nonce = "nonce-1", freshKey = false) }
-        coVerify(exactly = 0) { defaultKeystore.generateProof(any(), any(), any()) }
+        coVerify(exactly = 1) {
+            fido2Keystore.generateProof(
+                audience = "https://issuer.example.com", nonce = "nonce-1", freshKey = false,
+                // HAIP is the wallet default, so the proof carries the key.
+                holderBinding = HolderBinding.EMBEDDED_JWK,
+            )
+        }
+        coVerify(exactly = 0) { defaultKeystore.generateProof(any(), any(), any(), any()) }
     }
 
     /**
@@ -3947,7 +3978,7 @@ class SirosWalletTest {
         coEvery { keystore.exportEncryptedContainer() } returns """{"prfKeys":[],"jwe":"updated-jwe"}""".toByteArray()
         coEvery { apiClient.updatePrivateData(any()) } returns buildJsonObject {}
         val engine = mockEngineConstructor(flowComplete = completeFlow)
-        every { engine.startIssuance(any(), any(), any(), any(), any()) } just runs
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
             "scope" to CoroutineScope(dispatcher + SupervisorJob()),
@@ -4030,7 +4061,7 @@ class SirosWalletTest {
     fun connectEngine_signRequest_generates_proof_and_sends_response() = runTest(dispatcher) {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val keystore = mockk<KeystoreManager>()
-        coEvery { keystore.generateProof(audience = "aud-1", nonce = "nonce-1") } returns "proof-jwt"
+        coEvery { keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = any(), holderBinding = any()) } returns "proof-jwt"
         val engine = mockEngineConstructor(signRequests = signFlow)
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
@@ -4050,7 +4081,7 @@ class SirosWalletTest {
         )
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { keystore.generateProof(audience = "aud-1", nonce = "nonce-1") }
+        coVerify(exactly = 1) { keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = false, holderBinding = HolderBinding.EMBEDDED_JWK) }
         verify(exactly = 1) {
             engine.sendSignResponse(
                 "flow-sign",
@@ -4069,6 +4100,88 @@ class SirosWalletTest {
     }
 
     /**
+     * A configured per-issuer override must apply to that issuer and nothing
+     * that merely looks like it. A raw string prefix matches
+     * `https://issuer.example.evil` (a different domain) and
+     * `https://issuer.example@evil.com/x` (where the familiar-looking part is
+     * only userinfo), either of which hands one issuer's configuration to
+     * somebody else.
+     */
+    @Test
+    fun interopProfileFor_matchesOnOriginAndPathBoundary_notRawStringPrefix() = runTest(dispatcher) {
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(
+                backendUrl = "https://wallet.example.com",
+                interopProfile = InteropProfile.HAIP,
+                issuerInteropProfiles = mapOf("https://issuer.example" to InteropProfile.DIIP),
+            ),
+        )
+        val profileFor = { issuer: String? ->
+            SirosWallet::class.java.getDeclaredMethod("interopProfileFor", String::class.java)
+                .apply { isAccessible = true }
+                .invoke(wallet, issuer) as InteropProfile
+        }
+
+        assertEquals(InteropProfile.DIIP, profileFor("https://issuer.example"))
+        assertEquals(InteropProfile.DIIP, profileFor("https://issuer.example/oid4vci"))
+        assertEquals("a different domain", InteropProfile.HAIP, profileFor("https://issuer.example.evil"))
+        assertEquals("userinfo, not the host", InteropProfile.HAIP, profileFor("https://issuer.example@evil.com/x"))
+        assertEquals("a different scheme", InteropProfile.HAIP, profileFor("http://issuer.example"))
+        assertEquals("a sibling path", InteropProfile.HAIP, profileFor("https://issuer.example.co/x"))
+        // An explicit default port addresses the same issuer, so the override
+        // must still apply - URI.getPort() reporting -1 for the implicit form
+        // is a detail of the parser, not a different host.
+        assertEquals(InteropProfile.DIIP, profileFor("https://issuer.example:443/oid4vci"))
+        assertEquals("a non-default port", InteropProfile.HAIP, profileFor("https://issuer.example:8443"))
+    }
+
+    /** The DIIP counterpart of [fakeProofJwt]: the key is named by a `kid` header, not embedded. */
+    private fun fakeDiipProofJwt(kid: String): String {
+        val encoder = java.util.Base64.getUrlEncoder().withoutPadding()
+        val header = """{"typ":"openid4vci-proof+jwt","alg":"ES256","kid":"$kid"}"""
+        val payload = """{"aud":"aud-1","nonce":"nonce-1","iss":"${kid.substringBefore('#')}"}"""
+        return "${encoder.encodeToString(header.toByteArray())}.${encoder.encodeToString(payload.toByteArray())}.sig"
+    }
+
+    /**
+     * The same failure mode as the test below, for the OTHER proof shape: a
+     * DIIP proof carries no `jwk` header at all, so reading the key id only
+     * out of an embedded `jwk` silently leaves `StoredCredential.kid` null for
+     * every DIIP-issued credential.
+     */
+    @Test
+    fun connectEngine_signRequest_recordsAttestedKeyIdFromDiipKidHeader() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val keystore = mockk<KeystoreManager>()
+        val kid = "did:jwk:eyJrdHkiOiJFQyJ9#0"
+        coEvery {
+            keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = any(), holderBinding = any())
+        } returns fakeDiipProofJwt(kid)
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to keystore,
+        )
+
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-sign",
+                action = "generate_proof",
+                params = SignRequestParams(audience = "aud-1", nonce = "nonce-1"),
+            )
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf(kid), getField(wallet, "activeAttestedKeyIds"))
+    }
+
+    /**
      * Real bug found via live proximity-presentation testing: [KeystoreManager.generateProof]
      * never returned which key it used, so [SirosWallet.activeAttestedKeyIds] stayed null for
      * every credential issued via the `jwt` proof type (the preferred, common path) - leaving
@@ -4080,7 +4193,7 @@ class SirosWalletTest {
     fun connectEngine_signRequest_singleProof_recordsAttestedKeyIdFromJwtHeader() = runTest(dispatcher) {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val keystore = mockk<KeystoreManager>()
-        coEvery { keystore.generateProof(audience = "aud-1", nonce = "nonce-1") } returns fakeProofJwt("sw-0")
+        coEvery { keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = any(), holderBinding = any()) } returns fakeProofJwt("sw-0")
         val engine = mockEngineConstructor(signRequests = signFlow)
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
@@ -4114,7 +4227,7 @@ class SirosWalletTest {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val keystore = mockk<KeystoreManager>()
         coEvery {
-            keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = true)
+            keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = true, holderBinding = any())
         } returnsMany listOf(fakeProofJwt("sw-0"), fakeProofJwt("sw-1"), fakeProofJwt("sw-2"))
         val engine = mockEngineConstructor(signRequests = signFlow)
         val wallet = newWallet(
@@ -4173,7 +4286,7 @@ class SirosWalletTest {
         // proof type" if it does), and must produce exactly ONE proof
         // covering the whole batch, not one per credential.
         coVerify(exactly = 1) { keystore.generateKeyAttestation(nonce = "nonce-1", count = 5) }
-        coVerify(exactly = 0) { keystore.generateProof(any(), any(), any()) }
+        coVerify(exactly = 0) { keystore.generateProof(any(), any(), any(), any()) }
         verify(exactly = 1) {
             engine.sendSignResponse(
                 "flow-sign",
@@ -4392,7 +4505,7 @@ class SirosWalletTest {
     fun connectEngine_signRequest_prefers_jwt_when_both_proof_types_supported() = runTest(dispatcher) {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val keystore = mockk<KeystoreManager>()
-        coEvery { keystore.generateProof(audience = "aud-1", nonce = "nonce-1") } returns "proof-jwt"
+        coEvery { keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = any(), holderBinding = any()) } returns "proof-jwt"
         val engine = mockEngineConstructor(signRequests = signFlow)
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
@@ -4421,7 +4534,7 @@ class SirosWalletTest {
 
         // Existing issuers (ours included) that already support jwt must see
         // no behavior change from adding attestation support.
-        coVerify(exactly = 1) { keystore.generateProof(audience = "aud-1", nonce = "nonce-1") }
+        coVerify(exactly = 1) { keystore.generateProof(audience = "aud-1", nonce = "nonce-1", freshKey = false, holderBinding = HolderBinding.EMBEDDED_JWK) }
         coVerify(exactly = 0) { keystore.generateKeyAttestation(any(), any()) }
     }
 

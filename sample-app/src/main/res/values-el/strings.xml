@@ -228,4 +228,16 @@
     <string name="wallet_blocked_deactivated_title">Αυτό το πορτοφόλι απενεργοποιήθηκε</string>
     <string name="wallet_blocked_deactivated_message">Όλες οι συσκευές ανακλήθηκαν και τα δεδομένα του πορτοφολιού διαγράφηκαν στον διακομιστή, οπότε αυτό το passkey δεν μπορεί πλέον να συνδεθεί. Εγγραφείτε ξανά για να ξεκινήσετε από την αρχή.</string>
     <string name="wallet_blocked_enroll_again">Νέα εγγραφή</string>
+    <string name="credential_status_expired">Έληξε</string>
+    <string name="credential_status_not_yet_valid">Δεν ισχύει ακόμη</string>
+    <string name="credential_status_revoked">Ανακλήθηκε</string>
+    <string name="credential_status_suspended">Σε αναστολή</string>
+    <string name="credential_status_expired_detail">Αυτό το πιστοποιητικό έχει λήξει</string>
+    <string name="credential_status_not_yet_valid_detail">Αυτό το πιστοποιητικό δεν ισχύει ακόμη</string>
+    <string name="credential_status_revoked_detail">Αυτό το πιστοποιητικό ανακλήθηκε από τον εκδότη του</string>
+    <string name="credential_status_suspended_detail">Αυτό το πιστοποιητικό τέθηκε σε αναστολή από τον εκδότη του</string>
+    <string name="settings_interop_profiles">Προφίλ διαλειτουργικότητας</string>
+    <string name="credential_detail_holder_binding">Σύνδεση κατόχου</string>
+    <string name="credential_status_unknown">Άγνωστο</string>
+    <string name="credential_status_unknown_detail">Η κατάσταση αυτού του πιστοποιητικού δεν μπόρεσε να προσδιοριστεί</string>
 </resources>

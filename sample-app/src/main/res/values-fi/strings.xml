@@ -228,4 +228,16 @@
     <string name="wallet_blocked_deactivated_title">Tämä lompakko deaktivoitiin</string>
     <string name="wallet_blocked_deactivated_message">Kaikki laitteet peruutettiin ja lompakon tiedot pyyhittiin palvelimelta, joten tämä pääsyavain ei voi enää kirjautua sisään. Aloita alusta rekisteröitymällä uudelleen.</string>
     <string name="wallet_blocked_enroll_again">Rekisteröidy uudelleen</string>
+    <string name="credential_status_expired">Vanhentunut</string>
+    <string name="credential_status_not_yet_valid">Ei vielä voimassa</string>
+    <string name="credential_status_revoked">Peruutettu</string>
+    <string name="credential_status_suspended">Keskeytetty</string>
+    <string name="credential_status_expired_detail">Tämä todistus on vanhentunut</string>
+    <string name="credential_status_not_yet_valid_detail">Tämä todistus ei ole vielä voimassa</string>
+    <string name="credential_status_revoked_detail">Myöntäjä on peruuttanut tämän todistuksen</string>
+    <string name="credential_status_suspended_detail">Myöntäjä on keskeyttänyt tämän todistuksen väliaikaisesti</string>
+    <string name="settings_interop_profiles">Yhteentoimivuusprofiilit</string>
+    <string name="credential_detail_holder_binding">Haltijan sidonta</string>
+    <string name="credential_status_unknown">Tuntematon</string>
+    <string name="credential_status_unknown_detail">Tämän todisteen tilaa ei voitu määrittää</string>
 </resources>

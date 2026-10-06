@@ -33,6 +33,7 @@ import org.siros.sdk.credentials.SirosException
 import org.siros.sdk.credentials.ZkCircuitClient
 import org.siros.sdk.credentials.SignerSecurityProperties
 import org.siros.sdk.credentials.StoredCredential
+import org.siros.sdk.credentials.interop.CredentialStatus
 import org.siros.sdk.keystore.ActivateLifecycleRequest
 import org.siros.sdk.keystore.AuthProvider
 import org.siros.sdk.keystore.CompositeCtap2Transport
@@ -523,6 +524,66 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _selectedCredential = MutableStateFlow<StoredCredential?>(null)
     val selectedCredential: StateFlow<StoredCredential?> = _selectedCredential
 
+    /**
+     * Why each held credential cannot currently be used, by credential id -
+     * the outcome of DIIP's Validity and Revocation Algorithm, which the SDK
+     * runs (see `SirosWallet.refreshCredentialStatuses`). Credentials absent
+     * from the map are usable.
+     *
+     * Held here rather than computed per card: evaluating it can fetch the
+     * issuer's Token Status List, which is not something a Compose render
+     * should do.
+     */
+    private val _credentialStatuses = MutableStateFlow<Map<Long, CredentialStatus>>(emptyMap())
+    val credentialStatuses: StateFlow<Map<Long, CredentialStatus>> = _credentialStatuses
+
+    /** The DIIP release this wallet's wire behaviour follows - see [WalletConfig.diipProfile]. */
+    val diipProfile: org.siros.sdk.credentials.interop.DiipProfile get() = wallet.diipProfile
+
+    /**
+     * The credential set the published statuses describe, so a state emission
+     * that did not change it does no work. `Ready`/`FlowActive` are emitted on
+     * every engine progress update during a long issuance or presentation, and
+     * each evaluation re-parses every credential and may fetch a status list.
+     */
+    private var statusesEvaluatedFor: List<Long>? = null
+    private var statusesEvaluatedAt: Long = 0
+    private var credentialStatusJob: Job? = null
+
+    private fun refreshCredentialStatuses(credentials: List<StoredCredential>, force: Boolean = false) {
+        val ids = credentials.map { it.id }.sorted()
+        val now = System.currentTimeMillis()
+        // Skipping an unchanged credential set is what keeps a long flow from
+        // re-evaluating on every progress update. It must not mean "never
+        // again", though: a status list that was unreachable becomes
+        // reachable, and a suspension gets lifted, without any credential
+        // being added or removed.
+        val stale = now - statusesEvaluatedAt >= STATUS_REEVALUATION_INTERVAL_MS
+        if (!force && !stale && ids == statusesEvaluatedFor) return
+        statusesEvaluatedFor = ids
+        statusesEvaluatedAt = now
+
+        // Evaluating a credential's status parses it (CBOR, for an mdoc) and
+        // can fetch and verify the issuer's status list, so it runs off the
+        // main dispatcher; only the result is published back to the UI.
+        //
+        // Cancelling any refresh still in flight keeps overlapping evaluations
+        // from racing to publish, and means the newest credential set wins
+        // rather than whichever evaluation happens to finish last.
+        credentialStatusJob?.cancel()
+        credentialStatusJob = viewModelScope.launch {
+            val statuses = withContext(Dispatchers.Default) {
+                runCatching { wallet.refreshCredentialStatuses() }
+            }.getOrElse {
+                Log.w(TAG, "Could not refresh credential statuses", it)
+                statusesEvaluatedFor = null
+                statusesEvaluatedAt = 0
+                return@launch
+            }
+            _credentialStatuses.value = statuses.filterValues { it != CredentialStatus.VALID }
+        }
+    }
+
     // ── Presentation history ────────────────────────────────────────
 
     private val _presentationHistory = MutableStateFlow<List<PresentationRecord>>(emptyList())
@@ -796,6 +857,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                                 .map { SirosCredentialRegistry.ZkSystem(it, emptyMap()) },
                             useStockMatcher = BuildConfig.STOCK_DC_MATCHER,
                         )
+                        refreshCredentialStatuses(newState.credentialsOrEmpty())
                         refreshWscdTofuMapping()
                         refreshWscdUserOverrides()
                         restoreFido2PluginState()
@@ -812,6 +874,10 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                     is WalletState.LifecycleBlocked -> {
                         WalletSessionHolder.update(null)
                         SirosCredentialRegistry.clear(activity)
+                        credentialStatusJob?.cancel()
+                        statusesEvaluatedFor = null
+                        statusesEvaluatedAt = 0
+                        _credentialStatuses.value = emptyMap()
                     }
 
                     // Transient, and deliberately left alone. `Connecting` is
@@ -2499,6 +2565,14 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
 
     companion object {
         private const val TAG = "SIROS_VM"
+
+        /**
+         * How long an evaluated set of credential statuses is reused before
+         * being re-evaluated, even when the credentials themselves have not
+         * changed - so a status list that was unreachable, or a suspension
+         * that has been lifted, is picked up without a restart.
+         */
+        private const val STATUS_REEVALUATION_INTERVAL_MS = 5 * 60 * 1000L
         private val DEFAULT_BACKEND_URL = BuildConfig.DEFAULT_BACKEND_URL
         private const val DEFAULT_TENANT_ID = "default"
         private const val DEFAULT_R2PS_URL = "http://192.168.240.1:9443"

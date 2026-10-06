@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -31,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,6 +58,8 @@ import coil.compose.AsyncImage
 import org.siros.sdk.credentials.StoredCredential
 import org.siros.sdk.credentials.CredentialUtils
 import org.siros.sdk.credentials.DisplayClaim
+import org.siros.sdk.credentials.interop.CredentialStatus
+import org.siros.sdk.credentials.interop.HolderBinding
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -75,6 +79,12 @@ fun CredentialDetailScreen(
     onBack: () -> Unit,
     onDelete: () -> Unit,
     onRenew: () -> Unit,
+    /**
+     * Why this credential cannot currently be used, from the SDK's run of
+     * DIIP's Validity and Revocation Algorithm (see
+     * `WalletViewModel.credentialStatuses`). Null means it can be used.
+     */
+    credentialStatus: CredentialStatus? = null,
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
 
@@ -143,7 +153,38 @@ fun CredentialDetailScreen(
             CredentialCard(
                 credential = credential,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                credentialStatus = credentialStatus,
             )
+
+            // Why the credential cannot be used, spelled out - the card's
+            // one-word ribbon says which outcome, this says what it means.
+            if (credentialStatus != null && !credentialStatus.isUsable) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = credentialStatus.ribbonColor().copy(alpha = 0.12f),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = credentialStatus.ribbonColor(),
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(credentialStatus.detailRes()),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
 
             // Tabs
             var selectedTab by rememberSaveable { mutableIntStateOf(0) }
@@ -231,6 +272,19 @@ private fun InfoTab(credential: StoredCredential) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 DetailRow(stringResource(R.string.credential_detail_issuer), meta?.issuer?.name ?: "-")
                 DetailRow(stringResource(R.string.credential_detail_format), credential.format)
+                // Which interoperability profile this credential was issued
+                // under, read off its own holder binding. Informational: the
+                // wallet needs no setting to present it correctly, and this is
+                // simply what a dual-ecosystem wallet is hard to debug without.
+                CredentialUtils.holderBinding(credential)?.let { binding ->
+                    DetailRow(
+                        stringResource(R.string.credential_detail_holder_binding),
+                        when (binding) {
+                            HolderBinding.DID_JWK -> "DIIP (cnf.kid)"
+                            HolderBinding.EMBEDDED_JWK -> "HAIP (cnf.jwk)"
+                        },
+                    )
+                }
                 val typeId = meta?.vct ?: meta?.doctype
                 if (typeId != null) {
                     DetailRow(stringResource(R.string.credential_detail_type), typeId)

@@ -17,4 +17,7 @@
 /tools/.venv/
 /tools/__pycache__/
 /.claude/
+
+# Kotlin compiler session files (build artifacts).
 /.kotlin/
+.kotlin/

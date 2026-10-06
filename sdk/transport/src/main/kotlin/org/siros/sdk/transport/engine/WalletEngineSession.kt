@@ -18,6 +18,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.siros.sdk.credentials.interop.AuthorizationDetail
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -398,6 +399,9 @@ class WalletEngineSession(
      *   wire for callers that have - see [FlowStartMessage.clientAttestation].
      * @param clientAttestationPoP DEPRECATED - the matching per-flow PoP JWT,
      *   required whenever [clientAttestation] is set.
+     * @param authorizationDetails the OID4VCI `authorization_details` to ask
+     *   with - see [FlowStartMessage.authorizationDetails]. Null or empty
+     *   omits the field, leaving the `scope` path unchanged.
      */
     fun startIssuance(
         offer: String? = null,
@@ -405,6 +409,7 @@ class WalletEngineSession(
         redirectUri: String? = null,
         clientAttestation: String? = null,
         clientAttestationPoP: String? = null,
+        authorizationDetails: List<AuthorizationDetail>? = null,
     ) {
         send(FlowStartMessage.serializer(), FlowStartMessage(
             protocol = "oid4vci",
@@ -413,6 +418,7 @@ class WalletEngineSession(
             redirectUri = redirectUri,
             clientAttestation = clientAttestation,
             clientAttestationPoP = clientAttestationPoP,
+            authorizationDetails = authorizationDetails?.takeIf { it.isNotEmpty() },
         ))
     }
 

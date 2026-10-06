@@ -167,6 +167,40 @@ class BackendApiClient(
         return post("/v1/resolve", body)
     }
 
+    /**
+     * POST /v1/resolve — resolve a DID through the backend, which delegates to
+     * go-trust.
+     *
+     * DID method resolution is a trust decision: which document is
+     * authoritative for an identifier. That belongs to the deployment's trust
+     * registry, not to each wallet's own idea of which hosts to believe, so
+     * the wallet asks rather than fetches. `did:jwk` is the one exception and
+     * never gets here - it carries its own key and resolves offline.
+     *
+     * DIDs are `subject_type: "key"` on this API, matching wallet-frontend's
+     * AuthZEN client; the resolved document comes back under
+     * `context.trust_metadata`.
+     *
+     * Same wire shape as [resolveKey] - that one is the verifier
+     * trust-evaluation path (`requires_resolution`), which always gets a
+     * response to pick a `verificationMethod` out of and fails closed itself
+     * when resolution comes back empty. This one backs [DidResolver] as a
+     * generic, best-effort lookup (issuer `did:web` binding, holder-key
+     * negotiation): no document is a normal outcome here, not a failure, so
+     * it stays nullable instead of throwing.
+     *
+     * @return the DID document, or null if the backend could not resolve it.
+     */
+    suspend fun resolveDid(did: String): JsonObject? {
+        val body = kotlinx.serialization.json.buildJsonObject {
+            put("subject_id", kotlinx.serialization.json.JsonPrimitive(did))
+            put("subject_type", kotlinx.serialization.json.JsonPrimitive("key"))
+        }
+        val response = post("/v1/resolve", body)
+        val document = (response["context"] as? JsonObject)?.get("trust_metadata") as? JsonObject
+        return document?.takeIf { it["id"] != null }
+    }
+
     /** POST /user/session/refresh — refresh appToken using refreshToken */
     suspend fun refreshSession(refreshToken: String): JsonObject = withContext(Dispatchers.IO) {
         val body = kotlinx.serialization.json.buildJsonObject {

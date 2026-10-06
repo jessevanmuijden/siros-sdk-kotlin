@@ -5,6 +5,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.OkHttpClient
+import org.siros.sdk.credentials.interop.DiipProfile
+import org.siros.sdk.credentials.interop.InteropProfile
 import org.siros.sdk.credentials.CredentialStore
 import org.siros.sdk.credentials.ZkCircuitClient
 import org.siros.sdk.keystore.KeystoreManager
@@ -265,6 +267,48 @@ data class WalletConfig(
      * wallet cannot show a transaction without one.
      */
     val transactionDataEnabled: Boolean = false,
+    // The interoperability options below are appended rather than grouped
+    // with the transport options above on purpose: this is a data class, so
+    // a property's position is part of the binary API (componentN, copy, the
+    // constructor descriptor). Inserting them mid-list silently re-numbered
+    // component19 onwards and broke destructuring for existing consumers.
+    // New options go at the end.
+    /**
+     * The interoperability profile this wallet speaks when nothing more
+     * specific is known - see [InteropProfile]. Both HAIP and DIIP are
+     * implemented and a wallet holds credentials from both; this decides only
+     * which shape an OID4VCI proof takes when the Issuer has not been
+     * classified. Presentation always follows the credential's own `cnf`, so
+     * this never affects a credential the wallet already holds.
+     */
+    val interopProfile: InteropProfile = InteropProfile.DEFAULT,
+    /**
+     * Per-Issuer overrides of [interopProfile], keyed by credential issuer
+     * identifier (the `credential_issuer` URL, matched by prefix so a path
+     * under it counts).
+     *
+     * A wallet talking to both a HAIP and a DIIP Issuer needs this: OID4VCI
+     * allows only one of `jwk` and `kid` in a proof header, so the choice is
+     * per issuance and there is no shape both Issuers accept.
+     */
+    val issuerInteropProfiles: Map<String, InteropProfile> = emptyMap(),
+    /**
+     * The DIIP profile version this wallet targets when it speaks
+     * [InteropProfile.DIIP] - see [DiipProfile].
+     *
+     * Defaults to the newest this SDK implements. Each version is additive
+     * over the one before, so the default does not drop support for an
+     * ecosystem still on an older release; pin an older one only when a
+     * deployment needs the wire details of that release exactly.
+     */
+    val diipProfile: DiipProfile = DiipProfile.LATEST,
+    /**
+     * Leeway, in seconds, applied when checking a credential's validity
+     * window and a Status List Token's own lifetime - so a credential is not
+     * shown as expired because of a few seconds of clock skew. Matches the
+     * tolerance wallet-frontend applies to signature verification.
+     */
+    val clockToleranceSeconds: Long = 60,
 ) {
     /**
      * The reader-trust mode actually in force: [readerTrustEvaluationMode] if

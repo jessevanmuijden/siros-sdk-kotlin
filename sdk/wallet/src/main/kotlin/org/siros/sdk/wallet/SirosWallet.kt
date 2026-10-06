@@ -82,6 +82,17 @@ import org.siros.sdk.credentials.CredentialConsumptionPolicy
 import org.siros.sdk.credentials.CredentialUtils
 import org.siros.sdk.credentials.Vctm
 import org.siros.sdk.credentials.ZkCircuitClient
+import org.siros.sdk.credentials.interop.AuthorizationDetail
+import org.siros.sdk.credentials.interop.AuthorizationDetails
+import org.siros.sdk.credentials.interop.CredentialStatus
+import org.siros.sdk.credentials.interop.HolderBinding
+import org.siros.sdk.credentials.interop.InteropProfile
+import org.siros.sdk.credentials.interop.CredentialStatusEvaluator
+import org.siros.sdk.credentials.interop.DidMethod
+import org.siros.sdk.credentials.interop.DidRelationship
+import org.siros.sdk.credentials.interop.DidResolver
+import org.siros.sdk.credentials.interop.DiipProfile
+import org.siros.sdk.credentials.interop.TokenStatusListClient
 import org.siros.sdk.credentials.COSE_ALG_ES256
 import org.siros.sdk.credentials.CredentialFormat
 import org.siros.sdk.credentials.CredentialTypeRef
@@ -1736,6 +1747,405 @@ class SirosWallet private constructor(
     }
 
     /**
+     * The DIIP profile version this wallet targets when it speaks
+     * [InteropProfile.DIIP] - see [DiipProfile]. Read from
+     * [WalletConfig.diipProfile]; defaults to the newest this SDK implements.
+     */
+    val diipProfile: DiipProfile get() = config.diipProfile
+
+    /**
+     * The OID4VCI `authorization_details` to start this issuance with, from
+     * the offer already resolved into [activeOffer].
+     *
+     * DIIP requires a Wallet to be able to ask for a credential configuration
+     * this way as well as by `scope`. This SDK never builds the Authorization
+     * Request - the engine does, for every transport - so the wallet states
+     * the intent and the engine forwards it (see
+     * `FlowStartMessage.authorizationDetails`). wallet-frontend makes the same
+     * split for the same reason, and the two have to agree: same engine, same
+     * issuers.
+     *
+     * Null when the offer could not be resolved, which leaves the `scope` path
+     * exactly as it was.
+     */
+    private fun authorizationDetailsForActiveOffer(): List<AuthorizationDetail>? =
+        AuthorizationDetails.build(activeOffer?.credentialConfigurationId)
+
+    /**
+     * The interoperability profile this wallet speaks with [issuer] when
+     * nothing else decides - see [InteropProfile].
+     *
+     * A per-Issuer override wins over the wallet-wide default. The match is
+     * by prefix so that a `credential_issuer` with a path under a configured
+     * base counts, and the longest configured prefix wins so a specific entry
+     * is not shadowed by a broader one. This is an escape hatch for an Issuer
+     * whose metadata is wrong, not the normal path: see [holderBindingFor].
+     */
+    fun interopProfileFor(issuer: String?): InteropProfile {
+        if (issuer == null) return config.interopProfile
+        return config.issuerInteropProfiles.entries
+            .filter { matchesIssuer(issuer, it.key) }
+            .maxByOrNull { it.key.length }
+            ?.value
+            ?: config.interopProfile
+    }
+
+    /**
+     * Whether [issuer] is [configured] or a path under it.
+     *
+     * Compared as URLs, not as strings. A string prefix test matches
+     * `https://issuer.example.evil` against an override for
+     * `https://issuer.example` - a different domain handed another issuer's
+     * configuration - and `https://issuer.example@evil.com/x` too, where the
+     * part that looks like the configured issuer is only userinfo and the real
+     * host is someone else's. Both are the same bug wearing different clothes:
+     * whoever controls the matched string controls which profile is used.
+     *
+     * So: scheme, host and port must be equal, the path must be the configured
+     * one or a segment under it, and a URL carrying userinfo never matches -
+     * a legitimate `credential_issuer` has none, and accepting one only
+     * reopens the trick above.
+     */
+    /** The port a URI actually addresses: the explicit one, else the scheme's default. */
+    private fun effectivePort(uri: java.net.URI): Int = when {
+        uri.port != -1 -> uri.port
+        uri.scheme.equals("https", ignoreCase = true) -> 443
+        uri.scheme.equals("http", ignoreCase = true) -> 80
+        else -> -1
+    }
+
+    private fun matchesIssuer(issuer: String, configured: String): Boolean = try {
+        val a = java.net.URI(issuer).normalize()
+        val b = java.net.URI(configured).normalize()
+        val sameOrigin = a.userInfo == null && b.userInfo == null &&
+            a.scheme.equals(b.scheme, ignoreCase = true) &&
+            a.host.equals(b.host, ignoreCase = true) &&
+            // Effective ports, not the literal ones: URI.getPort() is -1 when
+            // the port is implicit, so comparing directly makes
+            // `https://issuer.example` and `https://issuer.example:443` look
+            // like different issuers and silently drops the override.
+            effectivePort(a) == effectivePort(b)
+        if (!sameOrigin) {
+            false
+        } else {
+            val base = b.path.orEmpty().trimEnd('/')
+            val path = a.path.orEmpty().trimEnd('/')
+            path == base || (base.isEmpty() && path.isNotEmpty()) || path.startsWith("$base/")
+        }
+    } catch (e: Exception) {
+        Timber.w(e, "Ignoring an unparseable issuer override")
+        false
+    }
+
+    /**
+     * How the Holder's key should be named in an OID4VCI proof to [issuer] -
+     * the one thing HAIP and DIIP genuinely disagree about, and something
+     * OID4VCI makes a per-issuance choice.
+     *
+     * **Negotiated, not configured.** The Issuer's own
+     * `cryptographic_binding_methods_supported` for the configuration being
+     * issued says which identifier it can verify, so a wallet holding
+     * credentials from a HAIP ecosystem and a DIIP ecosystem shapes each
+     * proof to its Issuer without anyone choosing a profile. A user cannot
+     * reasonably be asked which of two interoperability profiles an issuer
+     * they just scanned belongs to, and does not have to be.
+     *
+     * The configured profile is only the fallback, for an Issuer that
+     * advertises nothing usable - and [config]'s per-Issuer override the
+     * escape hatch above that, for one that advertises the wrong thing.
+     *
+     * Handed to [KeystoreManager.generateProof] so the keystore never has to
+     * know about issuers.
+     */
+    fun holderBindingFor(issuer: String?): HolderBinding {
+        // An explicit per-Issuer override comes first. It exists precisely for
+        // an Issuer whose metadata advertises the wrong thing, so letting the
+        // metadata win would leave it with nothing to override.
+        issuerOverrideFor(issuer)?.let { override ->
+            Timber.d("Holder binding for ${issuer ?: "the active issuer"}: ${override.holderBinding} (configured override)")
+            return override.holderBinding
+        }
+
+        // The offer's identifier and the one the proof is being signed for are
+        // compared the way an override is, not as raw strings: the same issuer
+        // routinely writes itself with and without a trailing slash, or with
+        // an explicit :443. Treating those as different issuers would discard
+        // what the Issuer advertised and fall back to the configured profile -
+        // silently sending a DIIP-only Issuer the HAIP proof shape.
+        val advertised = activeOffer
+            ?.takeIf { sameAdvertisedIssuer(it.credentialIssuerIdentifier, issuer) }
+            ?.cryptographicBindingMethodsSupported
+        HolderBinding.negotiate(advertised)?.let { negotiated ->
+            Timber.d("Holder binding for ${issuer ?: "the active issuer"}: $negotiated (advertised: $advertised)")
+            return negotiated
+        }
+        return config.interopProfile.holderBinding
+    }
+
+    /**
+     * Whether the active offer's issuer is the one a proof is being signed
+     * for. A null [issuer] means the caller did not say, in which case the
+     * active offer is the only issuance in flight and does apply.
+     */
+    private fun sameAdvertisedIssuer(offerIssuer: String?, issuer: String?): Boolean {
+        if (issuer == null) return true
+        if (offerIssuer == null) return false
+        if (offerIssuer == issuer) return true
+        return matchesIssuer(issuer, offerIssuer)
+    }
+
+    /** The configured override for [issuer], if a specific one was set. */
+    private fun issuerOverrideFor(issuer: String?): InteropProfile? {
+        if (issuer == null) return null
+        return config.issuerInteropProfiles.entries
+            .filter { matchesIssuer(issuer, it.key) }
+            .maxByOrNull { it.key.length }
+            ?.value
+    }
+
+    /**
+     * Resolves the DIDs this wallet encounters, for Issuer and Verifier
+     * identities.
+     *
+     * `did:jwk` resolves offline - the key is the identifier. Everything else
+     * goes to the backend, which delegates to go-trust: which document is
+     * authoritative for an identifier is a trust decision, and it belongs to
+     * the deployment's trust registry rather than to this wallet fetching
+     * whatever a domain serves.
+     */
+    val didResolver: DidResolver = DidResolver(
+        profile = config.diipProfile,
+        delegate = { did -> apiClient?.resolveDid(did) },
+    )
+
+    /**
+     * Runs DIIP's Validity and Revocation Algorithm. One per wallet
+     * instance, so the Token Status List it fetches is fetched once and
+     * shared by every credential pointing into it.
+     */
+    private val credentialStatusEvaluator = CredentialStatusEvaluator(
+        statusListClient = TokenStatusListClient(
+            httpGet = ::fetchPublicUrl,
+            resolveIssuerKey = ::resolveIssuerSigningKey,
+        ),
+        clockToleranceSeconds = config.clockToleranceSeconds,
+    )
+
+    /** Cached statuses, so a UI can read one without re-running the algorithm per frame. */
+    private val credentialStatuses = java.util.concurrent.ConcurrentHashMap<Long, CredentialStatus>()
+
+    /**
+     * Evaluate one credential's status - its validity window, then the
+     * issuer's Token Status List.
+     *
+     * The result is cached; [refreshCredentialStatuses] re-runs it. A status
+     * list that cannot be reached leaves the credential [CredentialStatus.VALID]
+     * rather than hiding it, which is what keeps the wallet usable offline.
+     */
+    suspend fun credentialStatus(credential: StoredCredential): CredentialStatus {
+        // A credential whose validity data will not parse is not a valid one.
+        // Collapsing the parse failure into "no claims" and then into VALID
+        // let malformed - or deliberately malformed - MSO content skip both
+        // the validity window and the revocation check entirely.
+        val claims = try {
+            CredentialUtils.parseValidityClaims(credential)
+        } catch (e: Exception) {
+            Timber.w(e, "Could not read validity claims from credential ${credential.id}")
+            credentialStatuses[credential.id] = CredentialStatus.UNKNOWN
+            return CredentialStatus.UNKNOWN
+        } ?: return CredentialStatus.VALID
+
+        // An mdoc's normalised claims carry no `iss`, so the credential's own
+        // stored issuer identifier is what binds its Status List Token to an
+        // issuer. Without it that check is skipped for every mdoc.
+        val status = credentialStatusEvaluator.evaluate(
+            claims,
+            credentialIssuer = credential.credentialIssuerIdentifier,
+        )
+        credentialStatuses[credential.id] = status
+        return status
+    }
+
+    /**
+     * The last known status of a credential, without network access or
+     * re-evaluation - for synchronous call sites such as a Compose render.
+     * [CredentialStatus.VALID] until [refreshCredentialStatuses] has run.
+     */
+    fun cachedCredentialStatus(credentialId: Long): CredentialStatus =
+        credentialStatuses[credentialId] ?: CredentialStatus.VALID
+
+    /** Re-evaluate every held credential, and return the statuses by credential id. */
+    suspend fun refreshCredentialStatuses(): Map<Long, CredentialStatus> {
+        val statuses = credentialStore.getAll().associate { it.id to credentialStatus(it) }
+        credentialStatuses.keys.retainAll(statuses.keys)
+        return statuses
+    }
+
+    /**
+     * Fetch a URL that belongs to a third party - an issuer's Status List
+     * Token, named by a URI inside the credential itself.
+     *
+     * Only documents whose location the credential already states, never DID
+     * resolution: which document is authoritative for an identifier is
+     * go-trust's decision (see [didResolver]). The Status List Token's own
+     * signing key is still resolved through that path, so fetching the list
+     * is not a trust decision - an unverifiable one is reported as an
+     * unavailable status, not as a valid credential.
+     *
+     * These carry NO wallet credentials: attaching this wallet's bearer token
+     * or tenant id to a request at an arbitrary domain would leak them (see
+     * [fetchTypeMetadataUrl] for the same rule).
+     */
+    private suspend fun fetchPublicUrl(url: String, headers: Map<String, String> = emptyMap()): String? =
+        withContext(Dispatchers.IO) {
+            runCatching { followPublicRedirects(url, headers) }.getOrElse {
+                Timber.d(it, "Could not fetch $url")
+                null
+            }
+        }
+
+    /**
+     * Fetch [url], following redirects by hand so that every hop is checked by
+     * [isPublicFetchAllowed], not just the first.
+     *
+     * Returns null as soon as a hop would go somewhere the rule refuses, or
+     * when the chain runs longer than [MAX_PUBLIC_REDIRECTS] - a redirect loop
+     * is not something to keep walking.
+     */
+    private fun followPublicRedirects(url: String, headers: Map<String, String>): String? {
+        var next: String? = url
+        repeat(MAX_PUBLIC_REDIRECTS + 1) {
+            val current = next ?: return null
+            if (!isPublicFetchAllowed(current)) {
+                Timber.d("Refusing to fetch $current: third-party fetches are HTTPS only, without userinfo")
+                return null
+            }
+            val builder = Request.Builder().url(current).get()
+            headers.forEach { (name, value) -> builder.header(name, value) }
+            thirdPartyHttpClient.newCall(builder.build()).execute().use { response ->
+                if (response.isRedirect) {
+                    // Resolved against the current URL, since a Location may be
+                    // relative - and then checked on the next turn of the loop.
+                    next = response.header("Location")
+                        ?.let { response.request.url.resolve(it)?.toString() }
+                    return@use
+                }
+                return if (response.isSuccessful) response.body?.string() else null
+            }
+        }
+        Timber.d("Refusing to follow more than $MAX_PUBLIC_REDIRECTS redirects from $url")
+        return null
+    }
+
+    /**
+     * The client third-party fetches go out on: [httpClient] with its cookie
+     * jar and any authenticators removed.
+     *
+     * Not attaching an `Authorization` header is not enough on its own to say
+     * a request carries no wallet credentials. The shared client holds an
+     * [org.siros.sdk.auth.InMemoryCookieJar], and a cookie set by one of this
+     * wallet's own hosts would ride along to a third-party domain that
+     * happens to match - a credential leak that no call site can see, because
+     * nothing at the call site mentions cookies.
+     *
+     * Redirects are off as well. [isPublicFetchAllowed] checks the URL this
+     * wallet asks for, but OkHttp follows redirects by default, so without
+     * this a status-list or metadata URL could answer with a 302 to somewhere
+     * the rule would have refused - `http://`, or an `https://user@host/` that
+     * makes a host look like one it is not - and serve the JWKS or the status
+     * token from there. `followSslRedirects(false)` alone only covers the
+     * cross-protocol half of that.
+     *
+     * Following them by hand instead keeps one predicate for the first request
+     * and every hop after it: a rule enforced only on the first request is not
+     * a rule. See [followPublicRedirects].
+     */
+    private val thirdPartyHttpClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .cookieJar(okhttp3.CookieJar.NO_COOKIES)
+            .authenticator(okhttp3.Authenticator.NONE)
+            .cache(null)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
+
+    /**
+     * The signing key an issuer publishes, for verifying a Status List Token
+     * it signed. Only DID-identified issuers are answered here - DIIP
+     * identifies Issuers by `did:jwk` or `did:web`, and a status list signed
+     * by anything else carries its own `x5c` or goes unverified (which the
+     * reader reports as an unavailable status, never as a valid one).
+     */
+    /**
+     * The signing key an HTTPS-identified Issuer publishes, from its SD-JWT VC
+     * issuer metadata (`jwks`, or `jwks_uri`).
+     *
+     * Most Issuers are identified by an HTTPS URL rather than a DID, so
+     * without this the Token Status List could never be verified for them and
+     * every revocation check would degrade to "unavailable" - which this SDK
+     * deliberately treats as usable, so revocation would silently never apply.
+     *
+     * This is not a trust decision and does not pretend to be one. The path is
+     * derived from the Issuer's own identifier, so there is no choice of
+     * authority to make - unlike DID method resolution, which is go-trust's
+     * (see [didResolver]). Whether this Issuer is trusted at all is answered
+     * by the issuer trust list, the same as for the credential itself; all
+     * this does is obtain the key that Issuer publishes under its own name.
+     *
+     * The well-known suffix moves with the profile: SD-JWT VC renamed it
+     * between drafts, so it comes from [DiipProfile.sdJwtVcIssuerMetadataPath]
+     * rather than being hardcoded. Both spellings are tried, since an issuer
+     * pinned to the other draft is common.
+     */
+    private suspend fun resolveHttpsIssuerSigningKey(issuer: String, kid: String?): com.nimbusds.jose.jwk.JWK? {
+        // Case-insensitively, the way isPublicFetchAllowed parses it: URI
+        // schemes are case-insensitive, so rejecting `HTTPS://issuer.example`
+        // here would leave that issuer's status list unverifiable and its
+        // revocation silently never applied.
+        if (!issuer.startsWith("https://", ignoreCase = true)) return null
+        val base = issuer.trimEnd('/')
+        val paths = linkedSetOf(
+            config.diipProfile.sdJwtVcIssuerMetadataPath,
+            "/.well-known/jwt-vc-issuer",
+            "/.well-known/vc-issuer",
+        )
+        for (path in paths) {
+            val body = fetchPublicUrl("$base$path") ?: continue
+            val keys = runCatching { issuerJwks(body) }.getOrNull() ?: continue
+            selectIssuerKey(keys, kid)?.let { return it }
+        }
+        return null
+    }
+
+    /** The JWK set an SD-JWT VC issuer metadata document points at, inline or by reference. */
+    private suspend fun issuerJwks(metadataBody: String): List<com.nimbusds.jose.jwk.JWK>? {
+        val metadata = json.parseToJsonElement(metadataBody).jsonObject
+        (metadata["jwks"] as? JsonObject)?.let { inline ->
+            return com.nimbusds.jose.jwk.JWKSet.parse(inline.toString()).keys
+        }
+        val uri = metadata["jwks_uri"]?.jsonPrimitive?.contentOrNull ?: return null
+        val body = fetchPublicUrl(uri) ?: return null
+        return com.nimbusds.jose.jwk.JWKSet.parse(body).keys
+    }
+
+    @Suppress("unused") // referenced through the TokenStatusListClient below
+    private suspend fun resolveIssuerSigningKey(issuer: String, kid: String?): com.nimbusds.jose.jwk.JWK? {
+        // Any syntactically valid DID goes to the resolver, which delegates
+        // whatever is not did:jwk to go-trust. Testing DidMethod.of here would
+        // make an issuer identified by a method this SDK does not name - did:ebsi,
+        // say - fall through to the HTTPS branch, where it resolves to nothing:
+        // its status list would then never verify, and revocation for it would
+        // silently never apply.
+        if (DidMethod.methodName(issuer) != null) {
+            val document = didResolver.resolve(issuer).documentOrNull ?: return null
+            val jwk = document.findPublicKey(kid, DidRelationship.ASSERTION_METHOD) ?: return null
+            return runCatching { com.nimbusds.jose.jwk.JWK.parse(jwk.toString()) }.getOrNull()
+        }
+        return resolveHttpsIssuerSigningKey(issuer, kid)
+    }
+
+    /**
      * Get credentials, excluding expired ones.
      *
      * @param includeExpired when true, returns all credentials including expired.
@@ -2604,6 +3014,7 @@ class SirosWallet private constructor(
                 ?: issuerDisplay?.textColor,
             logoUri = credDisplay?.logo?.uri,
             issuerLogoUri = issuerDisplay?.logo?.uri,
+            cryptographicBindingMethodsSupported = config.cryptographicBindingMethodsSupported.orEmpty(),
         )
     }
 
@@ -2710,6 +3121,7 @@ class SirosWallet private constructor(
             engine.startIssuance(
                 offer = credentialOffer.toString(),
                 redirectUri = config.redirectUri.ifBlank { null },
+                authorizationDetails = authorizationDetailsForActiveOffer(),
             )
         } catch (e: Exception) {
             // The flow was never registered server-side (no flow ID was ever
@@ -2821,10 +3233,12 @@ class SirosWallet private constructor(
                 is IssuanceStart.Offer -> engine.startIssuance(
                     offer = start.offer,
                     redirectUri = redirectUri,
+                    authorizationDetails = authorizationDetailsForActiveOffer(),
                 )
                 is IssuanceStart.CredentialOfferUri -> engine.startIssuance(
                     credentialOfferUri = start.uri,
                     redirectUri = redirectUri,
+                    authorizationDetails = authorizationDetailsForActiveOffer(),
                 )
             }
         } catch (e: Exception) {
@@ -3453,7 +3867,12 @@ class SirosWallet private constructor(
     private val sessionStore = SessionStore(activity)
     private val accountRegistry = AccountRegistry(activity)
     private val authProvider = createAuthProvider(activity, config)
-    private val keystore: KeystoreManager = config.keystore ?: JweKeystore()
+    // The profile has to reach the default keystore, or a wallet configured
+    // for DIIP generates keys with no did:jwk identity and then silently falls
+    // back to a HAIP-shaped proof - the configuration would look applied and
+    // do nothing. A host-supplied keystore carries its own profile.
+    private val keystore: KeystoreManager =
+        config.keystore ?: JweKeystore(profile = config.interopProfile)
 
     /**
      * WSCD hardware-key lifecycle (enroll/rotate/destroy) and
@@ -4608,7 +5027,13 @@ class SirosWallet private constructor(
             val headerPart = jwt.substringBefore(".")
             val padded = headerPart + "=".repeat((4 - headerPart.length % 4) % 4)
             val headerJson = String(java.util.Base64.getUrlDecoder().decode(padded), Charsets.UTF_8)
-            Json.parseToJsonElement(headerJson).jsonObject["jwk"]?.jsonObject?.get("kid")?.jsonPrimitive?.contentOrNull
+            val header = Json.parseToJsonElement(headerJson).jsonObject
+            // A DIIP proof names the key with a `kid` header and carries no
+            // `jwk` at all; a HAIP one embeds the key, with its id inside.
+            // Reading only the latter silently loses the binding for every
+            // DIIP-issued credential.
+            header["kid"]?.jsonPrimitive?.contentOrNull
+                ?: header["jwk"]?.jsonObject?.get("kid")?.jsonPrimitive?.contentOrNull
         } catch (e: Exception) {
             Timber.w(e, "Failed to extract kid from proof JWT header")
             null
@@ -4676,6 +5101,10 @@ class SirosWallet private constructor(
                         audience = audience,
                         nonce = nonce,
                         freshKey = count > 1,
+                        // `audience` is the credential issuer, which is what
+                        // decides whether this proof names the holder key by
+                        // did:jwk (DIIP) or carries it (HAIP).
+                        holderBinding = holderBindingFor(audience),
                     )
                     val keyId = extractProofKeyId(proofJwt)
                     GeneratedProofData(proofType = "jwt", jwt = proofJwt, attestedKeyIds = keyId?.let { listOf(it) })
@@ -7435,3 +7864,45 @@ class SirosWallet private constructor(
     }
 }
 
+/**
+ * Pick the key a Status List Token's `kid` names, or the only usable one when
+ * it named none.
+ *
+ * A set with several keys and no `kid` is ambiguous, and guessing there would
+ * mean accepting a signature from whichever key happened to be first. A key
+ * carrying private material is not something an Issuer publishes for
+ * verification, so a misconfigured JWKS does not get one treated as a
+ * verification key.
+ *
+ * Top-level rather than a member because it is pure: no wallet state is
+ * involved, and it is the part worth testing directly.
+ */
+/**
+ * Whether a third-party URL may be fetched at all.
+ *
+ * Everything reached this way - a Status List Token, an issuer's metadata, the
+ * `jwks_uri` it points at - is used to decide whether a credential is still
+ * valid and which key says so. Over plaintext, anyone on the path can answer
+ * those questions instead of the issuer: serve a status list that says
+ * "valid", or a JWKS holding their own key. An issuer identifier is an HTTPS
+ * URL to begin with, so this rejects nothing a well-formed deployment does.
+ */
+/** How many redirects a third-party fetch will follow before giving up. */
+private const val MAX_PUBLIC_REDIRECTS = 5
+
+internal fun isPublicFetchAllowed(url: String): Boolean = runCatching {
+    val uri = java.net.URI(url)
+    // Userinfo means nothing for an issuer's metadata or status list, and a
+    // URL carrying it is the classic way to make a host look like one it is
+    // not (`https://issuer.example@evil.example/`).
+    uri.scheme?.lowercase() == "https" && uri.userInfo == null && uri.host != null
+}.getOrDefault(false)
+
+internal fun selectIssuerKey(
+    keys: List<com.nimbusds.jose.jwk.JWK>,
+    kid: String?,
+): com.nimbusds.jose.jwk.JWK? {
+    val usable = keys.filter { !it.isPrivate }
+    if (kid != null) return usable.firstOrNull { it.keyID == kid }
+    return usable.singleOrNull()
+}

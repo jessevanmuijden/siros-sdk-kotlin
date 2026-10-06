@@ -14,6 +14,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.siros.sdk.auth.BackendApiClient
+import kotlinx.serialization.json.encodeToJsonElement
+import org.siros.sdk.credentials.interop.HolderBinding
 import org.siros.sdk.keystore.KeystoreManager
 import org.siros.sdk.transport.CredentialNotifier
 import org.siros.sdk.transport.wmp.WmpMeta
@@ -38,7 +40,32 @@ class FlowClient(
     private val apiClient: BackendApiClient? = null,
     private val autoSign: Boolean = true,
     private val json: Json = Json { ignoreUnknownKeys = true },
+    /**
+     * How the Holder's key should be named in an OID4VCI proof to a given
+     * credential issuer - the one thing HAIP and DIIP genuinely disagree
+     * about, and a per-issuance choice. Null (the default) leaves it to the
+     * keystore's own profile, which is right whenever a host has no
+     * per-issuer configuration; `SirosWallet` supplies one that consults
+     * `WalletConfig.issuerInteropProfiles`.
+     */
+    private val holderBindingFor: ((issuer: String?) -> HolderBinding)? = null,
 ) : CredentialNotifier {
+
+    /**
+     * The pre-DIIP constructor shape, kept so existing Java and
+     * already-compiled consumers still link: Kotlin default arguments only
+     * help callers recompiled against the new primary constructor, and adding
+     * [holderBindingFor] changed its JVM descriptor. Behaves exactly as
+     * before - the keystore's own profile decides the proof shape.
+     */
+    constructor(
+        session: WmpSession,
+        keystore: KeystoreManager,
+        apiClient: BackendApiClient? = null,
+        autoSign: Boolean = true,
+        json: Json = Json { ignoreUnknownKeys = true },
+    ) : this(session, keystore, apiClient, autoSign, json, holderBindingFor = null)
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val _events = Channel<FlowEvent>(Channel.BUFFERED)
 
@@ -66,6 +93,15 @@ class FlowClient(
             put("flow_id", flowId)
             params.credentialOfferUri?.let { put("credential_offer_uri", it) }
             params.issuerUrl?.let { put("issuer_url", it) }
+            // DIIP requires the Wallet to ask for a credential configuration by
+            // `authorization_details`. The engine builds the Authorization
+            // Request, so the wallet states the intent here and the engine
+            // forwards it. Omitted entirely when absent - an empty value is not
+            // the same as not asking. Wire name matches go-wallet-backend's
+            // FlowStartMessage and wallet-frontend's flow_start exactly.
+            params.authorizationDetails?.takeIf { it.isNotEmpty() }?.let {
+                put("authorization_details", json.encodeToJsonElement(it))
+            }
             put("wmp", json.encodeToJsonElement(WmpMeta.serializer(), WmpMeta()))
         }
         session.sendRequest("wmp.flow.start", flowParams)
@@ -215,6 +251,11 @@ class FlowClient(
                             val proof = keystore.generateProof(
                                 audience = signParams.audience ?: "",
                                 nonce = signParams.nonce ?: "",
+                                freshKey = false,
+                                // `audience` is the credential issuer, which
+                                // is what decides the proof's holder-binding
+                                // shape.
+                                holderBinding = holderBindingFor?.invoke(signParams.audience),
                             )
                             SignResponse(proofJwt = proof, proofType = "jwt")
                         }

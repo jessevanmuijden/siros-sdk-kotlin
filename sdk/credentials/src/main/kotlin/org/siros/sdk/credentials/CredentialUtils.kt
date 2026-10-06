@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.siros.sdk.credentials.interop.HolderBinding
 import org.siros.sdk.credentials.mdoc.DocumentMdoc
 import org.siros.sdk.credentials.mdoc.MdocCbor
 import timber.log.Timber
@@ -542,6 +543,106 @@ object CredentialUtils {
      * advertised type, so an issuer that advertises one type and issues another
      * would have every one of those decisions made about the wrong credential.
      */
+    /**
+     * How this credential names the Holder key it is bound to - which is also
+     * which interoperability profile it was issued under.
+     *
+     * A `cnf.kid` naming a DID verification method is DIIP; a `cnf.jwk`
+     * carrying the key is HAIP. An mdoc always carries the device key by
+     * value, so it is the HAIP form by construction. Null when the credential
+     * has no holder binding at all.
+     *
+     * Nothing in the wallet needs to be told this - signing follows the `cnf`
+     * directly (see `KeystoreManager.signVpToken`) - but it is what a person
+     * debugging a wallet that talks to both ecosystems wants to see.
+     */
+    fun holderBinding(credential: StoredCredential): HolderBinding? {
+        if (credential.format == "mso_mdoc") return HolderBinding.EMBEDDED_JWK
+        val cnf = parseJwtPayload(credential.raw)?.get("cnf") as? JsonObject ?: return null
+        return when {
+            cnf["kid"] != null -> HolderBinding.DID_JWK
+            cnf["jwk"] != null -> HolderBinding.EMBEDDED_JWK
+            else -> null
+        }
+    }
+
+    /**
+     * The claims DIIP's Validity and Revocation Algorithm reads - the
+     * validity window and the Token Status List reference - normalised to one
+     * JSON shape across credential formats.
+     *
+     * For the JWT-based formats these are simply the credential's own claims.
+     * An mdoc keeps them somewhere else entirely: the validity window lives
+     * in the MSO's `validityInfo`, and the status reference (where an issuer
+     * publishes one) in the MSO's `status`. Returning them under the same
+     * names is what lets one evaluator serve every format.
+     */
+    fun validityClaims(credential: StoredCredential): JsonObject? = try {
+        parseValidityClaims(credential)
+    } catch (e: Exception) {
+        Timber.w(e, "Could not read validity claims from credential ${credential.id}")
+        null
+    }
+
+    /**
+     * [validityClaims] without the catch, so a caller can tell "this
+     * credential says nothing about its validity" from "this credential's
+     * validity data would not parse".
+     *
+     * The difference matters: the first is an ordinary credential and the
+     * second must not be reported as valid, which is what collapsing both to
+     * null did. Throws whatever the underlying parse threw.
+     */
+    fun parseValidityClaims(credential: StoredCredential): JsonObject? =
+        if (credential.format == "mso_mdoc") {
+            mdocValidityClaims(credential)
+        } else {
+            parseJwtPayload(credential.raw)
+        }
+
+    private fun mdocValidityClaims(credential: StoredCredential): JsonObject? {
+        val document = parseMdocDocument(credential) ?: return null
+        val mso = MdocCbor.decodeMso(document.issuerSigned.issuerAuth)
+        return kotlinx.serialization.json.buildJsonObject {
+            mso["validityInfo"]?.let { validity ->
+                // ISO 18013-5 encodes these as tdate (a tag-0 RFC 3339
+                // string), which is the same lexical form the VCDM uses for
+                // validFrom/validUntil - so no conversion is needed, only
+                // untagging.
+                validity["validFrom"]?.let { put("validFrom", JsonPrimitive(it.Untag().AsString())) }
+                validity["validUntil"]?.let { put("validUntil", JsonPrimitive(it.Untag().AsString())) }
+            }
+            mso["status"]?.let { status ->
+                status["status_list"]?.let { statusList ->
+                    put(
+                        "status",
+                        kotlinx.serialization.json.buildJsonObject {
+                            put(
+                                "status_list",
+                                kotlinx.serialization.json.buildJsonObject {
+                                    // `idx` comes from the credential, which
+                                    // is not this wallet's to trust before it
+                                    // has been verified. AsInt32 throws past
+                                    // Int.MAX_VALUE, which would otherwise
+                                    // discard the whole credential's validity
+                                    // claims. A status list with that many
+                                    // entries does not exist, so an index that
+                                    // will not convert is simply not read,
+                                    // leaving the reference incomplete and the
+                                    // status unavailable.
+                                    statusList["idx"]
+                                        ?.let { runCatching { it.AsInt32() }.getOrNull() }
+                                        ?.let { put("idx", JsonPrimitive(it)) }
+                                    statusList["uri"]?.let { put("uri", JsonPrimitive(it.AsString())) }
+                                },
+                            )
+                        },
+                    )
+                }
+            }
+        }.takeIf { it.isNotEmpty() }
+    }
+
     fun declaredType(format: String, raw: String): String? = try {
         if (format == "mso_mdoc") {
             MdocCbor.parseStoredCredential(Base64.getUrlDecoder().decode(padBase64(raw)))?.docType

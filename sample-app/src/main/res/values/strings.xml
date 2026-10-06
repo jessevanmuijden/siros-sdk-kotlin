@@ -58,6 +58,7 @@
     <string name="credential_detail_tab_raw">Raw</string>
     <string name="credential_detail_issuer">Issuer</string>
     <string name="credential_detail_format">Format</string>
+    <string name="credential_detail_holder_binding">Holder binding</string>
     <string name="credential_detail_type">Type</string>
     <string name="credential_detail_issued">Issued</string>
     <string name="credential_detail_expires">Expires</string>
@@ -67,6 +68,16 @@
     <string name="credential_detail_raw_disclosure">Disclosure %1$d</string>
     <string name="copy_to_clipboard">Copy to clipboard</string>
     <string name="copied_to_clipboard">Copied to clipboard</string>
+    <!-- The outcomes of DIIP's Validity and Revocation Algorithm: the
+         validFrom/validUntil window, and the issuer's Token Status List. -->
+    <string name="credential_status_expired">Expired</string>
+    <string name="credential_status_not_yet_valid">Not yet valid</string>
+    <string name="credential_status_revoked">Revoked</string>
+    <string name="credential_status_suspended">Suspended</string>
+    <string name="credential_status_expired_detail">This credential has expired</string>
+    <string name="credential_status_not_yet_valid_detail">This credential is not valid yet</string>
+    <string name="credential_status_revoked_detail">This credential has been revoked by its issuer</string>
+    <string name="credential_status_suspended_detail">This credential has been suspended by its issuer</string>
     <string name="credential_renew">Renew</string>
     <string name="credential_renew_not_possible">No refresh possible</string>
     <string name="credential_detail_delete">Delete Credential</string>
@@ -83,6 +94,7 @@
     <string name="settings_tenant_id">Tenant</string>
     <string name="settings_credentials_stored">Credentials stored</string>
     <string name="settings_app_version">App version</string>
+    <string name="settings_interop_profiles">Interop profiles</string>
     <string name="settings_credential_details">Credential details</string>
     <string name="settings_credential_details_description">Show raw claims and signed credential data when tapping a credential</string>
     <string name="settings_diagnostic_messages">Diagnostic messages</string>
@@ -244,4 +256,6 @@
     <string name="wallet_blocked_deactivated_title">This wallet was deactivated</string>
     <string name="wallet_blocked_deactivated_message">Every device was revoked and the wallet\'s data was erased on the server, so this passkey can no longer sign in. Enroll again to start over.</string>
     <string name="wallet_blocked_enroll_again">Enroll again</string>
+    <string name="credential_status_unknown">Unknown</string>
+    <string name="credential_status_unknown_detail">This credential’s status could not be determined</string>
 </resources>

@@ -117,7 +117,7 @@ class FlowClientTest {
         every { session.notifications() } returns notifications
         every { keystore.isUnlocked } returns true
 
-        coEvery { keystore.generateProof("https://issuer.example.com", "nonce-1") } returns "proof.jwt"
+        coEvery { keystore.generateProof("https://issuer.example.com", "nonce-1", false, null) } returns "proof.jwt"
         coEvery { session.sendNotification(any(), any()) } returns Unit
 
         val client = FlowClient(session, keystore, autoSign = true)
@@ -137,7 +137,11 @@ class FlowClientTest {
         )
 
         coVerify(timeout = 2_000, exactly = 1) {
-            keystore.generateProof("https://issuer.example.com", "nonce-1")
+            // The four-argument form: FlowClient always states the holder
+            // binding, which is null here because no holderBindingFor was
+            // supplied. Verifying the shorter overload would watch a method
+            // this code path never calls.
+            keystore.generateProof("https://issuer.example.com", "nonce-1", false, null)
         }
         coVerify(timeout = 2_000, exactly = 1) {
             session.sendNotification(
@@ -159,7 +163,7 @@ class FlowClientTest {
         every { session.notifications() } returns notifications
         every { keystore.isUnlocked } returns true
 
-        coEvery { keystore.generateProof(any(), any()) } throws RuntimeException("keystore locked")
+        coEvery { keystore.generateProof(any(), any(), any(), any()) } throws RuntimeException("keystore locked")
 
         val client = FlowClient(session, keystore, autoSign = true)
         client.start()

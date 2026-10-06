@@ -25,7 +25,10 @@ android {
 }
 
 dependencies {
-    implementation(project(":sdk:transport"))
+    // `api`, not `implementation`: OID4VCIFlowParams exposes AuthorizationDetail
+    // (from :sdk:credentials, re-exported by :sdk:transport) in its public API,
+    // so a consumer of the flow artifact has to be able to resolve that type.
+    api(project(":sdk:transport"))
     implementation(project(":sdk:keystore"))
     implementation(project(":sdk:auth"))
     implementation(libs.kotlinx.serialization.json)

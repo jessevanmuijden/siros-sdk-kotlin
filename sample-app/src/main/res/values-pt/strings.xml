@@ -228,4 +228,16 @@
     <string name="wallet_blocked_deactivated_title">Esta carteira foi desativada</string>
     <string name="wallet_blocked_deactivated_message">Todos os dispositivos foram revogados e os dados da carteira foram apagados no servidor, pelo que esta passkey já não pode iniciar sessão. Registe-se novamente para começar de novo.</string>
     <string name="wallet_blocked_enroll_again">Registar novamente</string>
+    <string name="credential_status_expired">Expirada</string>
+    <string name="credential_status_not_yet_valid">Ainda não válida</string>
+    <string name="credential_status_revoked">Revogada</string>
+    <string name="credential_status_suspended">Suspensa</string>
+    <string name="credential_status_expired_detail">Esta credencial expirou</string>
+    <string name="credential_status_not_yet_valid_detail">Esta credencial ainda não é válida</string>
+    <string name="credential_status_revoked_detail">Esta credencial foi revogada pelo emissor</string>
+    <string name="credential_status_suspended_detail">Esta credencial foi suspensa pelo emissor</string>
+    <string name="settings_interop_profiles">Perfis de interoperabilidade</string>
+    <string name="credential_detail_holder_binding">Vinculação do titular</string>
+    <string name="credential_status_unknown">Desconhecido</string>
+    <string name="credential_status_unknown_detail">Não foi possível determinar o estado desta credencial</string>
 </resources>

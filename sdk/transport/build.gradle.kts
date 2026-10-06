@@ -25,7 +25,10 @@ android {
 }
 
 dependencies {
-    implementation(project(":sdk:credentials"))
+    // `api`, not `implementation`: FlowStartMessage.authorizationDetails is a
+    // public field of type AuthorizationDetail, so a consumer of this module
+    // needs that type on its compile classpath.
+    api(project(":sdk:credentials"))
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.okhttp)

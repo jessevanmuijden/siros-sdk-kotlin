@@ -4,6 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import org.siros.sdk.credentials.interop.AuthorizationDetail
 
 /** Events emitted during a credential flow. SDK consumer handles UI. */
 sealed class FlowEvent {
@@ -78,6 +79,16 @@ data class OID4VCIFlowParams(
     val credentialOfferUri: String? = null,
     val credentialOffer: JsonObject? = null,
     val issuerUrl: String? = null,
+    /**
+     * The OID4VCI `authorization_details` to ask the Issuer with - see
+     * [org.siros.sdk.credentials.interop.AuthorizationDetails].
+     *
+     * Sent on flow start because the engine, not this SDK, builds the
+     * Authorization Request; the wallet states the intent and the engine
+     * forwards it. Null omits the field entirely, which the engine reads as
+     * "do not ask this way" and leaves the `scope` path untouched.
+     */
+    val authorizationDetails: List<AuthorizationDetail>? = null,
 )
 
 /** Parameters for starting an OID4VP flow. */

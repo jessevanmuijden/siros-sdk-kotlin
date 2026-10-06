@@ -1,10 +1,18 @@
 package org.siros.sdk.keystore
 
+import org.siros.sdk.credentials.KeystoreException
 import com.nimbusds.jose.JWSAlgorithm
 import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jwt.JWTClaimsSet
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import org.siros.sdk.credentials.interop.DidRelationship
+import org.siros.sdk.credentials.interop.HolderBinding
+import org.siros.sdk.credentials.interop.InteropProfile
+import org.siros.sdk.credentials.interop.createDidJwk
+import org.siros.sdk.credentials.interop.didJwkKeyId
+import org.siros.sdk.credentials.interop.resolveDidJwk
+import timber.log.Timber
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.Date
@@ -72,6 +80,16 @@ class WscdKeystoreAdapter private constructor(
      * adapter a container it does not own.
      */
     private val credentialsKeystore: JweKeystore,
+    /**
+     * The interoperability profile this keystore signs for - see
+     * [InteropProfile]. Unlike [JweKeystore], the key ids themselves come from
+     * the WSCD (which assigns RFC 7638 thumbprints) and are not changed by
+     * this setting; what it controls is the identifier presented to Issuers.
+     * A `did:jwk` carries the public key inside the identifier, so a
+     * `cnf.kid` naming one can always be mapped back to the WSCD key that
+     * signs for it - see [resolveSignerKey].
+     */
+    private val profile: InteropProfile = InteropProfile.DEFAULT,
 ) : KeystoreManager,
     WscdManager,
     // Extension state has to land in the same blob the credentials do, or
@@ -80,6 +98,9 @@ class WscdKeystoreAdapter private constructor(
     ExtensionStore by credentialsKeystore {
 
     constructor(signer: Signer) : this(signer, JweKeystore())
+
+    constructor(signer: Signer, profile: InteropProfile) :
+        this(signer, JweKeystore(profile = profile), profile)
 
     /**
      * Non-null only when [signer] is itself WSCD-backed (i.e. a
@@ -200,7 +221,16 @@ class WscdKeystoreAdapter private constructor(
         return signer.sign(keyId, payload)
     }
 
-    override suspend fun generateProof(audience: String, nonce: String, freshKey: Boolean): String {
+    /** The pre-DIIP call shape: this keystore's own profile decides. */
+    override suspend fun generateProof(audience: String, nonce: String, freshKey: Boolean): String =
+        generateProof(audience, nonce, freshKey, holderBinding = null)
+
+    override suspend fun generateProof(
+        audience: String,
+        nonce: String,
+        freshKey: Boolean,
+        holderBinding: HolderBinding?,
+    ): String {
         checkUnlocked()
         var keys = signer.listKeys()
         if (keys.isEmpty() || freshKey) {
@@ -217,16 +247,30 @@ class WscdKeystoreAdapter private constructor(
             ?: throw IllegalStateException("No keys available")
         val pubKeyJson = String(signer.exportPublicKey(key.keyId), Charsets.UTF_8)
 
-        val header = JWSHeader.Builder(jwsAlgorithm(key.algorithm))
-            .type(com.nimbusds.jose.JOSEObjectType("openid4vci-proof+jwt"))
-            .jwk(com.nimbusds.jose.jwk.JWK.parse(pubKeyJson))
-            .build()
+        // DIIP requires the `jwt` proof type to carry the Holder's did:jwk as
+        // `iss` and to name the key with a `kid` from that DID document; HAIP
+        // carries the key in the header instead. The caller may know which
+        // this issuer speaks; when it does not, this keystore's own profile
+        // decides. The DID is derived from the public key rather than stored:
+        // a did:jwk *is* its key, so it needs no bookkeeping and cannot drift
+        // out of sync with the WSCD.
+        val did = holderDidFor(pubKeyJson, holderBinding ?: profile.holderBinding)
 
-        val claims = JWTClaimsSet.Builder()
+        val headerBuilder = JWSHeader.Builder(jwsAlgorithm(key.algorithm))
+            .type(com.nimbusds.jose.JOSEObjectType("openid4vci-proof+jwt"))
+        if (did != null) {
+            headerBuilder.keyID(didJwkKeyId(did))
+        } else {
+            headerBuilder.jwk(com.nimbusds.jose.jwk.JWK.parse(pubKeyJson))
+        }
+        val header = headerBuilder.build()
+
+        val claimsBuilder = JWTClaimsSet.Builder()
             .audience(audience)
             .issueTime(Date())
             .claim("nonce", nonce)
-            .build()
+        did?.let { claimsBuilder.issuer(it) }
+        val claims = claimsBuilder.build()
 
         val signingInput = "${base64Url(header.toJSONObject())}.${base64Url(claims.toJSONObject())}"
         val signature = signer.sign(key.keyId, signingInput.toByteArray(Charsets.UTF_8))
@@ -330,7 +374,13 @@ class WscdKeystoreAdapter private constructor(
     ): String {
         checkUnlocked()
         val keys = signer.listKeys()
-        val key = selectSigningKey(keys, kid)
+        // The credential's own `cnf` is authoritative about which key it is
+        // bound to and how that key is named - an issuer may bind by
+        // `cnf.jwk` even when this wallet presents did:jwk identifiers, and
+        // vice versa.
+        val cnf = cnfOf(credential)
+        val cnfKid = resolveCnfKid(cnf)
+        val key = selectSigningKey(keys, kid ?: cnfKid)
 
         // Split SD-JWT
         val parts = credential.split("~")
@@ -367,10 +417,19 @@ class WscdKeystoreAdapter private constructor(
 
         // KB-JWT
         val pubKeyJson = String(signer.exportPublicKey(key.keyId), Charsets.UTF_8)
-        val header = JWSHeader.Builder(jwsAlgorithm(key.algorithm))
+        // When the credential binds the holder by name (`cnf.kid`, which is
+        // what DIIP requires), the KB-JWT names the same verification method
+        // rather than re-embedding the key. A `cnf.jwk` binding keeps the
+        // embedded-key form it was issued under.
+        val bindsByKid = cnf?.get("jwk") == null && cnfKid != null
+        val headerBuilder = JWSHeader.Builder(jwsAlgorithm(key.algorithm))
             .type(com.nimbusds.jose.JOSEObjectType("kb+jwt"))
-            .jwk(com.nimbusds.jose.jwk.JWK.parse(pubKeyJson))
-            .build()
+        if (bindsByKid) {
+            headerBuilder.keyID(cnfKid)
+        } else {
+            headerBuilder.jwk(com.nimbusds.jose.jwk.JWK.parse(pubKeyJson))
+        }
+        val header = headerBuilder.build()
 
         val claims = JWTClaimsSet.Builder()
             .audience(audience)
@@ -657,13 +716,79 @@ class WscdKeystoreAdapter private constructor(
      * legacy no-credential form), where "first available key" is the only
      * meaningful choice.
      */
-    private fun selectSigningKey(keys: List<SignerKeyInfo>, kid: String?): SignerKeyInfo {
+    private suspend fun selectSigningKey(keys: List<SignerKeyInfo>, kid: String?): SignerKeyInfo {
         if (kid != null) {
-            return keys.firstOrNull { it.keyId == kid }
+            return resolveSignerKey(keys, kid)
                 ?: throw IllegalStateException("Signing key '$kid' not found - this credential's bound key is unavailable")
         }
         return keys.firstOrNull() ?: throw IllegalStateException("No keys available for signing")
     }
+
+    /**
+     * Map the `kid` a credential names its holder key by onto the WSCD key
+     * that signs for it.
+     *
+     * The WSCD assigns its own key ids (RFC 7638 thumbprints), but a
+     * credential may name the key any of three ways: by that id, by a
+     * `did:jwk` verification method, or by a thumbprint computed elsewhere
+     * (an mdoc device key, an SD-JWT `cnf.jwk`). A `did:jwk` resolves
+     * offline - the key is the identifier - so all three reduce to a
+     * thumbprint comparison, and no mapping needs to be persisted.
+     */
+    private suspend fun resolveSignerKey(keys: List<SignerKeyInfo>, kid: String): SignerKeyInfo? {
+        keys.firstOrNull { it.keyId == kid }?.let { return it }
+
+        val wanted = thumbprintOfDidJwk(kid) ?: kid
+        keys.firstOrNull { it.keyId == wanted }?.let { return it }
+
+        return keys.firstOrNull { key ->
+            runCatching {
+                val jwk = com.nimbusds.jose.jwk.JWK.parse(
+                    String(signer.exportPublicKey(key.keyId), Charsets.UTF_8),
+                )
+                jwk.toPublicJWK().computeThumbprint().toString() == wanted
+            }.getOrDefault(false)
+        }
+    }
+
+    /**
+     * The JWK thumbprint of the key a `did:jwk` embeds, or null if [kid] is
+     * not one of its verification methods - see
+     * [org.siros.sdk.keystore.thumbprintOfDidJwk], which this mirrors for the
+     * WSCD path. A did:jwk document has only `#0`, so any other fragment names
+     * nothing and must not select a key.
+     */
+    private fun thumbprintOfDidJwk(kid: String): String? =
+        org.siros.sdk.keystore.thumbprintOfDidJwk(kid)
+
+    /**
+     * The `did:jwk` for a public key, when this issuance identifies the
+     * holder that way. Null for [HolderBinding.EMBEDDED_JWK], where the proof
+     * carries the key instead of naming it.
+     */
+    private fun holderDidFor(publicKeyJson: String, binding: HolderBinding): String? {
+        if (binding != HolderBinding.DID_JWK) return null
+        return runCatching {
+            createDidJwk(Json.parseToJsonElement(publicKeyJson) as kotlinx.serialization.json.JsonObject)
+        }.getOrElse {
+            // No fallback: DID_JWK is what this issuance negotiated, and the
+            // embedded-jwk shape is a different profile the Issuer did not
+            // agree to. Falling back would send a proof the Issuer cannot
+            // verify and report it as success.
+            throw KeystoreException("Could not derive a did:jwk for the negotiated DIIP holder binding", it)
+        }
+    }
+
+    /**
+     * The `cnf` claim of an SD-JWT credential, or null if it has none.
+     */
+    private fun cnfOf(credential: String): kotlinx.serialization.json.JsonObject? = runCatching {
+        val payload = credential.substringBefore('~').split('.').getOrNull(1) ?: return@runCatching null
+        val padded = payload.padEnd((payload.length + 3) / 4 * 4, '=')
+        val decoded = String(Base64.getUrlDecoder().decode(padded), Charsets.UTF_8)
+        (Json.parseToJsonElement(decoded) as? kotlinx.serialization.json.JsonObject)
+            ?.get("cnf") as? kotlinx.serialization.json.JsonObject
+    }.getOrNull()
 
     /**
      * Translate SIROS's internal WSCD key-storage/user-authentication

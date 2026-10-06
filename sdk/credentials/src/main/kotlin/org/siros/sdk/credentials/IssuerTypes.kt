@@ -108,6 +108,20 @@ data class CredentialConfiguration(
     val doctype: String? = null,
     val scope: String? = null,
     @SerialName("credential_metadata") val credentialMetadata: CredentialDisplayMetadata? = null,
+    // Appended rather than grouped with the OID4VCI fields above: this is a
+    // data class, so a property's position is part of the binary API
+    // (componentN, copy, the constructor descriptor).
+    /**
+     * How this Issuer will accept the Holder's key being identified -
+     * OID4VCI's `cryptographic_binding_methods_supported`, e.g. `["jwk"]`
+     * (HAIP) or `["did:jwk"]` (DIIP).
+     *
+     * This is the field that lets one wallet serve both ecosystems without a
+     * setting: the Issuer declares what it can verify, and the wallet shapes
+     * its proof to match. See `HolderBinding.negotiate`.
+     */
+    @SerialName("cryptographic_binding_methods_supported")
+    val cryptographicBindingMethodsSupported: List<String>? = null,
 )
 
 /**
@@ -170,4 +184,11 @@ data class CredentialOffer(
     val preAuthorizedCode: String? = null,
     /** Optional user PIN / tx_code required with the pre-authorized code. */
     val txCode: String? = null,
+    /**
+     * The Issuer's advertised `cryptographic_binding_methods_supported` for
+     * this configuration, carried from its metadata so the wallet can shape
+     * the OID4VCI proof to what this Issuer can verify - see
+     * `HolderBinding.negotiate`. Empty when the Issuer said nothing.
+     */
+    val cryptographicBindingMethodsSupported: List<String> = emptyList(),
 )

@@ -1,6 +1,10 @@
 package org.siros.sdk.keystore
 
 import org.siros.sdk.credentials.KeystoreException
+import org.siros.sdk.credentials.interop.createDidJwk
+import org.siros.sdk.credentials.interop.HolderBinding
+import org.siros.sdk.credentials.interop.didJwkKeyId
+import org.siros.sdk.credentials.interop.InteropProfile
 import com.nimbusds.jose.EncryptionMethod
 import com.nimbusds.jose.JWEAlgorithm
 import com.nimbusds.jose.JWEHeader
@@ -71,10 +75,42 @@ data class CredentialRefreshTokenEntry(
  */
 class JweKeystore(
     private val json: Json = Json { ignoreUnknownKeys = true },
+    /**
+     * The interoperability profile this keystore signs for - see
+     * [InteropProfile]. It decides how a new key pair is named and, unless a
+     * caller overrides it per issuance, how the Holder's key is named in an
+     * OID4VCI proof. Defaults to HAIP, which is what this SDK has always
+     * sent.
+     */
+    private val profile: InteropProfile = InteropProfile.DEFAULT,
+    /**
+     * How a newly generated key pair is named - see [DidKeyVersion]. Follows
+     * [profile] unless a wallet needs something else: a `did:jwk` for DIIP, a
+     * JWK thumbprint for HAIP. Keys already in the container keep whatever id
+     * they were stored with regardless of this setting, so changing it never
+     * orphans a credential.
+     */
+    private val didKeyVersion: DidKeyVersion = DidKeyVersion.forProfile(profile),
 ) : KeystoreManager, ExtensionStore {
+
+    /**
+     * The pre-DIIP constructor shape, kept so existing Java and already-compiled
+     * consumers still link: Kotlin default arguments only help callers
+     * recompiled against the new primary constructor, and adding `profile`
+     * changed its JVM descriptor. Behaves exactly as before - HAIP, keys named
+     * by JWK thumbprint.
+     */
+    constructor(json: Json) : this(json, InteropProfile.DEFAULT)
 
     private val mutex = Mutex()
     private var keys: MutableMap<String, ECKey> = mutableMapOf()
+
+    // kid -> the DID that key pair is published under. Kept alongside [keys]
+    // rather than recomputed on export, because a key read back from the
+    // container must round-trip the DID it was stored with: recomputing it
+    // under a different [didKeyVersion] would silently re-identify a key
+    // that credentials are already bound to.
+    private var keyDids: MutableMap<String, String> = mutableMapOf()
     private var credentials: MutableMap<Long, String> = mutableMapOf()
     private var presentationRecords: MutableMap<Long, String> = mutableMapOf()
     @Volatile private var mainKey: SecretKey? = null
@@ -236,6 +272,8 @@ class JweKeystore(
                     // Ensure the key has the correct kid set
                     val keyWithId = ECKey.Builder(ecKey).keyID(kid).build()
                     keys[kid] = keyWithId
+                    (keypairObj["did"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                        ?.let { keyDids[kid] = it }
                 } catch (e: Exception) {
                     Timber.w(e, "Failed to parse keypair $kid")
                 }
@@ -397,6 +435,7 @@ class JweKeystore(
         keys.clear()
         credentials.clear()
         presentationRecords.clear()
+        keyDids.clear()
         wscdCredentials.clear()
         extensions.clear()
         credentialRefreshTokens.clear()
@@ -408,12 +447,9 @@ class JweKeystore(
 
     override suspend fun generateKey(algorithm: String): String = mutex.withLock {
         requireUnlocked()
-        val ecKey = ECKeyGenerator(Curve.P_256).generate()
-        val keyId = ecKey.computeThumbprint().toString()
-        val keyWithId = ECKey.Builder(ecKey).keyID(keyId).build()
-        keys[keyId] = keyWithId
-        Timber.d("Generated key: $keyId")
-        keyId
+        val keyWithId = registerNewKey()
+        Timber.d("Generated key: ${keyWithId.keyID}")
+        keyWithId.keyID
     }
 
     /**
@@ -558,29 +594,79 @@ class JweKeystore(
         jwsObject.serialize().toByteArray(Charsets.UTF_8)
     }
 
-    override suspend fun generateProof(audience: String, nonce: String, freshKey: Boolean): String = mutex.withLock {
+    /** The pre-DIIP call shape: this keystore's own profile decides. */
+    override suspend fun generateProof(audience: String, nonce: String, freshKey: Boolean): String =
+        generateProof(audience, nonce, freshKey, holderBinding = null)
+
+    override suspend fun generateProof(
+        audience: String,
+        nonce: String,
+        freshKey: Boolean,
+        holderBinding: HolderBinding?,
+    ): String = mutex.withLock {
         requireUnlocked()
-        val key = keys.values.firstOrNull()
-            ?: run {
+        // `freshKey` means batch issuance: each credential in the batch must
+        // be bound to its own key, or every copy shares one holder key and
+        // presenting them is linkable. Honouring it also keeps the recorded
+        // per-credential `kid` meaningful.
+        val key = if (freshKey) {
+            registerNewKey()
+        } else {
+            keys.values.firstOrNull() ?: run {
                 Timber.i("No keys available, generating a new key for proof")
-                val ecKey = ECKeyGenerator(Curve.P_256).generate()
-                val keyId = ecKey.computeThumbprint().toString()
-                val keyWithId = ECKey.Builder(ecKey).keyID(keyId).build()
-                keys[keyId] = keyWithId
-                keyWithId
+                registerNewKey()
             }
+        }
 
         Timber.d("generateProof: building claims for audience=$audience")
-        val claims = JWTClaimsSet.Builder()
+        // DIIP requires the `jwt` proof type to carry the Holder's did:jwk as
+        // `iss` and to name the key with a `kid` from that DID document; HAIP
+        // carries the key in the header instead. The caller may know which
+        // this issuer speaks; when it does not, this keystore's own profile
+        // decides.
+        //
+        // The DID is derived from the key rather than read from [keyDids],
+        // exactly as WscdKeystoreAdapter does it. A did:jwk *is* its public
+        // key, so any key pair has one whether or not it was created under
+        // [DidKeyVersion.JWK]. Requiring a stored did:jwk here made the whole
+        // negotiation inert for the default wallet: the key version follows
+        // the interop profile, which defaults to HAIP, so a negotiated
+        // DID_JWK could never be satisfied and every proof fell back to the
+        // HAIP shape that a DIIP-only Issuer rejects. What a key was
+        // *created* as is a storage question; how this issuance names its
+        // holder is not.
+        //
+        // For a keystore already on [DidKeyVersion.JWK] this is the same
+        // value it stored - createDidJwk is deterministic over the canonical
+        // public JWK - so nothing changes there.
+        val binding = holderBinding ?: profile.holderBinding
+        val publicJwk = key.toPublicJWK()
+        val did = if (binding == HolderBinding.DID_JWK) {
+            // No fallback: DID_JWK is what this issuance negotiated, and the
+            // embedded-jwk shape is a different profile the Issuer did not
+            // agree to. Failing here says so; falling back would send a proof
+            // the Issuer cannot verify and report it as success.
+            runCatching { createDidJwk(publicJwk.toJSONString()) }.getOrElse {
+                throw KeystoreException("Could not derive a did:jwk for the negotiated DIIP holder binding", it)
+            }
+        } else {
+            null
+        }
+        val claimsBuilder = JWTClaimsSet.Builder()
             .audience(audience)
             .issueTime(Date())
             .claim("nonce", nonce)
-            .build()
+        did?.let { claimsBuilder.issuer(it) }
+        val claims = claimsBuilder.build()
 
-        val header = JWSHeader.Builder(JWSAlgorithm.ES256)
+        val headerBuilder = JWSHeader.Builder(JWSAlgorithm.ES256)
             .type(com.nimbusds.jose.JOSEObjectType("openid4vci-proof+jwt"))
-            .jwk(key.toPublicJWK())
-            .build()
+        if (did != null) {
+            headerBuilder.keyID(didJwkKeyId(did))
+        } else {
+            headerBuilder.jwk(publicJwk)
+        }
+        val header = headerBuilder.build()
 
         Timber.d("generateProof: signing JWT with key ${key.keyID}")
         val jwt = SignedJWT(header, claims)
@@ -664,7 +750,14 @@ class JweKeystore(
         kid: String?,
     ): String = mutex.withLock {
         requireUnlocked()
-        val key = selectSigningKey(kid)
+        // The credential's own `cnf` is authoritative about which key it is
+        // bound to and how that key is named. An issuer may bind by `cnf.jwk`
+        // even when this wallet names its keys by did:jwk URL (and vice
+        // versa), so both the lookup and the KB-JWT header follow the
+        // credential rather than this wallet's configuration.
+        val cnf = cnfOf(credential)
+        val cnfKid = resolveCnfKid(cnf)
+        val key = selectSigningKey(kid ?: cnfKid)
 
         // Split the SD-JWT into parts: IssuerJWT~disclosure1~disclosure2~...~
         val parts = credential.split("~")
@@ -693,13 +786,21 @@ class JweKeystore(
             .digest(sdJwtPresentation.toByteArray(Charsets.US_ASCII))
         val sdHash = Base64.getUrlEncoder().withoutPadding().encodeToString(sdHashBytes)
 
-        // Build KB-JWT with typ: "kb+jwt", alg: "ES256", jwk: <public key>
-        // Per RFC 9901 + real-world interop: jwk MUST be in header, d MUST be stripped
-        val publicJwk = key.toPublicJWK()
-        val kbHeader = JWSHeader.Builder(JWSAlgorithm.ES256)
+        // KB-JWT header: `typ: "kb+jwt"`, `alg: "ES256"`, and the holder key.
+        // When the credential binds the holder by value (`cnf.jwk`) the key
+        // goes in the header as a JWK with any private material stripped -
+        // RFC 9901 plus real-world interop. When it binds by name (`cnf.kid`,
+        // which is what DIIP requires), the KB-JWT names the same
+        // verification method instead of re-embedding the key.
+        val bindsByKid = cnf?.get("jwk") == null && cnfKid != null
+        val kbHeaderBuilder = JWSHeader.Builder(JWSAlgorithm.ES256)
             .type(com.nimbusds.jose.JOSEObjectType("kb+jwt"))
-            .jwk(publicJwk)
-            .build()
+        if (bindsByKid) {
+            kbHeaderBuilder.keyID(cnfKid)
+        } else {
+            kbHeaderBuilder.jwk(key.toPublicJWK())
+        }
+        val kbHeader = kbHeaderBuilder.build()
 
         val kbClaims = JWTClaimsSet.Builder()
             .audience(audience)
@@ -714,6 +815,19 @@ class JweKeystore(
         // Assemble: sdJwtPresentation + KB-JWT (no separator — presentation already ends with ~)
         sdJwtPresentation + kbJwt.serialize()
     }
+
+    /**
+     * The `cnf` claim of an SD-JWT credential, or null if it has none (or is
+     * not parseable - a credential this wallet cannot read is one it cannot
+     * sign a presentation for either, and [selectSigningKey] will say so).
+     */
+    private fun cnfOf(credential: String): kotlinx.serialization.json.JsonObject? = runCatching {
+        val payload = credential.substringBefore('~').split('.').getOrNull(1) ?: return@runCatching null
+        val padded = payload.padEnd((payload.length + 3) / 4 * 4, '=')
+        val decoded = Base64.getUrlDecoder().decode(padded).toString(Charsets.UTF_8)
+        (json.parseToJsonElement(decoded) as? kotlinx.serialization.json.JsonObject)
+            ?.get("cnf") as? kotlinx.serialization.json.JsonObject
+    }.getOrNull()
 
     /**
      * Filter SD-JWT disclosures to only those matching the requested claim names.
@@ -800,7 +914,21 @@ class JweKeystore(
                                         }
                                     }
                                 }
-                                put("did", kotlinx.serialization.json.JsonPrimitive(preservedDid ?: computeDidKey(ecKey)))
+                                // The last fallback follows [didKeyVersion],
+                                // not did:key unconditionally. A key folded in
+                                // by importKeypairJwk has no keyDids entry, so
+                                // a DIIP wallet would otherwise publish it
+                                // under the legacy did:key and every client
+                                // reading this container afterwards would see
+                                // the wrong holder identity for it.
+                                put(
+                                    "did",
+                                    kotlinx.serialization.json.JsonPrimitive(
+                                        keyDids[kid]
+                                            ?: preservedDid
+                                            ?: defaultDidFor(ecKey),
+                                    ),
+                                )
                                 put("alg", kotlinx.serialization.json.JsonPrimitive("ES256"))
                                 // Export public key as JWK
                                 val pubJwk = json.parseToJsonElement(ecKey.toPublicJWK().toJSONString())
@@ -1020,14 +1148,11 @@ class JweKeystore(
         requireUnlocked()
         require(count >= 1) { "count must be >= 1" }
         (1..count).map {
-            val ecKey = ECKeyGenerator(Curve.P_256).generate()
-            val keyId = ecKey.computeThumbprint().toString()
-            val keyWithId = ECKey.Builder(ecKey).keyID(keyId).build()
-            keys[keyId] = keyWithId
+            val keyWithId = registerNewKey()
             val pubJwk = kotlinx.serialization.json.Json.parseToJsonElement(
                 keyWithId.toPublicJWK().toJSONString()
             ) as kotlinx.serialization.json.JsonObject
-            KeypairInfo(keyId = keyId, publicKeyJWK = pubJwk)
+            KeypairInfo(keyId = keyWithId.keyID, publicKeyJWK = pubJwk)
         }
     }
 
@@ -1036,13 +1161,7 @@ class JweKeystore(
         require(count >= 1) { "count must be >= 1" }
         // Inlined key generation (not generateKeypairs(), which also takes
         // this mutex - Mutex isn't reentrant).
-        val generated = (1..count).map {
-            val ecKey = ECKeyGenerator(Curve.P_256).generate()
-            val keyId = ecKey.computeThumbprint().toString()
-            val keyWithId = ECKey.Builder(ecKey).keyID(keyId).build()
-            keys[keyId] = keyWithId
-            keyWithId
-        }
+        val generated = (1..count).map { registerNewKey() }
         // Self-attestation: this is a pure in-memory software keystore with
         // no hardware backing or user-authentication gate, so the only
         // truthful claim is the baseline "basic" attack-potential level.
@@ -1081,23 +1200,67 @@ class JweKeystore(
      */
     private fun selectSigningKey(kid: String?): ECKey {
         if (kid != null) {
-            return keys[kid]
+            return findKeypairByKid(kid)
                 ?: throw KeystoreException("Signing key '$kid' not found - this credential's bound key is unavailable")
         }
         return keys.values.firstOrNull() ?: run {
             Timber.i("No keys available, generating a new key for VP signing")
-            val ecKey = ECKeyGenerator(Curve.P_256).generate()
-            val keyId = ecKey.computeThumbprint().toString()
-            val keyWithId = ECKey.Builder(ecKey).keyID(keyId).build()
-            keys[keyId] = keyWithId
-            keyWithId
+            registerNewKey()
         }
     }
+
+    /**
+     * Find a stored key pair by the `kid` a credential refers to it by.
+     *
+     * Matches on the stored id first, then falls back to comparing JWK
+     * thumbprints - see [keypairMatchesKid] for why a wallet naming its keys
+     * by `did:jwk` URL still has to answer to a thumbprint.
+     */
+    private fun findKeypairByKid(kid: String): ECKey? {
+        keys[kid]?.let { return it }
+        return keys.entries.firstOrNull { (storedKid, key) ->
+            keypairMatchesKid(storedKid, key, kid)
+        }?.value
+    }
+
+    /**
+     * Generate a key pair, name it per [didKeyVersion], and add it to the
+     * in-memory state. The caller is already holding [mutex].
+     */
+    private fun registerNewKey(): ECKey {
+        val ecKey = ECKeyGenerator(Curve.P_256).generate()
+        val publicJwk = json.parseToJsonElement(ecKey.toPublicJWK().toJSONString())
+            as kotlinx.serialization.json.JsonObject
+        val identity = deriveKeypairIdentity(
+            publicJwk = publicJwk,
+            version = didKeyVersion,
+            legacyDid = { computeDidKey(ecKey) },
+            thumbprint = { ecKey.computeThumbprint().toString() },
+        )
+        val keyWithId = ECKey.Builder(ecKey).keyID(identity.kid).build()
+        keys[identity.kid] = keyWithId
+        keyDids[identity.kid] = identity.did
+        return keyWithId
+    }
+
+    /** The DID a stored key pair is published under, if it has one. */
+    internal fun didForKid(kid: String): String? = keyDids[kid]
 
     /**
      * Compute the did:key identifier for a P-256 EC key.
      * Format: did:key:zDn... (Multicodec 0x1200 for P-256 public key, base58btc).
      */
+    /**
+     * The DID a key pair is published under when nothing has recorded one -
+     * whichever identifier [didKeyVersion] names keys by.
+     */
+    private fun defaultDidFor(key: com.nimbusds.jose.jwk.ECKey): String =
+        if (didKeyVersion.namesKeysByDidUrl) {
+            runCatching { createDidJwk(key.toPublicJWK().toJSONString()) }.getOrElse { computeDidKey(key) }
+        } else {
+            computeDidKey(key)
+        }
+
     private fun computeDidKey(ecKey: ECKey): String {
         val pub = ecKey.toECPublicKey()
         // Compressed point: 0x02/0x03 prefix + 32-byte x coordinate

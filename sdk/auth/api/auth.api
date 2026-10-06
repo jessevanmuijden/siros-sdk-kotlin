@@ -220,6 +220,7 @@ public final class org/siros/sdk/auth/BackendApiClient {
 	public final fun requestKeyAttestation (Ljava/util/List;Ljava/lang/String;Lorg/siros/sdk/credentials/SignerSecurityProperties;Ljava/lang/String;Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun requestKeyAttestation$default (Lorg/siros/sdk/auth/BackendApiClient;Ljava/util/List;Ljava/lang/String;Lorg/siros/sdk/credentials/SignerSecurityProperties;Ljava/lang/String;Ljava/lang/String;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun requestWIAChallenge (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun resolveDid (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun resolveIssuer (Ljava/lang/String;Ljava/util/List;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun resolveIssuer$default (Lorg/siros/sdk/auth/BackendApiClient;Ljava/lang/String;Ljava/util/List;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun resolveKey (Ljava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
