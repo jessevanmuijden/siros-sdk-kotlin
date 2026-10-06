@@ -171,6 +171,11 @@
     <string name="error_idv_liveness_failed">Livlighetskontroll misslyckades. Försök igen.</string>
     <string name="error_idv_verification_failed">Identitetsverifieringen misslyckades. Försök igen.</string>
     <string name="error_idv_network_error">Nätverksfel under identitetsverifiering.</string>
+    <string name="error_idv_nfc_not_requested">Den här handlingen kan inte verifieras via sitt chip. Använd ett e-pass eller ett id-kort vars chip kan läsas.</string>
+    <string name="error_idv_nfc_device_not_capable">Enheten kunde inte läsa chipet. Kontrollera att NFC är påslaget och försök igen.</string>
+    <string name="error_idv_nfc_skipped">Chipet i din handling måste läsas. Försök igen och håll handlingen mot telefonen när du ombeds.</string>
+    <string name="error_idv_nfc_chip_read_failed">Chipet i din handling kunde inte läsas. Försök igen och håll handlingen stilla mot telefonen.</string>
+    <string name="error_idv_nfc_not_authenticated">Chipet i din handling kunde inte verifieras, så ingen legitimation utfärdades.</string>
     <string name="error_ctap2_not_available">Transport för säkerhetsnyckel är inte tillgänglig.</string>
     <string name="error_ctap2_connection_failed">Det gick inte att ansluta till säkerhetsnyckeln.</string>
     <string name="error_ctap2_timeout">Kommunikation med säkerhetsnyckeln tog för lång tid.</string>

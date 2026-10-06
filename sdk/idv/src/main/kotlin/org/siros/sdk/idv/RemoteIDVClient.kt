@@ -125,7 +125,15 @@ class RemoteIDVClient(private val config: Config) {
                 conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
             }
 
-            if (code == 422 && throwOn422 != null) throw throwOn422(responseBody)
+            if (code == 422 && throwOn422 != null) {
+                val error = runCatching { JSONObject(responseBody) }.getOrNull()
+                throw idvExceptionFor422(
+                    errorCode = error?.optString("error_code")?.takeIf { it.isNotEmpty() },
+                    errorMessage = error?.optString("error")?.takeIf { it.isNotEmpty() },
+                    responseBody = responseBody,
+                    fallback = throwOn422,
+                )
+            }
             if (code !in 200..299) {
                 throw IDVException.NetworkError(Exception("HTTP $code: $responseBody"))
             }
@@ -136,6 +144,24 @@ class RemoteIDVClient(private val config: Config) {
         }
     }
 }
+
+/**
+ * Maps a 422 from the IDV backend to an [IDVException]. The backend's error body is
+ * `{"error": "<message>", "error_code": "<code>"}`: an `nfc_*` code means the document's
+ * chip was not read and authenticated ([IDVException.DocumentChipNotVerified]); anything
+ * else goes to the step's own [fallback], with the raw body as before.
+ */
+internal fun idvExceptionFor422(
+    errorCode: String?,
+    errorMessage: String?,
+    responseBody: String,
+    fallback: (String) -> IDVException,
+): IDVException =
+    if (errorCode != null && errorCode.startsWith("nfc_")) {
+        IDVException.DocumentChipNotVerified(errorCode, errorMessage ?: responseBody)
+    } else {
+        fallback(responseBody)
+    }
 
 /**
  * Delegate for vendor-specific biometric capture UI.
