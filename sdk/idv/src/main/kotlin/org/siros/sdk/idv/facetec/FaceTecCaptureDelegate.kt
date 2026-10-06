@@ -19,7 +19,16 @@ import kotlin.coroutines.resumeWithException
  *
  * When the FaceTec SDK is not on the classpath, all methods throw
  * [IDVException.Unavailable].
+ *
+ * This targets the FaceTec **9** API. FaceTec 10 removed `FaceTecSDK.getStatus()`,
+ * `FaceTecSession`, `FaceTecFaceScanProcessor`, `FaceTecIDScanSession` and
+ * `FaceTecIDScanProcessor`, so with FaceTec 10 [isAvailable] is always `false`
+ * (sirosfoundation/siros-sdk-kotlin#246). Use [FaceTecIDVProvider].
  */
+@Deprecated(
+    "Targets the FaceTec 9 API and cannot run with FaceTec 10. Use FaceTecIDVProvider.",
+    ReplaceWith("FaceTecIDVProvider(FaceTecIDVConfig(processRequestUrl, authToken, deviceKeyIdentifier))"),
+)
 class FaceTecCaptureDelegate : BiometricCaptureDelegate {
 
     override val name: String = "FaceTec"
