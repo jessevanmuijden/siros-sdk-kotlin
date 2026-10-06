@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **A request carrying OpenID4VP `transaction_data` is now refused instead of
+  silently ignored.** The DC API path parsed the request and dropped
+  `transaction_data`, and both engine transports ignored it on
+  `sign_presentation`, so a payment-SCA request was answered with a
+  presentation that bound no transaction and that the user never saw. All
+  three paths now refuse with `TransactionDataError` before anything is
+  signed (the DC API answers the verifier `invalid_transaction_data`). This
+  is step 1 of the EC TS12 rollout; the handling itself follows.
+
+### Added
+- `WalletConfig.transactionDataEnabled` / `SirosWallet.transactionDataEnabled`
+  (runtime flag, default `false`), `SirosWallet.transactionConsentHandler`
+  and `isTransactionDataEffectivelyEnabled`; `TransactionDataError` with the
+  cross-SDK reason codes; the wire members `raw`, `payload`,
+  `transaction_data_hashes_alg` (array or string), `response_mode`,
+  `credentials_to_include` and `features: ["transaction_data.v1"]` /
+  `capabilities_offered.transaction_data`. Nothing is declared to the
+  orchestrator yet: this build contains no `transaction_data` pipeline.
+
 ### Changed
 - **Legacy `/user/*` webauthn auth is now gated behind an explicit config
   flag instead of being auto-detected per backend.** `SirosWallet` used to

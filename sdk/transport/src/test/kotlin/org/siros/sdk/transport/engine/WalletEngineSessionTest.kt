@@ -842,4 +842,31 @@ class WalletEngineSessionTest {
         assertEquals(WalletEngineSession.State.CONNECTING, session.state.value)
         verify(exactly = 2) { client.newWebSocket(any(), any()) }
     }
+
+    @Test
+    fun start_presentation_declares_features_only_when_given() {
+        val session = WalletEngineSession(
+            baseUrl = "https://wallet.example.com",
+            tenantId = "tenant-42",
+            client = client,
+        )
+        session.connect("app-token")
+
+        session.startPresentation(requestUri = "https://verifier.example.com/none")
+        session.startPresentation(
+            requestUri = "https://verifier.example.com/declared",
+            features = listOf(FlowStartMessage.FEATURE_TRANSACTION_DATA_V1),
+        )
+
+        verify(exactly = 1) {
+            webSocket.send(match<String> { text ->
+                text.contains("/none") && !text.contains("transaction_data.v1")
+            })
+        }
+        verify(exactly = 1) {
+            webSocket.send(match<String> { text ->
+                text.contains("/declared") && text.contains("\"features\":[\"transaction_data.v1\"]")
+            })
+        }
+    }
 }

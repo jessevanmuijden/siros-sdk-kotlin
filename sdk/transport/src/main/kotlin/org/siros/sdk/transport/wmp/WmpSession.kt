@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
 import org.siros.sdk.transport.Transport
 import org.siros.sdk.transport.TransportState
 import timber.log.Timber
@@ -48,8 +49,19 @@ class WmpSession(
     /** Notifications from the server (flow.progress, flow.complete, etc.). */
     fun notifications(): Flow<JsonRpcRequest> = incomingNotifications.receiveAsFlow()
 
-    /** Create a new WMP session with the given auth token. */
-    suspend fun create(authToken: String, sender: String? = null) {
+    /**
+     * Create a new WMP session with the given auth token.
+     *
+     * @param capabilitiesOffered the capabilities this wallet offers
+     *   (`capabilities_offered`), by name. Capabilities are offered per
+     *   session: changing what a wallet supports takes effect only on a new
+     *   session. `null` offers none.
+     */
+    suspend fun create(
+        authToken: String,
+        sender: String? = null,
+        capabilitiesOffered: JsonObject? = null,
+    ) {
         _state.value = WmpSessionState.CONNECTING
         transport.connect()
         startMessageLoop()
@@ -57,6 +69,7 @@ class WmpSession(
         val params = codec.encodeParams(
             SessionCreateParams(
                 wmp = WmpMeta(sender = sender),
+                capabilitiesOffered = capabilitiesOffered,
                 auth = SessionAuth(type = "bearer", token = authToken),
                 ttl = config.sessionTtlSeconds,
             )

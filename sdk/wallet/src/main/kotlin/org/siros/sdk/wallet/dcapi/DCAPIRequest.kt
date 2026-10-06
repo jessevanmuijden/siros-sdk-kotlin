@@ -59,6 +59,13 @@ data class DCAPIRequest(
      * way to find which session's ephemeral key/DCQL query to use.
      */
     val state: String?,
+    /**
+     * Whether the request object has a `transaction_data` member (OpenID4VP
+     * 1.0 5.1), whatever its value. The SDK must never answer such a request
+     * as if it were absent, so presence alone is what is recorded here; any
+     * value, including `null` or an empty array, counts.
+     */
+    val hasTransactionData: Boolean = false,
 )
 
 /**
@@ -125,6 +132,7 @@ object DCAPIRequestParser {
             keyMaterial = null,
             protocol = protocol,
             state = obj["state"]?.jsonPrimitive?.contentOrNull,
+            hasTransactionData = obj.containsKey("transaction_data"),
         )
     }
 
@@ -173,6 +181,7 @@ object DCAPIRequestParser {
             ),
             protocol = protocol,
             state = payload["state"]?.jsonPrimitive?.contentOrNull,
+            hasTransactionData = payload.containsKey("transaction_data"),
         )
     }
 

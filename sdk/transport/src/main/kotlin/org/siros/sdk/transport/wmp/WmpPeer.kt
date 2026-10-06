@@ -69,8 +69,12 @@ class WmpPeer(
     // ---- Lifecycle ----
 
     /** Connect and create a WMP session. Starts the dispatch loop. */
-    suspend fun connect(authToken: String, sender: String? = null) {
-        session.create(authToken, sender)
+    suspend fun connect(
+        authToken: String,
+        sender: String? = null,
+        capabilitiesOffered: JsonObject? = null,
+    ) {
+        session.create(authToken, sender, capabilitiesOffered)
         startDispatch()
     }
 

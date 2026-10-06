@@ -66,6 +66,7 @@ import org.siros.sdk.credentials.BackendApiException
 import org.siros.sdk.credentials.KeystoreException
 import org.siros.sdk.credentials.NetworkException
 import org.siros.sdk.credentials.SirosException
+import org.siros.sdk.credentials.TransactionDataError
 import org.siros.sdk.credentials.WalletException
 import org.siros.sdk.credentials.CredentialStore
 import org.siros.sdk.credentials.InMemoryCredentialStore
@@ -200,6 +201,46 @@ class SirosWallet private constructor(
     private val config: WalletConfig,
 ) {
     // ── Public API ──────────────────────────────────────────────────
+
+    /**
+     * Whether this wallet handles OpenID4VP `transaction_data` requests (EC
+     * TS12 payment SCA). Initially [WalletConfig.transactionDataEnabled]
+     * (`false`). Thread-safe, readable and writable at any time.
+     *
+     * A change applies to flows started after it: what a flow declared to the
+     * orchestrator when it started is fixed for that flow. On the WMP
+     * transport capabilities are offered per **session**, so a change takes
+     * effect only once a new session is created (the next [connect]); on the
+     * legacy engine transport it is read at each presentation start.
+     *
+     * Setting this to `true` is not enough on its own: see
+     * [isTransactionDataEffectivelyEnabled].
+     */
+    @Volatile
+    var transactionDataEnabled: Boolean = config.transactionDataEnabled
+
+    /**
+     * Shows `transaction_data` requests to the user. `null` (the default)
+     * means the wallet cannot show a transaction and so behaves as if
+     * [transactionDataEnabled] were `false`. Thread-safe.
+     */
+    @Volatile
+    var transactionConsentHandler: TransactionConsentHandler? = null
+
+    /**
+     * Whether `transaction_data` handling is in force: [transactionDataEnabled]
+     * **and** a [transactionConsentHandler] is registered (and the SDK build
+     * contains the full handling pipeline). Only then does the wallet declare
+     * support to the orchestrator; otherwise it declares nothing, the
+     * orchestrator refuses `transaction_data` requests for it, and a request
+     * that reaches the wallet anyway (for example through the DC API, which
+     * has no negotiation) is refused with `invalid_transaction_data` rather
+     * than ignored.
+     */
+    val isTransactionDataEffectivelyEnabled: Boolean
+        get() = transactionDataEnabled &&
+            transactionConsentHandler != null &&
+            TransactionDataSupport.pipelineAvailable
 
     private val _state = MutableStateFlow<WalletState>(WalletState.Disconnected())
 
@@ -2858,7 +2899,10 @@ class SirosWallet private constructor(
     suspend fun startPresentation(requestUri: String) {
         val engine = engineSession ?: throw WalletException(NOT_CONNECTED)
         ensureEngineConnected(engine)
-        engine.startPresentation(requestUri = requestUri)
+        engine.startPresentation(
+            requestUri = requestUri,
+            features = TransactionDataSupport.engineFeatures(isTransactionDataEffectivelyEnabled),
+        )
     }
 
     /**
@@ -2895,9 +2939,17 @@ class SirosWallet private constructor(
      *   (e.g. Android's Credential Manager) - NOT read from the request body,
      *   which is untrusted until the platform attests it.
      * @throws WalletException if the user declines, or if not connected.
+     * @throws TransactionDataError if the request carries `transaction_data`
+     *   (always, until the TS12 pipeline is complete); nothing is signed.
      */
     suspend fun handleDCAPIRequest(rawRequestJson: String, origin: String): DCAPIPresentationResult {
         val request = DCAPIRequestParser.parse(rawRequestJson)
+
+        // The DC API has no negotiation, so a request can carry
+        // transaction_data at a wallet that never declared support. Refuse it
+        // before any trust evaluation or signing: answering without the
+        // transaction hashes would authorise a payment the user never saw.
+        TransactionDataSupport.refuseIfPresent(request.hasTransactionData)
 
         // request.clientId is only cryptographically bound to anything when
         // the request is signed (keyMaterial != null, verified against the
@@ -4513,7 +4565,12 @@ class SirosWallet private constructor(
             )
         )
         peer.use(profile)
-        peer.connect(appToken)
+        // Offered per session: a later change of transactionDataEnabled
+        // reaches the orchestrator only with the next session.
+        peer.connect(
+            appToken,
+            capabilitiesOffered = TransactionDataSupport.capabilitiesOffered(isTransactionDataEffectivelyEnabled),
+        )
         wmpPeer = peer
         // WMP peer handles credential notifications via the profile
         credentialNotifier = null // Notifications go through WmpPeer.sendCredentialNotification()
@@ -4932,6 +4989,8 @@ class SirosWallet private constructor(
                 // transport's handleSignRequest - this transport previously
                 // skipped it entirely, so a WMP-relayed sign_presentation was
                 // never checked against the trust result computed for this flow.
+                // Before anything is signed: transaction_data is never ignored.
+                TransactionDataSupport.refuseIfPresent(!params.transactionData.isNullOrEmpty())
                 validateAudience(flowId, params.audience)
                 val vpToken = keystore.signPresentation(
                     nonce = params.nonce,
@@ -5267,6 +5326,9 @@ class SirosWallet private constructor(
                             val audience = params?.audience ?: ""
                             val credsToInclude = params?.credentialsToInclude
 
+                            // Before anything is signed: transaction_data is never ignored.
+                            TransactionDataSupport.refuseIfPresent(!params?.transactionData.isNullOrEmpty())
+
                             // Validate audience matches trusted verifier identity
                             validateAudience(msg.flowId, audience)
 
@@ -5427,6 +5489,11 @@ class SirosWallet private constructor(
                             engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId)
                         }
                     }
+                } catch (e: TransactionDataError) {
+                    // The legacy protocol has no sign-refusal message: the
+                    // engine learns of this when its sign request times out.
+                    Timber.w(e, "Refused transaction_data (${e.reason.code}) for flow ${msg.flowId}")
+                    reportSignFailure(msg.flowId, "${e.verifierError} (${e.reason.code}): ${e.message}")
                 } catch (e: KeystoreException) {
                     Timber.e(e, "Error handling sign request: keystore error")
                     reportSignFailure(msg.flowId, e.message ?: "Signing failed")

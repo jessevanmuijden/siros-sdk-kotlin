@@ -485,15 +485,23 @@ class WalletEngineSession(
         ))
     }
 
-    /** Start an OID4VP credential presentation flow. */
+    /**
+     * Start an OID4VP credential presentation flow.
+     *
+     * @param features optional protocol features to declare (see
+     *   [FlowStartMessage.features]); `null` declares nothing, which is what
+     *   every caller did before `transaction_data` support existed.
+     */
     fun startPresentation(
         requestUri: String? = null,
         requestUriRef: String? = null,
+        features: List<String>? = null,
     ) {
         send(FlowStartMessage.serializer(), FlowStartMessage(
             protocol = "oid4vp",
             requestUri = requestUri,
             requestUriRef = requestUriRef,
+            features = features,
         ))
     }
 

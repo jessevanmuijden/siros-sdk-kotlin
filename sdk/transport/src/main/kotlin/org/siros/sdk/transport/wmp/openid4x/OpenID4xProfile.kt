@@ -9,6 +9,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import org.siros.sdk.credentials.TransactionDataError
+import org.siros.sdk.transport.StringOrStringListSerializer
+import org.siros.sdk.transport.engine.CredentialRef
 import org.siros.sdk.transport.wmp.*
 import timber.log.Timber
 
@@ -152,12 +155,37 @@ data class VPTokenResult(
     @SerialName("response_code") val responseCode: String? = null,
 )
 
+/**
+ * One OID4VP `transaction_data` entry as an orchestrator relays it (OpenID4x
+ * profile Section 3.2.5; go-wmp `openid4x.TransactionData`). The same shape
+ * is used by the legacy engine WebSocket's `sign_request.params`.
+ *
+ * **[raw] is the only trustworthy member.** It is the base64url string the
+ * verifier sent, and the only input to `transaction_data_hashes`
+ * (OpenID4VP 1.0 Appendix B). [type], [payload] and [credentialIds] are the
+ * orchestrator's decoded hint: a wallet decodes [raw] itself and must refuse
+ * when the two disagree, never display or bind the hint.
+ *
+ * @property raw The entry exactly as the verifier sent it. `null` from an
+ *   orchestrator that predates it; a wallet cannot bind to such an entry.
+ * @property payload The entry's `payload` object (EC TS12 4.2), hint only.
+ * @property params Pre-TS12 type-specific members (deprecated upstream).
+ * @property hashAlgorithm Non-standard legacy member (deprecated upstream).
+ * @property transactionDataHashesAlg The verifier's list of acceptable hash
+ *   algorithms. An array in OpenID4VP; a bare string from older peers is
+ *   accepted and read as a one-element list.
+ */
 @Serializable
 data class TransactionData(
     val type: String,
     val params: JsonObject? = null,
     @SerialName("credential_ids") val credentialIds: List<String>? = null,
     @SerialName("hash_alg") val hashAlgorithm: String? = null,
+    val raw: String? = null,
+    val payload: JsonElement? = null,
+    @SerialName("transaction_data_hashes_alg")
+    @Serializable(with = StringOrStringListSerializer::class)
+    val transactionDataHashesAlg: List<String>? = null,
 )
 
 @Serializable
@@ -175,6 +203,16 @@ data class SignSubFlowParams(
     @SerialName("parent_flow_id") val parentFlowId: String? = null,
     val count: Int? = null,
     @SerialName("transaction_data") val transactionData: List<TransactionData>? = null,
+    /**
+     * The OID4VP `response_mode` of the request being answered; required in
+     * the key binding JWT of an SCA presentation (EC TS12 3.6). Present for
+     * a request that carries `transaction_data`.
+     */
+    @SerialName("response_mode") val responseMode: String? = null,
+    /** The credentials the orchestrator already selected for a `sign_presentation`, with their DCQL query ids. */
+    @SerialName("credentials_to_include") val credentialsToInclude: List<CredentialRef>? = null,
+    /** The verifier's own session id for this presentation. */
+    @SerialName("verifier_session_id") val verifierSessionId: String? = null,
     /** PoP/proof `iss` (the flow's OAuth client_id) for `request_attestation` and `sign_client_auth`. */
     val issuer: String? = null,
     /**
@@ -397,6 +435,11 @@ class OpenID4xProfile(
         try {
             val result = handler.invoke(flowId, signParams)
             sendSignResponse(flowId, result)
+        } catch (e: TransactionDataError) {
+            // A refused transaction_data request names its reason (the
+            // verifier-facing OpenID4VP error) instead of the generic code.
+            Timber.w(e, "Sign request refused: transaction_data (${e.reason.code})")
+            sendFlowError(flowId, e.verifierError, e.message)
         } catch (e: Exception) {
             Timber.e(e, "Sign request handler failed")
             sendFlowError(flowId, "SIGN_ERROR", e.message)

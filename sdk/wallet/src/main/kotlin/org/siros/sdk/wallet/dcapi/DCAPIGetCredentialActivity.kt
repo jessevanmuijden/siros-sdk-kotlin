@@ -26,6 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.siros.sdk.credentials.CredentialMatcher
+import org.siros.sdk.credentials.TransactionDataError
 import org.siros.sdk.credentials.WalletException
 import org.siros.sdk.wallet.R
 import timber.log.Timber
@@ -137,6 +138,11 @@ class DCAPIGetCredentialActivity : Activity() {
                 )
                 setResult(RESULT_OK, responseIntent)
                 finish()
+            } catch (e: TransactionDataError) {
+                // A refused transaction_data request is answered with the
+                // protocol error OpenID4VP defines for it, not a generic one.
+                Timber.w(e, "DC API transaction_data refused (${e.reason.code})")
+                finishWithProtocolError(e.message ?: "Invalid transaction_data", e.verifierError)
             } catch (e: WalletException) {
                 // A decline (untrusted verifier, no matching/eligible
                 // credential, missing encryption key, ...) is a normal
@@ -187,9 +193,9 @@ class DCAPIGetCredentialActivity : Activity() {
      * and OpenID4VP doesn't define a more specific code for most of them
      * anyway.
      */
-    private fun finishWithProtocolError(description: String) {
+    private fun finishWithProtocolError(description: String, error: String = "access_denied") {
         val errorJson = buildJsonObject {
-            put("error", JsonPrimitive("access_denied"))
+            put("error", JsonPrimitive(error))
             put("error_description", JsonPrimitive(description))
         }.toString()
         Timber.d("DCAPI error response: $errorJson")

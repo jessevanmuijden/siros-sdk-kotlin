@@ -255,6 +255,16 @@ data class WalletConfig(
      * deliberately old/pinned backend still running with legacy enabled.
      */
     val useLegacyAuth: Boolean = false,
+    /**
+     * Initial value of [SirosWallet.transactionDataEnabled]: whether the
+     * wallet handles OpenID4VP `transaction_data` requests (EC TS12 payment
+     * SCA). `false` by default. This is a runtime setting, not a build flag:
+     * it can be changed on the wallet at any time and applies to flows
+     * started afterwards. It only takes effect once a
+     * [SirosWallet.transactionConsentHandler] is registered, because the
+     * wallet cannot show a transaction without one.
+     */
+    val transactionDataEnabled: Boolean = false,
 ) {
     /**
      * The reader-trust mode actually in force: [readerTrustEvaluationMode] if

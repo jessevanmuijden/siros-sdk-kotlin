@@ -190,4 +190,35 @@ class WmpSessionTest {
     private fun createSuccessResponse(requestId: String): String {
         return """{"jsonrpc":"2.0","id":"$requestId","result":{"wmp":{"version":"0.1","session_id":"session-123"},"resumption_token":"resume-abc"}}"""
     }
+
+    @Test
+    fun createOffersCapabilitiesOnlyWhenGiven() = runBlocking {
+        suspend fun sentCreate(offered: kotlinx.serialization.json.JsonObject?): String {
+            val transport = FakeTransport()
+            val session = WmpSession(transport = transport, config = WmpSessionConfig(requestTimeoutMs = 2_000))
+            val job = launch { session.create("tok", capabilitiesOffered = offered) }
+            waitForSentCount(transport, 1)
+            val req = codec.decodeRequest(transport.sentMessages.last())
+            val text = transport.sentMessages.last().toString(Charsets.UTF_8)
+            transport.receiveFromServer(createSuccessResponse(req.id!!).toByteArray())
+            job.join()
+            session.close()
+            return text
+        }
+
+        val withCaps = sentCreate(
+            kotlinx.serialization.json.buildJsonObject {
+                put(
+                    "transaction_data",
+                    kotlinx.serialization.json.buildJsonObject {
+                        put("versions", kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonPrimitive(1))))
+                    },
+                )
+            },
+        )
+        val without = sentCreate(null)
+
+        assertTrue(withCaps, withCaps.contains("\"capabilities_offered\":{\"transaction_data\":{\"versions\":[1]}}"))
+        assertTrue(without, !without.contains("transaction_data"))
+    }
 }

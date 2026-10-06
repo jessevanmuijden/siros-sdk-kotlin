@@ -99,4 +99,40 @@ class DCAPIRequestParserTest {
         }
         assertEquals("DC API request's first entry is missing 'data'", exception.message)
     }
+
+    @Test
+    fun `an unsigned request without transaction_data reports none`() {
+        val raw = """{"requests":[{"protocol":"openid4vp-v1-unsigned","data":{"nonce":"n"}}]}"""
+
+        assertEquals(false, DCAPIRequestParser.parse(raw).hasTransactionData)
+    }
+
+    @Test
+    fun `an unsigned request carrying transaction_data reports it whatever the value`() {
+        for (value in listOf("""["eyJ0eXBlIjoieCJ9"]""", "[]", "null", "\"x\"", "5")) {
+            val raw = """{"requests":[{"protocol":"openid4vp-v1-unsigned","data":{"nonce":"n","transaction_data":$value}}]}"""
+
+            assertEquals(value, true, DCAPIRequestParser.parse(raw).hasTransactionData)
+        }
+    }
+
+    @Test
+    fun `a signed request reports transaction_data from the verified payload only`() {
+        val ecKey = ECKeyGenerator(Curve.P_256).generate()
+        fun parse(claims: JWTClaimsSet): DCAPIRequest {
+            val jwt = SignedJWT(JWSHeader.Builder(JWSAlgorithm.ES256).jwk(ecKey.toPublicJWK()).build(), claims)
+            jwt.sign(ECDSASigner(ecKey))
+            return DCAPIRequestParser.parse(
+                """{"requests":[{"protocol":"openid4vp-v1-signed","data":{"request":"${jwt.serialize()}"}}]}"""
+            )
+        }
+
+        val with = parse(
+            JWTClaimsSet.Builder().claim("nonce", "n").claim("transaction_data", listOf("eyJ0eXBlIjoieCJ9")).build()
+        )
+        val without = parse(JWTClaimsSet.Builder().claim("nonce", "n").build())
+
+        assertEquals(true, with.hasTransactionData)
+        assertEquals(false, without.hasTransactionData)
+    }
 }

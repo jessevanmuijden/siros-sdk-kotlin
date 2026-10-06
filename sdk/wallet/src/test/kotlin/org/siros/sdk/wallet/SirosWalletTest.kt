@@ -6867,6 +6867,238 @@ class SirosWalletTest {
         return method.call(wallet) as String?
     }
 
+    // ── transaction_data (EC TS12) refusal and declaration ──────────
+
+    private val tdEntry = org.siros.sdk.transport.wmp.openid4x.TransactionData(
+        type = "urn:eudi:sca:payment:1",
+        raw = "eyJ0eXBlIjoidXJuOmV1ZGk6c2NhOnBheW1lbnQ6MSJ9",
+        credentialIds = listOf("pay"),
+    )
+
+    private fun unwrapped(t: Throwable): Throwable =
+        if (t is java.lang.reflect.InvocationTargetException && t.cause != null) t.cause!! else t
+
+    /**
+     * A legacy-transport sign_presentation carrying transaction_data must be
+     * refused before anything is signed: answering without the hashes would
+     * authorise a payment the user never saw.
+     */
+    @Test
+    fun legacySignPresentation_withTransactionData_isRefusedAndNothingIsSigned() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every {
+            engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any())
+        } just runs
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to keystore,
+            "eventListener" to listener,
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+            "apiClient" to mockk<BackendApiClient>(relaxed = true),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-td",
+                messageId = "msg-td",
+                action = "sign_presentation",
+                params = SignRequestParams(audience = "https://verifier.example.com", nonce = "n", transactionData = listOf(tdEntry)),
+            )
+        )
+        repeat(5) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            advanceUntilIdle()
+        }
+
+        coVerify(exactly = 0) { keystore.signPresentation(any(), any(), any()) }
+        coVerify(exactly = 0) { keystore.signVpToken(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) {
+            engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any())
+        }
+        verify(exactly = 1) {
+            listener.onFlowError("flow-td", match { it.contains("invalid_transaction_data (disabled)") }, any())
+        }
+    }
+
+    /** The same request without transaction_data is answered exactly as before. */
+    @Test
+    fun legacySignPresentation_withoutTransactionData_isUnchanged() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every {
+            engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any())
+        } just runs
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.signPresentation(any(), any(), any()) } returns "vp-token"
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to keystore,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+            "apiClient" to mockk<BackendApiClient>(relaxed = true),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-plain",
+                messageId = "msg-plain",
+                action = "sign_presentation",
+                params = SignRequestParams(audience = "https://verifier.example.com", nonce = "n"),
+            )
+        )
+        repeat(5) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            advanceUntilIdle()
+        }
+
+        coVerify(exactly = 1) { keystore.signPresentation("n", "https://verifier.example.com", emptyList()) }
+        verify(exactly = 1) {
+            engine.sendSignResponse(
+                flowId = "flow-plain", vpToken = "vp-token", messageId = "msg-plain",
+            )
+        }
+    }
+
+    /** WMP sign sub-flow: refused with the typed error, before anything is signed. */
+    @Test
+    fun wmpSignPresentation_withTransactionData_isRefusedAndNothingIsSigned() = runTest(dispatcher) {
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "keystore" to keystore,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        val params = org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+            action = "sign_presentation", nonce = "n", audience = "https://verifier.example.com",
+            transactionData = listOf(tdEntry), responseMode = "direct_post",
+        )
+
+        val thrown = runCatching { runBlocking { method.callSuspend(wallet, "flow-w", params) } }.exceptionOrNull()
+
+        val error = unwrapped(thrown ?: throw AssertionError("expected a refusal")) as org.siros.sdk.credentials.TransactionDataError
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.DISABLED, error.reason)
+        coVerify(exactly = 0) { keystore.signPresentation(any(), any(), any()) }
+    }
+
+    /** WMP sign sub-flow without transaction_data is signed as before. */
+    @Test
+    fun wmpSignPresentation_withoutTransactionData_isUnchanged() = runTest(dispatcher) {
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.signPresentation(any(), any(), any()) } returns "vp-token"
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "keystore" to keystore,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        val params = org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+            action = "sign_presentation", nonce = "n", audience = "https://verifier.example.com",
+        )
+
+        val result = runBlocking { method.callSuspend(wallet, "flow-w", params) }
+            as org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult
+
+        assertEquals("vp-token", result.vpToken)
+    }
+
+    /** The DC API has no negotiation, so it must refuse transaction_data itself, before trust evaluation. */
+    @Test
+    fun dcApiRequest_withTransactionData_isRefusedBeforeAnyTrustEvaluation() = runTest(dispatcher) {
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "apiClient" to apiClient,
+        )
+        val raw = """{"requests":[{"protocol":"openid4vp-v1-unsigned","data":{
+            "nonce":"n","dcql_query":{"credentials":[]},"transaction_data":["eyJ0eXBlIjoieCJ9"]}}]}"""
+
+        val error = runCatching { runBlocking { wallet.handleDCAPIRequest(raw, "https://verifier.example.com") } }
+            .exceptionOrNull()
+
+        val refusal = error as? org.siros.sdk.credentials.TransactionDataError
+            ?: throw AssertionError("expected TransactionDataError, got $error")
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.DISABLED, refusal.reason)
+        assertEquals("invalid_transaction_data", refusal.verifierError)
+        coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
+    }
+
+    /** Effective enablement is flag AND handler AND a complete pipeline; initial flag from the config. */
+    @Test
+    fun transactionData_effectiveEnablement_needsFlagAndHandler() {
+        val wallet = newWallet(
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", transactionDataEnabled = true),
+        )
+        val handler = TransactionConsentHandler { true }
+        val previous = TransactionDataSupport.pipelineAvailable
+        TransactionDataSupport.pipelineAvailable = true
+        try {
+            assertFalse(wallet.isTransactionDataEffectivelyEnabled)
+            wallet.transactionDataEnabled = true
+            assertFalse("flag without a handler", wallet.isTransactionDataEffectivelyEnabled)
+            wallet.transactionConsentHandler = handler
+            assertTrue(wallet.isTransactionDataEffectivelyEnabled)
+            wallet.transactionDataEnabled = false
+            assertFalse("handler without the flag", wallet.isTransactionDataEffectivelyEnabled)
+            wallet.transactionDataEnabled = true
+            TransactionDataSupport.pipelineAvailable = false
+            assertFalse("no complete pipeline in this build", wallet.isTransactionDataEffectivelyEnabled)
+        } finally {
+            TransactionDataSupport.pipelineAvailable = previous
+        }
+    }
+
+    @Test
+    fun transactionDataConfigDefaultIsOff() {
+        assertFalse(WalletConfig(backendUrl = "https://wallet.example.com").transactionDataEnabled)
+    }
+
+    /** startPresentation declares the feature only when effectively enabled, read at each start. */
+    @Test
+    fun startPresentation_declaresFeatureOnlyWhenEffectivelyEnabled() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        every { engine.state } returns MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "engineSession" to engine,
+        )
+        val previous = TransactionDataSupport.pipelineAvailable
+        TransactionDataSupport.pipelineAvailable = true
+        try {
+            wallet.startPresentation("https://verifier.example.com/r1")
+            wallet.transactionDataEnabled = true
+            wallet.transactionConsentHandler = TransactionConsentHandler { true }
+            wallet.startPresentation("https://verifier.example.com/r2")
+            wallet.transactionDataEnabled = false
+            wallet.startPresentation("https://verifier.example.com/r3")
+        } finally {
+            TransactionDataSupport.pipelineAvailable = previous
+        }
+
+        verify(exactly = 1) { engine.startPresentation("https://verifier.example.com/r1", null, null) }
+        verify(exactly = 1) {
+            engine.startPresentation("https://verifier.example.com/r2", null, listOf("transaction_data.v1"))
+        }
+        verify(exactly = 1) { engine.startPresentation("https://verifier.example.com/r3", null, null) }
+    }
+
     private fun invokeConnectEngine(wallet: SirosWallet, appToken: String) {
         // connectEngine is a private suspend fun — use Kotlin reflection's callSuspend
         val method = wallet::class.declaredMemberFunctions.first { it.name == "connectEngine" }

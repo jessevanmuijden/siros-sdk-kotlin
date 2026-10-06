@@ -5,6 +5,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import org.siros.sdk.transport.wmp.openid4x.TransactionData
 
 /** Message types used in the wallet backend engine WebSocket protocol. */
 object MessageTypes {
@@ -117,8 +118,22 @@ data class FlowStartMessage(
      * this wallet signs with that same key. Takes precedence over [dpopJwk].
      */
     @SerialName("dpop_key_id") val dpopKeyId: String? = null,
+    /**
+     * Optional protocol features this client implements (go-wallet-backend
+     * `FlowStartMessage.Features`). `"transaction_data.v1"`
+     * ([FEATURE_TRANSACTION_DATA_V1]) declares that the client validates,
+     * shows and binds OID4VP `transaction_data` (EC TS12); the backend
+     * refuses a request carrying `transaction_data` for a client that did not
+     * declare it. `null` (the default) declares nothing.
+     */
+    val features: List<String>? = null,
     val timestamp: String? = null,
-)
+) {
+    companion object {
+        /** The [features] entry declaring OID4VP `transaction_data` support. */
+        const val FEATURE_TRANSACTION_DATA_V1 = "transaction_data.v1"
+    }
+}
 
 @Serializable
 data class FlowActionMessage(
@@ -374,6 +389,17 @@ data class SignRequestParams(
     @SerialName("dpop_nonce") val dpopNonce: String? = null,
     val ath: String? = null,
     @SerialName("key_id") val keyId: String? = null,
+    /**
+     * The OID4VP `transaction_data` entries of the request being answered by a
+     * `sign_presentation`, one per element of the verifier's array in the
+     * verifier's order (same shape as the WMP sign sub-flow). Only sent to a
+     * client that declared [FlowStartMessage.FEATURE_TRANSACTION_DATA_V1].
+     * Each entry's `raw` is the verifier's original base64url string; the rest
+     * is an untrusted decoded hint.
+     */
+    @SerialName("transaction_data") val transactionData: List<TransactionData>? = null,
+    /** The OID4VP `response_mode` of the request; required in an SCA key binding JWT (EC TS12 3.6). */
+    @SerialName("response_mode") val responseMode: String? = null,
 )
 
 @Serializable

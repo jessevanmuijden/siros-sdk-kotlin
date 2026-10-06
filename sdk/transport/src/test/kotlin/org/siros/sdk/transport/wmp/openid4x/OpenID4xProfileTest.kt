@@ -506,4 +506,28 @@ class OpenID4xProfileTest {
         assertEquals(JsonPrimitive("vp-token-value"), params!!["vp_token"])
         assertNull(params["proofs"])
     }
+
+    @Test
+    fun refusedTransactionDataIsReportedWithItsVerifierErrorCode() = runBlocking {
+        val profile = OpenID4xProfile(
+            OpenID4xConfig(
+                onSignRequest = { _, _ ->
+                    throw org.siros.sdk.credentials.TransactionDataError(
+                        org.siros.sdk.credentials.TransactionDataReason.DISABLED,
+                        "refused",
+                    )
+                }
+            )
+        )
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+
+        profile.handleProgress(
+            FlowProgressParams(wmp = WmpMeta(), flowId = "f8", step = "sign_request", payload = buildSignPayload())
+        )
+
+        val params = ctx.notifications.first { it.first == WmpMethods.FLOW_ERROR }.second!!
+        assertEquals(JsonPrimitive("invalid_transaction_data"), params["code"])
+        assertEquals(JsonPrimitive("refused"), params["message"])
+    }
 }
