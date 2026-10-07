@@ -4,6 +4,7 @@ package org.siros.sdk.keystore
 import com.upokecenter.cbor.CBORObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.jsonPrimitive
 import org.siros.sdk.credentials.CredentialDocument
 import org.siros.sdk.credentials.CredentialFormat
 import org.siros.sdk.credentials.CredentialTypeRef
@@ -332,9 +333,42 @@ class VegaProofSystem(
                 "Vega prover key '${spec.id}' not found in any configured zk-circuits source - " +
                     "see VegaProofSystem's doc comment for the catalog gating",
             )
+        validateCircuitParams(descriptor)
         val compressedBytes = zkCircuitClient.downloadArtifact(descriptor)
         val keyBuffer = decompressZkCircuitArtifact(compressedBytes, descriptor)
         return uniffi.zk_cred_vega.deserializeProverKey(keyBuffer)
+    }
+
+    /**
+     * Checks the catalog's own published `params` for this circuit against
+     * what this class hardcodes (P-256, exactly [MAX_CLAIMS_V1] claim
+     * slots) *before* spending a real download+decompress (a 100+MB
+     * artifact) on a circuit this implementation can't actually use -
+     * failing fast, locally, with a clear diagnostic naming the mismatch,
+     * instead of discovering a circuit-shape change only via an opaque
+     * native prove()/verify() failure much later. Doesn't yet check
+     * `maxClaimBytes` against real witness byte lengths - unlike
+     * `curve`/`numClaims`, a per-claim-byte-count mismatch surfaces at the
+     * native layer with its own clear error already, since it's the
+     * issuer's claim content (not a circuit-shape assumption this class
+     * makes) that would be at fault.
+     *
+     * Only validates fields the catalog already publishes today
+     * (`curve`, `numClaims` - confirmed via the real r12 manifest entry);
+     * a `saltBytes` field doesn't exist there yet
+     * (sirosfoundation/go-zk-circuits#29 tracks adding it - once it does,
+     * this is the natural place to also validate a stored credential's
+     * salt length against it, per siros-sdk-kotlin#243).
+     */
+    internal fun validateCircuitParams(descriptor: ZkCircuitDescriptor) {
+        val curve = descriptor.params["curve"]?.jsonPrimitive?.content
+        require(curve == "P-256") {
+            "Vega circuit '${descriptor.id}' declares curve '$curve', but $systemId only supports P-256"
+        }
+        val numClaims = descriptor.params["numClaims"]?.jsonPrimitive?.content?.toIntOrNull()
+        require(numClaims == MAX_CLAIMS_V1) {
+            "Vega circuit '${descriptor.id}' declares numClaims=$numClaims, but $systemId is built for exactly $MAX_CLAIMS_V1 claim slots"
+        }
     }
 
 }
