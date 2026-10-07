@@ -27,6 +27,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.siros.sdk.credentials.CredentialMatcher
 import org.siros.sdk.credentials.TransactionDataError
+import org.siros.sdk.wallet.TransactionConsentHandler
 import org.siros.sdk.credentials.WalletException
 import org.siros.sdk.wallet.R
 import timber.log.Timber
@@ -125,12 +126,21 @@ class DCAPIGetCredentialActivity : Activity() {
             return
         }
 
-        Timber.d("DCAPI raw request (origin=$origin): ${digitalOption.requestJson}")
+        // A payment confirmation request (transaction_data) and its response (KB-JWT with the transaction
+        // hashes) are private; their content is never logged.
+        val carriesTransactionData = digitalOption.requestJson.contains("transaction_data")
+        if (!carriesTransactionData) Timber.d("DCAPI raw request (origin=$origin): ${digitalOption.requestJson}")
 
         scope.launch {
             try {
-                val result = wallet.handleDCAPIRequest(digitalOption.requestJson, origin)
-                Timber.d("DCAPI final response: ${result.responseJson}")
+                val result = wallet.handleDCAPIRequest(
+                    digitalOption.requestJson,
+                    origin,
+                    // The app's own screens are not in front of the user during a DC API request,
+                    // so a payment confirmation is shown in this activity.
+                    consentHandler = TransactionConsentHandler { showTransactionConsentDialog(this@DCAPIGetCredentialActivity, it) },
+                )
+                if (!carriesTransactionData) Timber.d("DCAPI final response: ${result.responseJson}")
                 val responseIntent = Intent()
                 PendingIntentHandler.setGetCredentialResponse(
                     responseIntent,
@@ -141,8 +151,10 @@ class DCAPIGetCredentialActivity : Activity() {
             } catch (e: TransactionDataError) {
                 // A refused transaction_data request is answered with the
                 // protocol error OpenID4VP defines for it, not a generic one.
-                Timber.w(e, "DC API transaction_data refused (${e.reason.code})")
-                finishWithProtocolError(e.message ?: "Invalid transaction_data", e.verifierError)
+                // Only the OpenID4VP error code goes to the verifier's page: free text would tell it
+                // which credentials the wallet holds and why a request failed.
+                Timber.w("DC API transaction_data refused (${e.reason.code})")
+                finishWithProtocolError(null, e.verifierError)
             } catch (e: WalletException) {
                 // A decline (untrusted verifier, no matching/eligible
                 // credential, missing encryption key, ...) is a normal
@@ -193,10 +205,10 @@ class DCAPIGetCredentialActivity : Activity() {
      * and OpenID4VP doesn't define a more specific code for most of them
      * anyway.
      */
-    private fun finishWithProtocolError(description: String, error: String = "access_denied") {
+    private fun finishWithProtocolError(description: String?, error: String = "access_denied") {
         val errorJson = buildJsonObject {
             put("error", JsonPrimitive(error))
-            put("error_description", JsonPrimitive(description))
+            if (description != null) put("error_description", JsonPrimitive(description))
         }.toString()
         Timber.d("DCAPI error response: $errorJson")
         val responseIntent = Intent()

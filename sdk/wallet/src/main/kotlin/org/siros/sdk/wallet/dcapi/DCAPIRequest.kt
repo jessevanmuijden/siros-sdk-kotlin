@@ -66,6 +66,8 @@ data class DCAPIRequest(
      * value, including `null` or an empty array, counts.
      */
     val hasTransactionData: Boolean = false,
+    /** The value of the `transaction_data` member when present (not validated here); `null` when absent. */
+    val transactionData: kotlinx.serialization.json.JsonElement? = null,
 )
 
 /**
@@ -133,6 +135,7 @@ object DCAPIRequestParser {
             protocol = protocol,
             state = obj["state"]?.jsonPrimitive?.contentOrNull,
             hasTransactionData = obj.containsKey("transaction_data"),
+            transactionData = obj["transaction_data"],
         )
     }
 
@@ -182,6 +185,7 @@ object DCAPIRequestParser {
             protocol = protocol,
             state = payload["state"]?.jsonPrimitive?.contentOrNull,
             hasTransactionData = payload.containsKey("transaction_data"),
+            transactionData = payload["transaction_data"],
         )
     }
 

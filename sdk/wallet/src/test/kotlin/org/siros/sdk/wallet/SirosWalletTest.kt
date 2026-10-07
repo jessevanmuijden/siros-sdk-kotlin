@@ -70,6 +70,7 @@ import org.siros.sdk.credentials.SignerSecurityProperties
 import org.siros.sdk.credentials.StoredCredential
 import org.siros.sdk.credentials.interop.HolderBinding
 import org.siros.sdk.credentials.interop.InteropProfile
+import org.siros.sdk.credentials.TransactionDataError
 import org.siros.sdk.credentials.WalletException
 import org.siros.sdk.keystore.AttestationChain
 import org.siros.sdk.keystore.KeyInfo
@@ -7011,6 +7012,8 @@ class SirosWalletTest {
             "keystore" to keystore,
             "eventListener" to listener,
             "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "customTransactionLogStore" to InMemoryTransactionLog(),
+            "transactionMetadataSourceOverride" to org.siros.sdk.wallet.transaction.TransactionTestFixtures.FakeSource(),
             "lastTrustResults" to mutableMapOf<String, TrustResult>(),
             "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
             "json" to Json { ignoreUnknownKeys = true },
@@ -7039,7 +7042,7 @@ class SirosWalletTest {
             engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any())
         }
         verify(exactly = 1) {
-            listener.onFlowError("flow-td", match { it.contains("invalid_transaction_data (disabled)") }, any())
+            listener.onFlowError("flow-td", match { it.contains("refused: disabled") }, any())
         }
     }
 
@@ -7095,6 +7098,9 @@ class SirosWalletTest {
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
             "keystore" to keystore,
             "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "customTransactionLogStore" to InMemoryTransactionLog(),
+            "transactionMetadataSourceOverride" to org.siros.sdk.wallet.transaction.TransactionTestFixtures.FakeSource(),
         )
         val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
         method.isAccessible = true
@@ -7139,6 +7145,8 @@ class SirosWalletTest {
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
             "apiClient" to apiClient,
+            "customTransactionLogStore" to InMemoryTransactionLog(),
+            "transactionMetadataSourceOverride" to org.siros.sdk.wallet.transaction.TransactionTestFixtures.FakeSource(),
         )
         val raw = """{"requests":[{"protocol":"openid4vp-v1-unsigned","data":{
             "nonce":"n","dcql_query":{"credentials":[]},"transaction_data":["eyJ0eXBlIjoieCJ9"]}}]}"""
@@ -7153,29 +7161,21 @@ class SirosWalletTest {
         coVerify(exactly = 0) { apiClient.evaluateTrust(any()) }
     }
 
-    /** Effective enablement is flag AND handler AND a complete pipeline; initial flag from the config. */
+    /** Effective enablement is flag AND handler; initial flag from the config. */
     @Test
     fun transactionData_effectiveEnablement_needsFlagAndHandler() {
         val wallet = newWallet(
             "config" to WalletConfig(backendUrl = "https://wallet.example.com", transactionDataEnabled = true),
         )
         val handler = TransactionConsentHandler { true }
-        val previous = TransactionDataSupport.pipelineAvailable
-        TransactionDataSupport.pipelineAvailable = true
-        try {
-            assertFalse(wallet.isTransactionDataEffectivelyEnabled)
-            wallet.transactionDataEnabled = true
-            assertFalse("flag without a handler", wallet.isTransactionDataEffectivelyEnabled)
-            wallet.transactionConsentHandler = handler
-            assertTrue(wallet.isTransactionDataEffectivelyEnabled)
-            wallet.transactionDataEnabled = false
-            assertFalse("handler without the flag", wallet.isTransactionDataEffectivelyEnabled)
-            wallet.transactionDataEnabled = true
-            TransactionDataSupport.pipelineAvailable = false
-            assertFalse("no complete pipeline in this build", wallet.isTransactionDataEffectivelyEnabled)
-        } finally {
-            TransactionDataSupport.pipelineAvailable = previous
-        }
+
+        assertFalse(wallet.isTransactionDataEffectivelyEnabled)
+        wallet.transactionDataEnabled = true
+        assertFalse("flag without a handler", wallet.isTransactionDataEffectivelyEnabled)
+        wallet.transactionConsentHandler = handler
+        assertTrue(wallet.isTransactionDataEffectivelyEnabled)
+        wallet.transactionDataEnabled = false
+        assertFalse("handler without the flag", wallet.isTransactionDataEffectivelyEnabled)
     }
 
     @Test
@@ -7192,24 +7192,580 @@ class SirosWalletTest {
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
             "engineSession" to engine,
         )
-        val previous = TransactionDataSupport.pipelineAvailable
-        TransactionDataSupport.pipelineAvailable = true
-        try {
-            wallet.startPresentation("https://verifier.example.com/r1")
-            wallet.transactionDataEnabled = true
-            wallet.transactionConsentHandler = TransactionConsentHandler { true }
-            wallet.startPresentation("https://verifier.example.com/r2")
-            wallet.transactionDataEnabled = false
-            wallet.startPresentation("https://verifier.example.com/r3")
-        } finally {
-            TransactionDataSupport.pipelineAvailable = previous
-        }
+        wallet.startPresentation("https://verifier.example.com/r1")
+        wallet.transactionDataEnabled = true
+        wallet.transactionConsentHandler = TransactionConsentHandler { true }
+        wallet.startPresentation("https://verifier.example.com/r2")
+        wallet.transactionDataEnabled = false
+        wallet.startPresentation("https://verifier.example.com/r3")
 
         verify(exactly = 1) { engine.startPresentation("https://verifier.example.com/r1", null, null) }
         verify(exactly = 1) {
             engine.startPresentation("https://verifier.example.com/r2", null, listOf("transaction_data.v1"))
         }
         verify(exactly = 1) { engine.startPresentation("https://verifier.example.com/r3", null, null) }
+    }
+
+    // ── transaction_data (EC TS12) end to end, per transport ────────
+
+    private class ScaFixture(
+        val wallet: SirosWallet,
+        val log: InMemoryTransactionLog,
+        val keystore: org.siros.sdk.keystore.JweKeystore,
+        val consent: MutableList<TransactionConsentRequest>,
+    )
+
+    private val scaFactors = listOf(
+        org.siros.sdk.keystore.AuthenticationFactor(org.siros.sdk.keystore.AuthenticationCategory.KNOWLEDGE, "pin_6_or_more_digits"),
+        org.siros.sdk.keystore.AuthenticationFactor(org.siros.sdk.keystore.AuthenticationCategory.POSSESSION, "key_in_remote_wscd"),
+    )
+
+    /** A wallet holding one SD-JWT VC SCA attestation bound to a real software key. */
+    private fun scaFixture(
+        enabled: Boolean = true,
+        answer: Boolean = true,
+        factors: List<org.siros.sdk.keystore.AuthenticationFactor> = scaFactors,
+        declaredEngine: Boolean = enabled,
+        declaredWmp: Boolean = enabled,
+        extra: Array<Pair<String, Any?>> = emptyArray(),
+        useDefaultProvider: Boolean = false,
+        keystoreWrapper: ((org.siros.sdk.keystore.JweKeystore) -> KeystoreManager)? = null,
+    ): ScaFixture {
+        val keystore = org.siros.sdk.keystore.JweKeystore()
+        runBlocking {
+            keystore.unlock(ByteArray(32) { it.toByte() }, ByteArray(0), ByteArray(32) { (it + 0x10).toByte() }, "SIROS Wallet PRF".toByteArray())
+        }
+        val kid = runBlocking { keystore.generateKey() }
+        val cred = StoredCredential(
+            id = 1L, format = "dc+sd-jwt",
+            raw = org.siros.sdk.wallet.transaction.TransactionTestFixtures.credential().raw, kid = kid,
+            metadata = CredentialMetadata(name = "Pay Card"), batchId = 1L, instanceId = 0,
+        )
+        val log = InMemoryTransactionLog()
+        val consent = mutableListOf<TransactionConsentRequest>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to (keystoreWrapper?.invoke(keystore) ?: keystore),
+            "credentialStore" to FakeCredentialStore(mutableListOf(cred)),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "customTransactionLogStore" to log,
+            "transactionMetadataSourceOverride" to org.siros.sdk.wallet.transaction.TransactionTestFixtures.FakeSource(
+                org.siros.sdk.wallet.transaction.TransactionTestFixtures.metadata(types = org.siros.sdk.wallet.transaction.TransactionTestFixtures.PAYMENT_TYPES),
+            ),
+            "engineFlowDeclaredTransactionData" to declaredEngine,
+            "wmpSessionDeclaredTransactionData" to declaredWmp,
+            *(if (useDefaultProvider) emptyArray() else arrayOf("customFactorsProvider" to AuthenticationFactorsProvider { factors })),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+            "apiClient" to mockk<BackendApiClient>(relaxed = true),
+            *extra,
+        )
+        wallet.transactionDataEnabled = enabled
+        wallet.transactionConsentHandler = TransactionConsentHandler { consent += it; answer }
+        return ScaFixture(wallet, log, keystore, consent)
+    }
+
+    private val scaRaw = org.siros.sdk.wallet.transaction.TransactionTestFixtures.raw(algs = """["sha-384"]""")
+
+    private fun scaWire() = org.siros.sdk.transport.wmp.openid4x.TransactionData(
+        type = "urn:eudi:sca:payment:1", raw = scaRaw, credentialIds = listOf("pay"),
+        payload = Json.parseToJsonElement(org.siros.sdk.wallet.transaction.TransactionTestFixtures.PAYMENT_PAYLOAD),
+        transactionDataHashesAlg = listOf("sha-384"),
+    )
+
+    /** The checks a verifier makes of an SCA KB-JWT, computed here independently of the wallet. */
+    private fun assertScaKbJwt(vpToken: String, audience: String, nonce: String, responseMode: String) {
+        val kb = SignedJWT.parse(vpToken.split("~").last())
+        assertTrue(kb.verify(com.nimbusds.jose.crypto.ECDSAVerifier(kb.header.jwk.toECKey())))
+        val c = kb.jwtClaimsSet.claims
+        assertEquals("sha-384", c["transaction_data_hashes_alg"])
+        assertEquals(
+            listOf(
+                java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    java.security.MessageDigest.getInstance("SHA-384").digest(scaRaw.toByteArray(Charsets.US_ASCII)),
+                ),
+            ),
+            c["transaction_data_hashes"],
+        )
+        assertEquals(responseMode, c["response_mode"])
+        assertTrue((c["jti"] as String).isNotEmpty())
+        assertEquals(nonce, c["nonce"])
+        assertEquals(listOf(audience), kb.jwtClaimsSet.audience)
+        val amr = c["amr"] as List<*>
+        assertEquals(2, amr.map { (it as Map<*, *>).keys.single() }.toSet().size)
+    }
+
+    private suspend fun sendEngineSignRequest(
+        fx: ScaFixture,
+        transactionData: List<org.siros.sdk.transport.wmp.openid4x.TransactionData>? = listOf(scaWire()),
+    ): Pair<MutableList<String?>, WalletEngineSession> {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        val sent = mutableListOf<String?>()
+        every {
+            engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any())
+        } answers { sent += args[2] as String? }
+        invokeConnectEngine(fx.wallet, "app-token")
+        dispatcher.scheduler.advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-sca", messageId = "m1", action = "sign_presentation",
+                params = SignRequestParams(
+                    audience = "x509_san_dns:shop.example.com", nonce = "n-1", responseMode = "direct_post.jwt",
+                    credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pay", credentialId = "1")),
+                    transactionData = transactionData,
+                ),
+            )
+        )
+        repeat(8) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            dispatcher.scheduler.advanceUntilIdle()
+        }
+        return sent to engine
+    }
+
+    @Test
+    fun scaEngine_requestIn_kbJwtOut_andLogged() = runTest(dispatcher) {
+        val fx = scaFixture()
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertEquals(1, sent.size)
+        assertScaKbJwt(sent.single()!!, "x509_san_dns:shop.example.com", "n-1", "direct_post.jwt")
+        assertEquals(1, fx.consent.size)
+        assertEquals("Payee", fx.consent.single().entries.single().fields.first().label)
+        assertEquals(TransactionOutcome.CONSENTED, fx.log.items.single().outcome)
+    }
+
+    @Test
+    fun scaEngine_declined_signsNothing_andTheAppIsToldWhy() = runTest(dispatcher) {
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val fx = scaFixture(answer = false, extra = arrayOf("eventListener" to listener))
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertTrue(sent.isEmpty())
+        assertEquals(TransactionOutcome.DECLINED, fx.log.items.single().outcome)
+        verify(exactly = 1) { listener.onTransactionDataRefused("flow-sca", org.siros.sdk.credentials.TransactionDataReason.DECLINED) }
+    }
+
+    @Test
+    fun scaEngine_insufficientFactors_signsNothing() = runTest(dispatcher) {
+        val fx = scaFixture(factors = emptyList())
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertTrue(sent.isEmpty())
+        assertEquals("insufficientAuthenticationFactors", fx.log.items.single().reason)
+    }
+
+    @Test
+    fun scaEngine_orchestratorWithoutRaw_isRefusedAndLogged() = runTest(dispatcher) {
+        val fx = scaFixture()
+
+        val (sent, _) = sendEngineSignRequest(fx, listOf(scaWire().copy(raw = null)))
+
+        assertTrue(sent.isEmpty())
+        assertEquals(TransactionOutcome.REFUSED, fx.log.items.single().outcome)
+        assertEquals("invalidEntry", fx.log.items.single().reason)
+    }
+
+    @Test
+    fun scaEngine_hintThatDisagreesWithRaw_isRefused() = runTest(dispatcher) {
+        val fx = scaFixture()
+        val lying = scaWire().copy(payload = Json.parseToJsonElement(org.siros.sdk.wallet.transaction.TransactionTestFixtures.PAYMENT_PAYLOAD.replace("49.99", "1.00")))
+
+        val (sent, _) = sendEngineSignRequest(fx, listOf(lying))
+
+        assertTrue(sent.isEmpty())
+        assertTrue(fx.consent.isEmpty())
+        assertEquals("inconsistentWithOrchestrator", fx.log.items.single().reason)
+    }
+
+    @Test
+    fun scaEngine_flagOffAtFlowStart_refusesEvenIfEnabledLater() = runTest(dispatcher) {
+        // The flow started disabled; flipping the flag afterwards applies to the NEXT flow only.
+        val fx = scaFixture(enabled = false, declaredEngine = false)
+        fx.wallet.transactionDataEnabled = true
+        fx.wallet.transactionConsentHandler = TransactionConsentHandler { true }
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertTrue(sent.isEmpty())
+        assertEquals("disabled", fx.log.items.single().reason)
+    }
+
+    @Test
+    fun scaEngine_flagTurnedOffMidFlow_stillCompletesUnderTheStartingSetting() = runTest(dispatcher) {
+        val fx = scaFixture(declaredEngine = true)
+        fx.wallet.transactionDataEnabled = false
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertEquals(1, sent.size)
+        assertScaKbJwt(sent.single()!!, "x509_san_dns:shop.example.com", "n-1", "direct_post.jwt")
+    }
+
+    @Test
+    fun scaEngine_nonScaCredentialInTheSameRequestIsPresentedWithoutTransactionData() = runTest(dispatcher) {
+        val fx = scaFixture()
+        // the second credential answers a query no entry names
+        val plain = StoredCredential(
+            id = 2L, format = "dc+sd-jwt", raw = org.siros.sdk.wallet.transaction.TransactionTestFixtures.credential(2).raw,
+            kid = runBlocking { fx.keystore.generateKey() }, metadata = CredentialMetadata(name = "Age"), batchId = 2L, instanceId = 0,
+        )
+        setField(fx.wallet, "credentialStore", FakeCredentialStore(mutableListOf(
+            runBlocking { (getField(fx.wallet, "credentialStore") as FakeCredentialStore).getAll().first() }, plain,
+        )))
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        val sent = mutableListOf<String?>()
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers { sent += args[2] as String? }
+        invokeConnectEngine(fx.wallet, "app-token")
+        dispatcher.scheduler.advanceUntilIdle()
+
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-2", messageId = "m2", action = "sign_presentation",
+                params = SignRequestParams(
+                    audience = "aud", nonce = "n", responseMode = "direct_post",
+                    credentialsToInclude = listOf(
+                        org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pay", credentialId = "1"),
+                        org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "age", credentialId = "2"),
+                    ),
+                    transactionData = listOf(scaWire()),
+                ),
+            )
+        )
+        repeat(8) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            dispatcher.scheduler.advanceUntilIdle()
+        }
+
+        val parts = sent.single()!!.split("\n")
+        assertEquals(2, parts.size)
+        val sca = SignedJWT.parse(parts[0].split("~").last()).jwtClaimsSet.claims
+        val plainClaims = SignedJWT.parse(parts[1].split("~").last()).jwtClaimsSet.claims
+        assertTrue(sca.containsKey("transaction_data_hashes"))
+        assertEquals(setOf("aud", "iat", "nonce", "sd_hash"), plainClaims.keys)
+    }
+
+    // WMP
+
+    private fun invokeWmpSign(wallet: SirosWallet, params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult {
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        return runBlocking {
+            try {
+                method.callSuspend(wallet, "flow-wmp", params)
+            } catch (e: java.lang.reflect.InvocationTargetException) {
+                throw e.cause ?: e
+            }
+        } as org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult
+    }
+
+    private fun wmpParams() = org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+        action = "sign_presentation", nonce = "n-2", audience = "x509_san_dns:shop.example.com",
+        responseMode = "direct_post", transactionData = listOf(scaWire()),
+        credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pay", credentialId = "1")),
+    )
+
+    @Test
+    fun scaWmp_requestIn_kbJwtOut_andLogged() = runTest(dispatcher) {
+        val fx = scaFixture()
+
+        val result = invokeWmpSign(fx.wallet, wmpParams())
+
+        assertScaKbJwt(result.vpToken!!, "x509_san_dns:shop.example.com", "n-2", "direct_post")
+        assertEquals(TransactionOutcome.CONSENTED, fx.log.items.single().outcome)
+    }
+
+    @Test
+    fun scaWmp_sessionDeclaredOff_refuses_untilANewSession() = runTest(dispatcher) {
+        val fx = scaFixture(enabled = true, declaredWmp = false)
+
+        val e = runCatching { invokeWmpSign(fx.wallet, wmpParams()) }.exceptionOrNull() as TransactionDataError
+
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.DISABLED, e.reason)
+        assertTrue(fx.consent.isEmpty())
+    }
+
+    @Test
+    fun scaWmp_declined_and_insufficientFactors_signNothing() = runTest(dispatcher) {
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val declined = runCatching {
+            invokeWmpSign(scaFixture(answer = false, extra = arrayOf("eventListener" to listener)).wallet, wmpParams())
+        }.exceptionOrNull() as TransactionDataError
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.DECLINED, declined.reason)
+        verify(exactly = 1) { listener.onTransactionDataRefused("flow-wmp", org.siros.sdk.credentials.TransactionDataReason.DECLINED) }
+        val few = runCatching { invokeWmpSign(scaFixture(factors = scaFactors.take(1)).wallet, wmpParams()) }.exceptionOrNull() as TransactionDataError
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, few.reason)
+    }
+
+    // DC API
+
+    private fun dcApiRequest(transactionData: String, responseMode: String = "dc_api") =
+        wrapDCAPIRequest("openid4vp-v1-unsigned", buildJsonObject {
+            put("client_id", "web-origin:https://shop.example.com")
+            put("response_mode", responseMode)
+            put("nonce", "dc-n")
+            put("transaction_data", Json.parseToJsonElement(transactionData))
+            put("dcql_query", Json.parseToJsonElement("""{"credentials":[{"id":"pay","format":"dc+sd-jwt","meta":{"vct_values":["https://pay.example.com/card"]}}]}"""))
+        })
+
+    private fun dcApiWallet(fx: ScaFixture) {
+        val api = mockk<BackendApiClient>()
+        coEvery { api.evaluateTrust(any()) } returns buildJsonObject { put("decision", true) }
+        setField(fx.wallet, "apiClient", api)
+        setField(fx.wallet, "trustCache", TrustCache())
+        setField(fx.wallet, "_presentationHistory", mutableListOf<PresentationRecord>())
+    }
+
+    @Test
+    fun scaDcApi_requestIn_kbJwtOut_withWarningForAnUnsignedRequest() = runTest(dispatcher) {
+        val fx = scaFixture()
+        dcApiWallet(fx)
+
+        val result = fx.wallet.handleDCAPIRequest(dcApiRequest("""["$scaRaw"]"""), "https://shop.example.com")
+
+        val vp = Json.parseToJsonElement(result.responseJson).jsonObject["data"]!!.jsonObject["vp_token"]!!.jsonObject["pay"]!!.jsonArray.single().jsonPrimitive.content
+        assertScaKbJwt(vp, "origin:https://shop.example.com", "dc-n", "dc_api")
+        assertEquals(false, fx.consent.single().requestSigned)
+        assertEquals(TransactionOutcome.CONSENTED, fx.log.items.single().outcome)
+    }
+
+    @Test
+    fun scaDcApi_flagOff_refusesBeforeTrustAndLogs() = runTest(dispatcher) {
+        val fx = scaFixture(enabled = false)
+        val api = mockk<BackendApiClient>()
+        setField(fx.wallet, "apiClient", api)
+
+        val e = runCatching { fx.wallet.handleDCAPIRequest(dcApiRequest("""["$scaRaw"]"""), "https://shop.example.com") }.exceptionOrNull() as TransactionDataError
+
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.DISABLED, e.reason)
+        coVerify(exactly = 0) { api.evaluateTrust(any()) }
+        assertEquals("tx-0001", fx.log.items.single().transactionId)
+    }
+
+    @Test
+    fun scaDcApi_enabledWithoutHandler_behavesAsDisabled() = runTest(dispatcher) {
+        val fx = scaFixture()
+        fx.wallet.transactionConsentHandler = null
+
+        val e = runCatching { fx.wallet.handleDCAPIRequest(dcApiRequest("""["$scaRaw"]"""), "https://shop.example.com") }.exceptionOrNull() as TransactionDataError
+
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.DISABLED, e.reason)
+    }
+
+    @Test
+    fun scaDcApi_malformedTransactionData_isRefused() = runTest(dispatcher) {
+        val fx = scaFixture()
+        dcApiWallet(fx)
+        for (bad in listOf("""["$scaRaw", 5]""", """{"a":1}""", """"x"""", "[]")) {
+            val e = runCatching { fx.wallet.handleDCAPIRequest(dcApiRequest(bad), "https://shop.example.com") }.exceptionOrNull() as TransactionDataError
+            assertEquals(bad, org.siros.sdk.credentials.TransactionDataReason.INVALID_ENTRY, e.reason)
+        }
+        assertEquals("every malformed request is logged, with no payload", 4, fx.log.items.size)
+        assertTrue(fx.log.items.all { it.reason == "invalidEntry" && it.outcome == TransactionOutcome.REFUSED && it.transactionId == null })
+    }
+
+    @Test
+    fun scaDcApi_withoutTransactionData_isUnchangedByTheFlag() = runTest(dispatcher) {
+        val fx = scaFixture()
+        dcApiWallet(fx)
+        val plain = wrapDCAPIRequest("openid4vp-v1-unsigned", buildJsonObject {
+            put("client_id", "web-origin:https://shop.example.com"); put("nonce", "dc-n")
+            put("dcql_query", Json.parseToJsonElement("""{"credentials":[{"id":"pay","format":"dc+sd-jwt","meta":{"vct_values":["https://pay.example.com/card"]}}]}"""))
+        })
+
+        val result = fx.wallet.handleDCAPIRequest(plain, "https://shop.example.com")
+
+        val vp = Json.parseToJsonElement(result.responseJson).jsonObject["data"]!!.jsonObject["vp_token"]!!.jsonObject["pay"]!!.jsonArray.single().jsonPrimitive.content
+        assertEquals(setOf("aud", "iat", "nonce", "sd_hash"), SignedJWT.parse(vp.split("~").last()).jwtClaimsSet.claims.keys)
+        assertTrue(fx.consent.isEmpty() && fx.log.items.isEmpty())
+    }
+
+    // ── review fixes: ordering, defaults, TOCTOU, isolation, wording ──
+
+    @Test
+    fun scaDefaults_theSdkDefaultProviderIsTheConservativeOne_andRefusesBeforeConsent() = runTest(dispatcher) {
+        val fx = scaFixture(useDefaultProvider = true)
+        assertTrue(fx.wallet.authenticationFactorsProvider === ConservativeAuthenticationFactorsProvider)
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertTrue(sent.isEmpty())
+        assertTrue("the user is not asked", fx.consent.isEmpty())
+        assertEquals("insufficientAuthenticationFactors", fx.log.items.single().reason)
+    }
+
+    private fun spyKeystore(events: MutableList<String>): (org.siros.sdk.keystore.JweKeystore) -> KeystoreManager = { real ->
+        val spy = io.mockk.spyk(real)
+        coEvery { spy.signVpToken(any(), any(), any(), any(), any(), any()) } answers { events += "sign"; callOriginal() }
+        coEvery { spy.signVpToken(any(), any(), any(), any(), any()) } answers { events += "sign"; callOriginal() }
+        coEvery { spy.signPresentation(any(), any(), any(), any()) } answers { events += "sign"; callOriginal() }
+        spy
+    }
+
+    @Test
+    fun scaEngine_nothingIsSignedUntilTheUserHasConsented() = runTest(dispatcher) {
+        val events = mutableListOf<String>()
+        val fx = scaFixture(keystoreWrapper = spyKeystore(events))
+        fx.wallet.transactionConsentHandler = TransactionConsentHandler { events += "consent"; true }
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertEquals(1, sent.size)
+        assertEquals(listOf("consent", "sign"), events)
+    }
+
+    @Test
+    fun scaWmp_nothingIsSignedUntilTheUserHasConsented() = runTest(dispatcher) {
+        val events = mutableListOf<String>()
+        val fx = scaFixture(keystoreWrapper = spyKeystore(events))
+        fx.wallet.transactionConsentHandler = TransactionConsentHandler { events += "consent"; true }
+
+        invokeWmpSign(fx.wallet, wmpParams())
+
+        assertEquals(listOf("consent", "sign"), events)
+    }
+
+    @Test
+    fun scaDcApi_nothingIsSignedUntilTheUserHasConsented() = runTest(dispatcher) {
+        val events = mutableListOf<String>()
+        val fx = scaFixture(keystoreWrapper = spyKeystore(events))
+        dcApiWallet(fx)
+        fx.wallet.transactionConsentHandler = TransactionConsentHandler { events += "consent"; true }
+
+        fx.wallet.handleDCAPIRequest(dcApiRequest("""["$scaRaw"]"""), "https://shop.example.com")
+
+        assertEquals(listOf("consent", "sign"), events)
+    }
+
+    @Test
+    fun scaDcApi_aPerRequestHandlerStandsInForTheGlobalOne() = runTest(dispatcher) {
+        val fx = scaFixture()
+        dcApiWallet(fx)
+        fx.wallet.transactionConsentHandler = null
+        val seen = mutableListOf<TransactionConsentRequest>()
+
+        val result = fx.wallet.handleDCAPIRequest(
+            dcApiRequest("""["$scaRaw"]"""), "https://shop.example.com",
+            consentHandler = TransactionConsentHandler { seen += it; true },
+        )
+
+        assertEquals(1, seen.size)
+        assertTrue(result.responseJson.contains("vp_token"))
+        assertTrue("the global handler was not used", fx.consent.isEmpty())
+    }
+
+    @Test
+    fun scaEngine_theCredentialSignedIsTheOneThatWasShown_evenIfTheStoreChangesDuringConsent() = runTest(dispatcher) {
+        val fx = scaFixture()
+        val original = runBlocking { (getField(fx.wallet, "credentialStore") as FakeCredentialStore).getAll().single() }
+        fx.wallet.transactionConsentHandler = TransactionConsentHandler {
+            // while the user thinks, the stored credential is replaced by a different one under the same id
+            setField(fx.wallet, "credentialStore", FakeCredentialStore(mutableListOf(
+                original.copy(raw = org.siros.sdk.wallet.transaction.TransactionTestFixtures.credential(claims = """{"vct":"https://pay.example.com/card","swapped":true}""").raw),
+            )))
+            true
+        }
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertEquals(original.raw.substringBefore("~"), sent.single()!!.substringBefore("~"))
+    }
+
+    @Test
+    fun scaEngine_aSlowConsentDoesNotStallOtherSignRequests() = runTest(dispatcher) {
+        // runCurrent, never advanceUntilIdle: advancing virtual time would fire the consent time limit.
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val fx = scaFixture()
+        fx.wallet.transactionConsentHandler = TransactionConsentHandler { gate.await() }
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        val sent = mutableListOf<Pair<String, String?>>()
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers { sent += (args[0] as String) to (args[2] as String?) }
+        invokeConnectEngine(fx.wallet, "app-token")
+        dispatcher.scheduler.runCurrent()
+
+        signFlow.emit(SignRequestMessage(flowId = "slow", messageId = "m1", action = "sign_presentation", params = SignRequestParams(
+            audience = "aud", nonce = "n", responseMode = "direct_post",
+            credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pay", credentialId = "1")),
+            transactionData = listOf(scaWire()),
+        )))
+        repeat(4) { runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }; dispatcher.scheduler.runCurrent() }
+        signFlow.emit(SignRequestMessage(flowId = "other", messageId = "m2", action = "sign_presentation", params = SignRequestParams(audience = "aud", nonce = "n")))
+        repeat(6) { runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }; dispatcher.scheduler.runCurrent() }
+
+        assertEquals("the other request was answered while consent was pending", listOf("other"), sent.map { it.first })
+
+        gate.complete(true)
+        repeat(8) { runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }; dispatcher.scheduler.runCurrent() }
+        assertEquals(listOf("other", "slow"), sent.map { it.first })
+    }
+
+    @Test
+    fun scaEngine_refusalTextIsGenericAndADeclineIsNotAnError() = runTest(dispatcher) {
+        val refused = mockk<WalletEventListener>(relaxed = true)
+        val a = scaFixture(factors = emptyList(), useDefaultProvider = true, extra = arrayOf("eventListener" to refused))
+        sendEngineSignRequest(a)
+        verify(exactly = 1) { refused.onFlowError("flow-sca", "Payment confirmation refused: insufficientAuthenticationFactors", any()) }
+
+        val declined = mockk<WalletEventListener>(relaxed = true)
+        val b = scaFixture(answer = false, extra = arrayOf("eventListener" to declined))
+        sendEngineSignRequest(b)
+        verify(exactly = 0) { declined.onFlowError(any(), any(), any()) }
+        verify(exactly = 1) { declined.onTransactionDataRefused("flow-sca", org.siros.sdk.credentials.TransactionDataReason.DECLINED) }
+    }
+
+    @Test
+    fun scaEngine_aKeystoreWithoutTheBindingOverloadIsARefusalNotAnError() = runTest(dispatcher) {
+        val fx = scaFixture(keystoreWrapper = { real ->
+            val spy = io.mockk.spyk(real)
+            coEvery { spy.signVpToken(any(), any(), any(), any(), any(), any()) } throws AbstractMethodError("old keystore")
+            spy
+        })
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertTrue(sent.isEmpty())
+        assertEquals(listOf(TransactionOutcome.REFUSED, TransactionOutcome.CONSENTED), fx.log.items.map { it.outcome })
+        assertEquals("signingFailed", fx.log.items.first().reason)
+    }
+
+    @Test
+    fun scaWmp_anMdocInTheSameRequestIsRefusedBeforeConsent() = runTest(dispatcher) {
+        val fx = scaFixture()
+        val mdoc = StoredCredential(id = 2L, format = "mso_mdoc", raw = "AAAA", batchId = 2L, instanceId = 0)
+        setField(fx.wallet, "credentialStore", FakeCredentialStore(mutableListOf(
+            runBlocking { (getField(fx.wallet, "credentialStore") as FakeCredentialStore).getAll().first() }, mdoc,
+        )))
+        val params = wmpParams().copy(
+            credentialsToInclude = listOf(
+                org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pay", credentialId = "1"),
+                org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "id", credentialId = "2"),
+            ),
+        )
+
+        val e = runCatching { invokeWmpSign(fx.wallet, params) }.exceptionOrNull() as TransactionDataError
+
+        assertEquals(org.siros.sdk.credentials.TransactionDataReason.UNSUPPORTED_FORMAT, e.reason)
+        assertTrue(fx.consent.isEmpty())
+        assertEquals(TransactionOutcome.REFUSED, fx.log.items.single().outcome)
+    }
+
+    @Test
+    fun scaEngine_theConsentModelListsWhatWillBeDisclosed() = runTest(dispatcher) {
+        val fx = scaFixture()
+        sendEngineSignRequest(fx)
+
+        val d = fx.consent.single().disclosures
+        assertEquals(1, d.size)
+        assertEquals("Pay Card", d.single().credentialName)
+        assertEquals(true, d.single().bindsTransaction)
     }
 
     private fun invokeConnectEngine(wallet: SirosWallet, appToken: String) {
@@ -7280,6 +7836,13 @@ class SirosWalletTest {
         val unsafe = unsafeField.get(null)
         val allocateInstance = unsafeClass.getMethod("allocateInstance", Class::class.java)
         return allocateInstance.invoke(unsafe, clazz)
+    }
+
+    private class InMemoryTransactionLog : TransactionLogStore {
+        val items = mutableListOf<TransactionLogEntry>()
+        override suspend fun append(entry: TransactionLogEntry) { items.add(0, entry) }
+        override suspend fun entries(): List<TransactionLogEntry> = items.toList()
+        override suspend fun clear() { items.clear() }
     }
 
     private class FakeCredentialStore(

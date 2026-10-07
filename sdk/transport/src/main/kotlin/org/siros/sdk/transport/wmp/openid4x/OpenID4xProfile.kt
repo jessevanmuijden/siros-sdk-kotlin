@@ -438,8 +438,8 @@ class OpenID4xProfile(
         } catch (e: TransactionDataError) {
             // A refused transaction_data request names its reason (the
             // verifier-facing OpenID4VP error) instead of the generic code.
-            Timber.w(e, "Sign request refused: transaction_data (${e.reason.code})")
-            sendFlowError(flowId, e.verifierError, e.message)
+            Timber.w("Sign request refused: transaction_data (${e.reason.code})")
+            sendFlowError(flowId, e.verifierError, e.reason.code)
         } catch (e: Exception) {
             Timber.e(e, "Sign request handler failed")
             sendFlowError(flowId, "SIGN_ERROR", e.message)

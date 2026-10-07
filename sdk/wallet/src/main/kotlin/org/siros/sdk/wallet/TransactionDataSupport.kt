@@ -6,8 +6,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import org.siros.sdk.credentials.TransactionDataError
-import org.siros.sdk.credentials.TransactionDataReason
 
 /**
  * What the wallet declares to an orchestrator about OpenID4VP
@@ -20,16 +18,6 @@ internal object TransactionDataSupport {
 
     /** Hash algorithms (`transaction_data_hashes_alg` names) this SDK can compute. */
     val HASH_ALGS: List<String> = org.siros.sdk.keystore.TransactionBinding.HASH_ALGS
-
-    /**
-     * Whether the SDK contains a complete `transaction_data` pipeline
-     * (validation, consent, binding). Declaring support for something that
-     * would then be dropped is worse than declaring nothing, so every
-     * declaration and every acceptance is gated on this. It is a seam for
-     * tests; production code never changes it.
-     */
-    @Volatile
-    var pipelineAvailable: Boolean = false
 
     /**
      * The `capabilities_offered` object for a WMP session, or `null` when
@@ -58,20 +46,4 @@ internal object TransactionDataSupport {
         } else {
             null
         }
-
-    /**
-     * Refuses a request that carries `transaction_data`: it must never be
-     * ignored, because a presentation without the transaction hashes would be
-     * signed without the user having seen or authorised the transaction.
-     *
-     * @param present whether the request has any `transaction_data` member.
-     * @throws TransactionDataError always when [present].
-     */
-    fun refuseIfPresent(present: Boolean) {
-        if (!present) return
-        throw TransactionDataError(
-            TransactionDataReason.DISABLED,
-            "The request carries transaction_data, which this wallet cannot process; refusing it",
-        )
-    }
 }

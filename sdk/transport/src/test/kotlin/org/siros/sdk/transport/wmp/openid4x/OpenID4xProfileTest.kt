@@ -528,6 +528,6 @@ class OpenID4xProfileTest {
 
         val params = ctx.notifications.first { it.first == WmpMethods.FLOW_ERROR }.second!!
         assertEquals(JsonPrimitive("invalid_transaction_data"), params["code"])
-        assertEquals(JsonPrimitive("refused"), params["message"])
+        assertEquals(JsonPrimitive("disabled"), params["message"])
     }
 }

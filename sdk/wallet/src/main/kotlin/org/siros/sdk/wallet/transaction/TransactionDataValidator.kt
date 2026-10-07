@@ -28,7 +28,12 @@ internal class TransactionDataRequest(
     val nonce: String? = null,
     val verifier: String? = null,
     val requestSigned: Boolean? = null,
+    /** What the presentation will disclose, for the consent screen. */
+    val disclosures: List<DisclosureInput> = emptyList(),
 )
+
+/** One credential of the presentation and what it will disclose, as the wiring knows it before validation. */
+internal class DisclosureInput(val queryId: String?, val credentialName: String?, val claims: List<String>?)
 
 /** One credential an entry is bound to, with the metadata it was validated against. */
 internal class ScaCredentialContext(
@@ -61,6 +66,9 @@ internal class ValidatedTransactionData(
     /** Whether the metadata that drove this validation was authenticated by pins. */
     internal val trust: MetadataTrust = MetadataTrust(),
 ) {
+    /** The DCQL query ids some entry is bound to, in first-mention order. */
+    fun boundQueryIds(): List<String> = byQuery.keys.toList()
+
     /** The hashes for the credential(s) answering [queryId], or `null` when no entry is bound to it. */
     fun hashesFor(queryId: String): QueryHashes? = byQuery[queryId]
 

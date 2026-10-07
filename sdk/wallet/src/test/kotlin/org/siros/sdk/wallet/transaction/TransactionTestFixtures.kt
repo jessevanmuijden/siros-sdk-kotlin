@@ -50,22 +50,40 @@ internal object TransactionTestFixtures {
         category: String? = "urn:eu:europa:ec:eudi:sua:sca",
         types: String? = null,
     ): JsonObject {
-        val parts = mutableListOf("\"vct\":\"https://pay.example.com/card\"")
+        val parts = mutableListOf("\"vct\":\"https://pay.example.com/card\"", "\"name\":\"Pay Card\"")
         category?.let { parts += "\"category\":\"$it\"" }
         types?.let { parts += "\"transaction_data_types\":$it" }
         return Json.parseToJsonElement("{${parts.joinToString(",")}}") as JsonObject
     }
 
+    /** `transaction_data_types` for the payment type with claim metadata and UI labels, as TS12 2.3 sketches. */
+    val PAYMENT_TYPES = """{"urn:eudi:sca:payment:1":{
+      "schema":"urn:eudi:sca:payment:1",
+      "claims":[
+        {"path":["payload","transaction_id"],"visualisation":4,"display":[{"lang":"en","label":"Transaction ID"}]},
+        {"path":["payload","payee","name"],"visualisation":1,"display":[{"lang":"sv","label":"Mottagare"},{"lang":"en","label":"Payee"}]},
+        {"path":["payload","payee","id"],"display":[{"lang":"en","label":"Payee ID"}]},
+        {"path":["payload","currency"],"visualisation":2,"display":[{"lang":"en","label":"Currency"}]},
+        {"path":["payload","amount"],"visualisation":1,"display":[{"lang":"en","label":"Amount"}]}
+      ],
+      "ui_labels":{
+        "affirmative_action_label":[{"lang":"en","value":"Confirm Payment"},{"lang":"sv","value":"Bekräfta betalning"}],
+        "denial_action_label":[{"lang":"en","value":"Cancel Payment"}],
+        "transaction_title":[{"lang":"en","value":"Confirm your payment"}],
+        "security_hint":[{"lang":"en","value":"Check the amount"}]
+      }}}"""
+
     /** A [TransactionMetadataSource] backed by maps; `null` metadata or a missing document is "unavailable". */
     class FakeSource(
         private val metadata: JsonObject? = metadata(),
         private val documents: Map<String, String> = emptyMap(),
+        private val perCredential: ((StoredCredential) -> JsonObject?)? = null,
     ) : TransactionMetadataSource {
         val fetched = mutableListOf<String>()
         var metadataCalls = 0
         override suspend fun typeMetadata(credential: StoredCredential): JsonObject? {
             metadataCalls++
-            return metadata
+            return perCredential?.invoke(credential) ?: metadata
         }
         override suspend fun document(uri: String): String? {
             fetched += uri

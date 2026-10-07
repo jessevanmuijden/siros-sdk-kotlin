@@ -35,6 +35,28 @@ data class TransactionConsentRequest(
     val requestSigned: Boolean?,
     /** The locale the labels were resolved for. */
     val locale: String,
+    /**
+     * What will be disclosed, per credential in the presentation (EC TS12
+     * 3.3.1: the transaction is shown "in conjunction with the requested
+     * attributes"): the SCA credential and any other in a combined
+     * presentation. Show it together with [entries].
+     */
+    val disclosures: List<TransactionDisclosure> = emptyList(),
+)
+
+/**
+ * The attributes one credential discloses in the presentation.
+ *
+ * @property credentialName display name of the credential.
+ * @property claims the claim names disclosed; `null` means every claim the
+ *   credential holds is disclosed.
+ * @property bindsTransaction whether the transaction is bound into this
+ *   credential's presentation (the SCA credential).
+ */
+data class TransactionDisclosure(
+    val credentialName: String?,
+    val claims: List<String>?,
+    val bindsTransaction: Boolean,
 )
 
 /** One transaction to display. */

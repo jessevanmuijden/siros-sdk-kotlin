@@ -5,10 +5,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertThrows
 import org.junit.Test
-import org.siros.sdk.credentials.TransactionDataError
-import org.siros.sdk.credentials.TransactionDataReason
 
 class TransactionDataSupportTest {
 
@@ -34,13 +31,5 @@ class TransactionDataSupportTest {
     @Test
     fun `engine feature is transaction_data_v1`() {
         assertEquals(listOf("transaction_data.v1"), TransactionDataSupport.engineFeatures(true))
-    }
-
-    @Test
-    fun `a request carrying transaction_data is refused, one without is not`() {
-        TransactionDataSupport.refuseIfPresent(false)
-
-        val e = assertThrows(TransactionDataError::class.java) { TransactionDataSupport.refuseIfPresent(true) }
-        assertEquals(TransactionDataReason.DISABLED, e.reason)
     }
 }

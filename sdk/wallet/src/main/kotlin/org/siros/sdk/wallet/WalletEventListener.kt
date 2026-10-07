@@ -107,6 +107,19 @@ interface WalletEventListener {
     fun onFlowError(flowId: String, errorMessage: String, redirectUri: String? = null) {}
 
     /**
+     * A presentation request carrying OpenID4VP `transaction_data` (EC TS12)
+     * was refused or declined, with nothing signed. The SDK reports the
+     * machine-readable [reason]; the app words it for the user in its own
+     * language ([org.siros.sdk.credentials.TransactionDataReason.code] is the
+     * cross-SDK reason code). Called in addition to [onFlowError] where the
+     * transport reports a flow error. Not called for the DC API, whose
+     * refusal is thrown to the caller of [SirosWallet.handleDCAPIRequest].
+     */
+    fun onTransactionDataRefused(flowId: String, reason: org.siros.sdk.credentials.TransactionDataReason) {
+        // Optional: apps that do not word refusals themselves ignore it.
+    }
+
+    /**
      * An issuer requires user authorization (OAuth consent).
      *
      * The app should open [authorizationUrl] in a Custom Tab or browser.

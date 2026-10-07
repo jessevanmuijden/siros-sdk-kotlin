@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction: TransactionBinding)`.
 
 ### Added
+- **`transaction_data` (EC TS12 payment SCA) is wired into the engine
+  WebSocket, WMP and DC API presentation paths.** With
+  `transactionDataEnabled` on and a `transactionConsentHandler` registered
+  the wallet validates the request, shows it through the handler (labels,
+  `visualisation` levels, UI elements from the type metadata; refusing when a
+  required label is missing), establishes the authentication factors through
+  `authenticationFactorsProvider`, signs the key binding JWT with the
+  transaction bound, and records every attempt in `transactionLogStore`
+  (`getTransactionLog()`). The default factors provider establishes none, so
+  SCA presentations are refused (`insufficientAuthenticationFactors`) until a
+  provider that can justify two categories for the operation is registered
+  (the WSCD manager does not report them yet, siros-wscd-manager#101/#102).
+  The user is not asked to confirm a request the provider says it cannot
+  satisfy (`AuthenticationFactorsProvider.canEstablish`). The DC API shows the
+  confirmation in its own activity. Values and labels with control, bidi or
+  zero-width characters are refused; for the built-in types the amount,
+  currency and payee name are always level 1 whatever the metadata says.
 - **`transaction_data` core (EC TS12), not yet reachable from any transport.**
   Strict decoding of each entry from its own `raw` (duplicate member names,
   invalid UTF-8 and orchestrator-hint disagreement are refused), SD-JWT VC
