@@ -240,4 +240,43 @@
     <string name="credential_detail_holder_binding">Innehavarbindning</string>
     <string name="credential_status_unknown">Okänt</string>
     <string name="credential_status_unknown_detail">Det gick inte att fastställa detta intygs status</string>
+
+    <!-- Payment SCA (EC TS12) -->
+    <string name="settings_transaction_data">Betalningsbekräftelser</string>
+    <string name="settings_transaction_data_description">Hantera betalningsbekräftelser (EC TS12 SCA): visa transaktionen, be om bekräftelse och logga den. Gäller nästa begäran. Den här versionen levererar inga autentiseringsfaktorer, så bekräftade begäranden nekas ändå.</string>
+    <string name="settings_transaction_log">Transaktionslogg</string>
+    <string name="transaction_log_title">Transaktionslogg</string>
+    <string name="transaction_log_empty">Inga betalningsbekräftelser ännu</string>
+    <string name="transaction_log_outcome_consented">Bekräftad</string>
+    <string name="transaction_log_outcome_declined">Avböjd</string>
+    <string name="transaction_log_outcome_refused">Nekad</string>
+    <string name="transaction_log_id">Transaktion %1$s</string>
+    <string name="transaction_log_reason">Orsak: %1$s</string>
+    <string name="transaction_consent_default_title">Bekräfta transaktion</string>
+    <string name="transaction_consent_default_deny">Avbryt</string>
+    <string name="transaction_consent_requested_by">Begärd av %1$s</string>
+    <string name="transaction_consent_credential">Använder %1$s</string>
+    <string name="transaction_consent_unsigned_warning">Begäran är inte signerad, så avsändaren kunde inte verifieras. Fortsätt bara om du själv startade den.</string>
+    <string name="transaction_consent_unsigned_ack">Jag startade begäran och vill fortsätta</string>
+    <string name="transaction_refused_disabled">Den här plånboken är inte inställd för att bekräfta betalningsbegäranden.</string>
+    <string name="transaction_refused_invalid_entry">Betalningsbegäran är felaktig.</string>
+    <string name="transaction_refused_inconsistent">Betalningsbegäran ändrades på vägen och godkändes inte.</string>
+    <string name="transaction_refused_unsupported_format">Betalningsbekräftelse kräver en SD-JWT-legitimation.</string>
+    <string name="transaction_refused_not_sca">Legitimationen är inte en legitimation för betalningsautentisering.</string>
+    <string name="transaction_refused_unsupported_type">Den här typen av betalningsbegäran stöds inte av legitimationen.</string>
+    <string name="transaction_refused_schema">Betalningsuppgifterna är inte giltiga för den här legitimationen.</string>
+    <string name="transaction_refused_metadata">Informationen som behövs för att visa betalningen kunde inte hämtas.</string>
+    <string name="transaction_refused_hash_alg">Betalningsbegäran använder en algoritm som inte stöds.</string>
+    <string name="transaction_refused_factors">Det gick inte att bekräfta tillräckligt många autentiseringssteg för betalningen.</string>
+    <string name="transaction_refused_no_handler">Betalningen kan inte visas och nekades därför.</string>
+    <string name="transaction_refused_declined">Du avböjde betalningen.</string>
+    <string name="transaction_consent_discloses">Delar från %1$s: %2$s</string>
+    <string name="transaction_consent_discloses_all">alla attribut</string>
+    <string name="transaction_log_entity">%1$s: %2$s</string>
+    <string name="transaction_log_unknown_type">Okänd begäran</string>
+    <string name="transaction_log_back">Tillbaka</string>
+    <string name="transaction_entity_payee">Betalningsmottagare</string>
+    <string name="transaction_entity_pisp">Betalningsinitieringstjänst</string>
+    <string name="transaction_entity_service">Tjänst</string>
+    <string name="transaction_entity_aisp">Kontoinformationstjänst</string>
 </resources>

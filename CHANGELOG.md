@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction: TransactionBinding)`.
 
 ### Added
+- Sample app: a settings toggle for payment confirmation (EC TS12) requests
+  applied at runtime, a consent dialog rendering the SDK's model (level 1
+  prominent, 2 and 3 below, 4 omitted, unsigned-request warning), a
+  transaction log screen, and its own wording for refusal reasons.
 - **`transaction_data` (EC TS12 payment SCA) is wired into the engine
   WebSocket, WMP and DC API presentation paths.** With
   `transactionDataEnabled` on and a `transactionConsentHandler` registered

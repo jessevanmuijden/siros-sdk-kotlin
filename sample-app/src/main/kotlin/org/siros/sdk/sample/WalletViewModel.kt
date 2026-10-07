@@ -192,6 +192,14 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _readerTrustRootCertificatePem: MutableStateFlow<String>
     val readerTrustRootCertificatePem: StateFlow<String> get() = _readerTrustRootCertificatePem
 
+    /**
+     * Whether payment confirmation (EC TS12 `transaction_data`) requests are
+     * handled. Persisted here and applied to the SDK at runtime by
+     * [updateTransactionDataEnabled] - the SDK owns every decision about it.
+     */
+    private val _transactionDataEnabled: MutableStateFlow<Boolean>
+    val transactionDataEnabled: StateFlow<Boolean> get() = _transactionDataEnabled
+
     init {
         // Read test overrides - set either via the settings sheet UI, or (debug
         // builds only) via `adb shell am start ... --es backend_url ... --es
@@ -248,7 +256,54 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         _readerTrustRootCertificatePem = MutableStateFlow(
             prefs.getString("reader_trust_root_certificate_pem", null) ?: ""
         )
+        _transactionDataEnabled = MutableStateFlow(
+            activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE).getBoolean("transaction_data_enabled", false),
+        )
     }
+
+    // ── Payment confirmation (EC TS12) ──────────────────────────────
+
+    private val transactionConsentGate = TransactionConsentGate()
+
+    /** A payment confirmation the SDK asked to show, until the user answers. */
+    val pendingTransactionConsent: StateFlow<org.siros.sdk.wallet.TransactionConsentRequest?> = transactionConsentGate.pending
+
+    /** The user's answer to the pending payment confirmation. */
+    fun answerTransactionConsent(confirmed: Boolean) = transactionConsentGate.answer(confirmed)
+
+    /** Applies the persisted setting and the consent hook to [target]. */
+    private fun configureTransactionData(target: SirosWallet) {
+        target.transactionDataEnabled = _transactionDataEnabled.value
+        target.transactionConsentHandler = transactionConsentGate.handler
+    }
+
+    /** Persists the setting and applies it to the wallet now; it governs flows started afterwards. */
+    fun updateTransactionDataEnabled(enabled: Boolean) {
+        _transactionDataEnabled.value = enabled
+        wallet.transactionDataEnabled = enabled
+        // The app's own settings file, not the test-overrides one the older toggles share.
+        activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("transaction_data_enabled", enabled)
+            .apply()
+    }
+
+    private val _transactionLog = MutableStateFlow<List<org.siros.sdk.wallet.TransactionLogEntry>>(emptyList())
+    val transactionLog: StateFlow<List<org.siros.sdk.wallet.TransactionLogEntry>> = _transactionLog
+    private val _showTransactionLog = MutableStateFlow(false)
+    val showTransactionLog: StateFlow<Boolean> = _showTransactionLog
+
+    fun openTransactionLog() {
+        _showTransactionLog.value = true
+        viewModelScope.launch { _transactionLog.value = wallet.getTransactionLog() }
+    }
+
+    fun closeTransactionLog() {
+        _showTransactionLog.value = false
+    }
+
+    /** Set by the SDK's refusal callback just before the matching flow error, so that error can be worded here. */
+    private var lastTransactionRefusal: Pair<String, org.siros.sdk.credentials.TransactionDataReason>? = null
 
     fun updateBackendUrl(url: String) { _backendUrl.value = url }
     fun updateTenantId(id: String) { _tenantId.value = id }
@@ -790,7 +845,10 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private var wallet: SirosWallet = SirosWallet.create(
         activity,
         buildWalletConfig(),
-    ).also { it.credentialConsumptionPolicy = _credentialConsumptionPolicy.value }
+    ).also {
+        it.credentialConsumptionPolicy = _credentialConsumptionPolicy.value
+        configureTransactionData(it)
+    }
 
     /**
      * Observable wallet state — collect this from your Composable.
@@ -965,13 +1023,26 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 return null
             }
 
+            override fun onTransactionDataRefused(flowId: String, reason: org.siros.sdk.credentials.TransactionDataReason) {
+                lastTransactionRefusal = flowId to reason
+            }
+
             override fun onFlowError(flowId: String, errorMessage: String, redirectUri: String?) {
                 Log.e(TAG, "Flow $flowId failed: $errorMessage")
+                // A refused or declined payment confirmation is worded here, in the app's own
+                // language; the SDK only reports the reason. A decline needs no error dialog.
+                val refusal = lastTransactionRefusal?.takeIf { it.first == flowId }?.second
+                lastTransactionRefusal = null
+                if (refusal == org.siros.sdk.credentials.TransactionDataReason.DECLINED) {
+                    receivedCredentialCount = 0
+                    return
+                }
+                val shownMessage = refusal?.let { activity.getString(transactionRefusalMessageRes(it)) } ?: errorMessage
                 if (pendingAuthFlowId == flowId) {
                     pendingAuthFlowId = null
                 }
                 receivedCredentialCount = 0
-                _flowErrorDialog.value = FlowErrorInfo(errorMessage, canRetry = lastFlowRetry != null)
+                _flowErrorDialog.value = FlowErrorInfo(shownMessage, canRetry = lastFlowRetry != null)
 
                 // Mirrors onFlowComplete below - a verifier can return a
                 // redirect_uri from its error-response endpoint too (e.g. on
@@ -2393,7 +2464,10 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             wallet = SirosWallet.create(
                 activity,
                 buildWalletConfig(),
-            ).also { it.credentialConsumptionPolicy = _credentialConsumptionPolicy.value }
+            ).also {
+                it.credentialConsumptionPolicy = _credentialConsumptionPolicy.value
+                configureTransactionData(it)
+            }
             observeWalletState()
             setupEventListener()
         }
@@ -2564,6 +2638,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     }
 
     companion object {
+        /** The app's own settings file (the older toggles share the test-overrides file). */
+        private const val SETTINGS_PREFS = "siros_sample_settings"
+
         private const val TAG = "SIROS_VM"
 
         /**

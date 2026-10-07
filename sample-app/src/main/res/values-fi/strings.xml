@@ -240,4 +240,43 @@
     <string name="credential_detail_holder_binding">Haltijan sidonta</string>
     <string name="credential_status_unknown">Tuntematon</string>
     <string name="credential_status_unknown_detail">Tämän todisteen tilaa ei voitu määrittää</string>
+
+    <!-- Payment SCA (EC TS12) -->
+    <string name="settings_transaction_data">Maksuvahvistuspyynnöt</string>
+    <string name="settings_transaction_data_description">Käsittele EC TS12 -maksuvahvistuspyynnöt (SCA): näytä tapahtuma, pyydä vahvistus ja kirjaa se. Koskee seuraavaa pyyntöä. Tämä versio ei toimita tunnistustekijöitä, joten vahvistetutkin pyynnöt hylätään.</string>
+    <string name="settings_transaction_log">Tapahtumaloki</string>
+    <string name="transaction_log_title">Tapahtumaloki</string>
+    <string name="transaction_log_empty">Ei vielä maksuvahvistuksia</string>
+    <string name="transaction_log_outcome_consented">Vahvistettu</string>
+    <string name="transaction_log_outcome_declined">Hylätty käyttäjän toimesta</string>
+    <string name="transaction_log_outcome_refused">Evätty</string>
+    <string name="transaction_log_id">Tapahtuma %1$s</string>
+    <string name="transaction_log_reason">Syy: %1$s</string>
+    <string name="transaction_consent_default_title">Vahvista tapahtuma</string>
+    <string name="transaction_consent_default_deny">Peruuta</string>
+    <string name="transaction_consent_requested_by">Pyytäjä: %1$s</string>
+    <string name="transaction_consent_credential">Käytetään: %1$s</string>
+    <string name="transaction_consent_unsigned_warning">Pyyntöä ei ole allekirjoitettu, joten lähettäjää ei voitu varmentaa. Jatka vain, jos aloitit sen itse.</string>
+    <string name="transaction_consent_unsigned_ack">Aloitin pyynnön ja haluan jatkaa</string>
+    <string name="transaction_refused_disabled">Tätä lompakkoa ei ole asetettu vahvistamaan maksupyyntöjä.</string>
+    <string name="transaction_refused_invalid_entry">Maksupyyntö on virheellinen.</string>
+    <string name="transaction_refused_inconsistent">Maksupyyntöä muutettiin matkalla, eikä siihen luotettu.</string>
+    <string name="transaction_refused_unsupported_format">Maksuvahvistus vaatii SD-JWT-todistuksen.</string>
+    <string name="transaction_refused_not_sca">Todistus ei ole maksun tunnistustodistus.</string>
+    <string name="transaction_refused_unsupported_type">Todistus ei tue tällaista maksupyyntöä.</string>
+    <string name="transaction_refused_schema">Maksun tiedot eivät kelpaa tälle todistukselle.</string>
+    <string name="transaction_refused_metadata">Maksun näyttämiseen tarvittavia tietoja ei voitu hakea.</string>
+    <string name="transaction_refused_hash_alg">Maksupyyntö käyttää tukematonta algoritmia.</string>
+    <string name="transaction_refused_factors">Maksulle ei voitu vahvistaa riittävästi tunnistusvaiheita.</string>
+    <string name="transaction_refused_no_handler">Maksua ei voi näyttää, joten se evättiin.</string>
+    <string name="transaction_refused_declined">Hylkäsit maksun.</string>
+    <string name="transaction_consent_discloses">Jakaa kohteesta %1$s: %2$s</string>
+    <string name="transaction_consent_discloses_all">kaikki attribuutit</string>
+    <string name="transaction_log_entity">%1$s: %2$s</string>
+    <string name="transaction_log_unknown_type">Tuntematon pyyntö</string>
+    <string name="transaction_log_back">Takaisin</string>
+    <string name="transaction_entity_payee">Maksunsaaja</string>
+    <string name="transaction_entity_pisp">Maksutoimeksiantopalvelu</string>
+    <string name="transaction_entity_service">Palvelu</string>
+    <string name="transaction_entity_aisp">Tilitietopalvelu</string>
 </resources>

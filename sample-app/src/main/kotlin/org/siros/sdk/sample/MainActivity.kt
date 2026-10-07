@@ -254,6 +254,8 @@ fun WalletScreen(viewModel: WalletViewModel) {
     val pendingPresentation by viewModel.pendingPresentationRequest.collectAsState()
     val useWmpProtocol by viewModel.useWmpProtocol.collectAsState()
     val showCredentialDetails by viewModel.showCredentialDetails.collectAsState()
+    val pendingTransactionConsent by viewModel.pendingTransactionConsent.collectAsState()
+    val showTransactionLog by viewModel.showTransactionLog.collectAsState()
 
     LaunchedEffect(errorMessage) {
         errorMessage?.let {
@@ -445,6 +447,18 @@ fun WalletScreen(viewModel: WalletViewModel) {
                     availableKeyIds = availableKeyIds,
                 )
             }
+
+            // Payment confirmation (EC TS12) - the SDK built the request; this only renders it
+            pendingTransactionConsent != null -> TransactionConsentDialog(
+                request = pendingTransactionConsent!!,
+                onConfirm = { viewModel.answerTransactionConsent(true) },
+                onDeny = { viewModel.answerTransactionConsent(false) },
+            )
+
+            showTransactionLog -> TransactionLogScreen(
+                entries = viewModel.transactionLog.collectAsState().value,
+                onBack = viewModel::closeTransactionLog,
+            )
 
             // Credential detail sub-screen
             selectedCredential != null -> CredentialDetailScreen(
@@ -670,6 +684,9 @@ fun WalletScreen(viewModel: WalletViewModel) {
                             onUpdateShowDiagnosticMessages = viewModel::updateShowDiagnosticMessages,
                             showPhotoIdOnboarding = viewModel.showPhotoIdOnboarding.collectAsState().value,
                             onUpdateShowPhotoIdOnboarding = viewModel::updateShowPhotoIdOnboarding,
+                            transactionDataEnabled = viewModel.transactionDataEnabled.collectAsState().value,
+                            onUpdateTransactionDataEnabled = viewModel::updateTransactionDataEnabled,
+                            onShowTransactionLog = viewModel::openTransactionLog,
                             credentialConsumptionPolicy = viewModel.credentialConsumptionPolicy.collectAsState().value,
                             onUpdateCredentialConsumptionPolicy = viewModel::updateCredentialConsumptionPolicy,
                             preferLocalReaderTrustEvaluation = viewModel.preferLocalReaderTrustEvaluation.collectAsState().value,
@@ -1366,6 +1383,9 @@ fun SettingsTab(
     onUpdateShowDiagnosticMessages: ((Boolean) -> Unit)? = null,
     showPhotoIdOnboarding: Boolean = false,
     onUpdateShowPhotoIdOnboarding: ((Boolean) -> Unit)? = null,
+    transactionDataEnabled: Boolean = false,
+    onUpdateTransactionDataEnabled: ((Boolean) -> Unit)? = null,
+    onShowTransactionLog: (() -> Unit)? = null,
     credentialConsumptionPolicy: org.siros.sdk.credentials.CredentialConsumptionPolicy =
         org.siros.sdk.credentials.CredentialConsumptionPolicy.NEVER_CONSUME,
     onUpdateCredentialConsumptionPolicy: ((org.siros.sdk.credentials.CredentialConsumptionPolicy) -> Unit)? = null,
@@ -1494,6 +1514,35 @@ fun SettingsTab(
                         onCheckedChange = onUpdateShowPhotoIdOnboarding,
                         enabled = onUpdateShowPhotoIdOnboarding != null,
                     )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            stringResource(R.string.settings_transaction_data),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            stringResource(R.string.settings_transaction_data_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = transactionDataEnabled,
+                        onCheckedChange = onUpdateTransactionDataEnabled,
+                        enabled = onUpdateTransactionDataEnabled != null,
+                    )
+                }
+                TextButton(
+                    onClick = { onShowTransactionLog?.invoke() },
+                    enabled = onShowTransactionLog != null,
+                ) {
+                    Text(stringResource(R.string.settings_transaction_log))
                 }
             }
         }

@@ -258,4 +258,43 @@
     <string name="wallet_blocked_enroll_again">Enroll again</string>
     <string name="credential_status_unknown">Unknown</string>
     <string name="credential_status_unknown_detail">This credential’s status could not be determined</string>
+
+    <!-- Payment SCA (EC TS12) -->
+    <string name="settings_transaction_data">Payment confirmation requests</string>
+    <string name="settings_transaction_data_description">Handle EC TS12 payment confirmation (SCA) requests: show the transaction, ask for confirmation and record it. Applies to the next request. This build supplies no authentication factors, so confirmed requests are still refused.</string>
+    <string name="settings_transaction_log">Transaction log</string>
+    <string name="transaction_log_title">Transaction log</string>
+    <string name="transaction_log_empty">No payment confirmations yet</string>
+    <string name="transaction_log_outcome_consented">Confirmed</string>
+    <string name="transaction_log_outcome_declined">Declined</string>
+    <string name="transaction_log_outcome_refused">Refused</string>
+    <string name="transaction_log_id">Transaction %1$s</string>
+    <string name="transaction_log_reason">Reason: %1$s</string>
+    <string name="transaction_consent_default_title">Confirm transaction</string>
+    <string name="transaction_consent_default_deny">Cancel</string>
+    <string name="transaction_consent_requested_by">Requested by %1$s</string>
+    <string name="transaction_consent_credential">Using %1$s</string>
+    <string name="transaction_consent_unsigned_warning">This request is not signed, so its sender could not be verified. Only continue if you started this yourself.</string>
+    <string name="transaction_consent_unsigned_ack">I started this request and want to continue</string>
+    <string name="transaction_refused_disabled">This wallet is not set up to confirm payment requests.</string>
+    <string name="transaction_refused_invalid_entry">The payment request is malformed.</string>
+    <string name="transaction_refused_inconsistent">The payment request was changed on the way and was not trusted.</string>
+    <string name="transaction_refused_unsupported_format">Payment confirmation needs an SD-JWT credential.</string>
+    <string name="transaction_refused_not_sca">The credential is not a payment authentication credential.</string>
+    <string name="transaction_refused_unsupported_type">This kind of payment request is not supported by the credential.</string>
+    <string name="transaction_refused_schema">The payment details are not valid for this credential.</string>
+    <string name="transaction_refused_metadata">The information needed to show this payment could not be loaded.</string>
+    <string name="transaction_refused_hash_alg">The payment request uses an unsupported security algorithm.</string>
+    <string name="transaction_refused_factors">Not enough authentication steps could be confirmed for this payment.</string>
+    <string name="transaction_refused_no_handler">The payment cannot be shown, so it was refused.</string>
+    <string name="transaction_refused_declined">You declined the payment.</string>
+    <string name="transaction_consent_discloses">Shares from %1$s: %2$s</string>
+    <string name="transaction_consent_discloses_all">all attributes</string>
+    <string name="transaction_log_entity">%1$s: %2$s</string>
+    <string name="transaction_log_unknown_type">Unknown request</string>
+    <string name="transaction_log_back">Back</string>
+    <string name="transaction_entity_payee">Payee</string>
+    <string name="transaction_entity_pisp">Payment initiation service</string>
+    <string name="transaction_entity_service">Service</string>
+    <string name="transaction_entity_aisp">Account information service</string>
 </resources>

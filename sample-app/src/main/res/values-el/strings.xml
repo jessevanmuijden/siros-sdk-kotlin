@@ -240,4 +240,43 @@
     <string name="credential_detail_holder_binding">Σύνδεση κατόχου</string>
     <string name="credential_status_unknown">Άγνωστο</string>
     <string name="credential_status_unknown_detail">Η κατάσταση αυτού του πιστοποιητικού δεν μπόρεσε να προσδιοριστεί</string>
+
+    <!-- Payment SCA (EC TS12) -->
+    <string name="settings_transaction_data">Αιτήματα επιβεβαίωσης πληρωμής</string>
+    <string name="settings_transaction_data_description">Διαχείριση αιτημάτων επιβεβαίωσης πληρωμής (SCA, EC TS12): εμφάνιση της συναλλαγής, αίτημα επιβεβαίωσης και καταγραφή. Ισχύει για το επόμενο αίτημα. Αυτή η έκδοση δεν παρέχει παράγοντες ταυτοποίησης, επομένως ακόμη και τα επιβεβαιωμένα αιτήματα απορρίπτονται.</string>
+    <string name="settings_transaction_log">Αρχείο συναλλαγών</string>
+    <string name="transaction_log_title">Αρχείο συναλλαγών</string>
+    <string name="transaction_log_empty">Δεν υπάρχουν ακόμη επιβεβαιώσεις πληρωμής</string>
+    <string name="transaction_log_outcome_consented">Επιβεβαιώθηκε</string>
+    <string name="transaction_log_outcome_declined">Απορρίφθηκε από τον χρήστη</string>
+    <string name="transaction_log_outcome_refused">Απορρίφθηκε</string>
+    <string name="transaction_log_id">Συναλλαγή %1$s</string>
+    <string name="transaction_log_reason">Αιτία: %1$s</string>
+    <string name="transaction_consent_default_title">Επιβεβαίωση συναλλαγής</string>
+    <string name="transaction_consent_default_deny">Ακύρωση</string>
+    <string name="transaction_consent_requested_by">Αίτημα από %1$s</string>
+    <string name="transaction_consent_credential">Χρήση %1$s</string>
+    <string name="transaction_consent_unsigned_warning">Το αίτημα δεν είναι υπογεγραμμένο, επομένως ο αποστολέας δεν μπόρεσε να επαληθευτεί. Συνεχίστε μόνο αν το ξεκινήσατε εσείς.</string>
+    <string name="transaction_consent_unsigned_ack">Ξεκίνησα το αίτημα και θέλω να συνεχίσω</string>
+    <string name="transaction_refused_disabled">Αυτό το πορτοφόλι δεν έχει ρυθμιστεί για επιβεβαίωση αιτημάτων πληρωμής.</string>
+    <string name="transaction_refused_invalid_entry">Το αίτημα πληρωμής είναι ελαττωματικό.</string>
+    <string name="transaction_refused_inconsistent">Το αίτημα πληρωμής τροποποιήθηκε στη διαδρομή και δεν θεωρήθηκε αξιόπιστο.</string>
+    <string name="transaction_refused_unsupported_format">Η επιβεβαίωση πληρωμής απαιτεί διαπιστευτήριο SD-JWT.</string>
+    <string name="transaction_refused_not_sca">Το διαπιστευτήριο δεν είναι διαπιστευτήριο ταυτοποίησης πληρωμής.</string>
+    <string name="transaction_refused_unsupported_type">Αυτό το είδος αιτήματος πληρωμής δεν υποστηρίζεται από το διαπιστευτήριο.</string>
+    <string name="transaction_refused_schema">Τα στοιχεία πληρωμής δεν είναι έγκυρα για αυτό το διαπιστευτήριο.</string>
+    <string name="transaction_refused_metadata">Οι πληροφορίες που χρειάζονται για την εμφάνιση της πληρωμής δεν φορτώθηκαν.</string>
+    <string name="transaction_refused_hash_alg">Το αίτημα πληρωμής χρησιμοποιεί μη υποστηριζόμενο αλγόριθμο.</string>
+    <string name="transaction_refused_factors">Δεν επιβεβαιώθηκαν αρκετά βήματα ταυτοποίησης για αυτή την πληρωμή.</string>
+    <string name="transaction_refused_no_handler">Η πληρωμή δεν μπορεί να εμφανιστεί, γι’ αυτό απορρίφθηκε.</string>
+    <string name="transaction_refused_declined">Απορρίψατε την πληρωμή.</string>
+    <string name="transaction_consent_discloses">Κοινοποιεί από %1$s: %2$s</string>
+    <string name="transaction_consent_discloses_all">όλα τα χαρακτηριστικά</string>
+    <string name="transaction_log_entity">%1$s: %2$s</string>
+    <string name="transaction_log_unknown_type">Άγνωστο αίτημα</string>
+    <string name="transaction_log_back">Πίσω</string>
+    <string name="transaction_entity_payee">Δικαιούχος</string>
+    <string name="transaction_entity_pisp">Υπηρεσία έναρξης πληρωμής</string>
+    <string name="transaction_entity_service">Υπηρεσία</string>
+    <string name="transaction_entity_aisp">Υπηρεσία πληροφοριών λογαριασμού</string>
 </resources>

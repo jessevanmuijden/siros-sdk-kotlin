@@ -240,4 +240,43 @@
     <string name="credential_detail_holder_binding">Vinculação do titular</string>
     <string name="credential_status_unknown">Desconhecido</string>
     <string name="credential_status_unknown_detail">Não foi possível determinar o estado desta credencial</string>
+
+    <!-- Payment SCA (EC TS12) -->
+    <string name="settings_transaction_data">Pedidos de confirmação de pagamento</string>
+    <string name="settings_transaction_data_description">Tratar pedidos de confirmação de pagamento (SCA, EC TS12): mostrar a transação, pedir confirmação e registá-la. Aplica-se ao próximo pedido. Esta versão não fornece fatores de autenticação, pelo que os pedidos confirmados são, ainda assim, recusados.</string>
+    <string name="settings_transaction_log">Registo de transações</string>
+    <string name="transaction_log_title">Registo de transações</string>
+    <string name="transaction_log_empty">Ainda sem confirmações de pagamento</string>
+    <string name="transaction_log_outcome_consented">Confirmada</string>
+    <string name="transaction_log_outcome_declined">Recusada pelo utilizador</string>
+    <string name="transaction_log_outcome_refused">Rejeitada</string>
+    <string name="transaction_log_id">Transação %1$s</string>
+    <string name="transaction_log_reason">Motivo: %1$s</string>
+    <string name="transaction_consent_default_title">Confirmar transação</string>
+    <string name="transaction_consent_default_deny">Cancelar</string>
+    <string name="transaction_consent_requested_by">Pedido por %1$s</string>
+    <string name="transaction_consent_credential">A usar %1$s</string>
+    <string name="transaction_consent_unsigned_warning">O pedido não está assinado, pelo que o remetente não pôde ser verificado. Continue apenas se o iniciou você.</string>
+    <string name="transaction_consent_unsigned_ack">Iniciei este pedido e quero continuar</string>
+    <string name="transaction_refused_disabled">Esta carteira não está configurada para confirmar pedidos de pagamento.</string>
+    <string name="transaction_refused_invalid_entry">O pedido de pagamento está malformado.</string>
+    <string name="transaction_refused_inconsistent">O pedido de pagamento foi alterado pelo caminho e não foi considerado fiável.</string>
+    <string name="transaction_refused_unsupported_format">A confirmação de pagamento requer uma credencial SD-JWT.</string>
+    <string name="transaction_refused_not_sca">A credencial não é uma credencial de autenticação de pagamento.</string>
+    <string name="transaction_refused_unsupported_type">Este tipo de pedido de pagamento não é suportado pela credencial.</string>
+    <string name="transaction_refused_schema">Os dados do pagamento não são válidos para esta credencial.</string>
+    <string name="transaction_refused_metadata">Não foi possível obter a informação necessária para mostrar este pagamento.</string>
+    <string name="transaction_refused_hash_alg">O pedido de pagamento usa um algoritmo não suportado.</string>
+    <string name="transaction_refused_factors">Não foi possível confirmar passos de autenticação suficientes para este pagamento.</string>
+    <string name="transaction_refused_no_handler">O pagamento não pode ser mostrado, por isso foi recusado.</string>
+    <string name="transaction_refused_declined">Recusou o pagamento.</string>
+    <string name="transaction_consent_discloses">Partilha de %1$s: %2$s</string>
+    <string name="transaction_consent_discloses_all">todos os atributos</string>
+    <string name="transaction_log_entity">%1$s: %2$s</string>
+    <string name="transaction_log_unknown_type">Pedido desconhecido</string>
+    <string name="transaction_log_back">Voltar</string>
+    <string name="transaction_entity_payee">Beneficiário</string>
+    <string name="transaction_entity_pisp">Serviço de iniciação de pagamentos</string>
+    <string name="transaction_entity_service">Serviço</string>
+    <string name="transaction_entity_aisp">Serviço de informação sobre contas</string>
 </resources>
