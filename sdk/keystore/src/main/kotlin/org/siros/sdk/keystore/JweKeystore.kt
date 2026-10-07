@@ -748,6 +748,24 @@ class JweKeystore(
         nonce: String,
         audience: String,
         kid: String?,
+    ): String = buildVpToken(credential, disclosedClaims, nonce, audience, kid, null)
+
+    override suspend fun signVpToken(
+        credential: String,
+        disclosedClaims: List<String>?,
+        nonce: String,
+        audience: String,
+        kid: String?,
+        transaction: TransactionBinding,
+    ): String = buildVpToken(credential, disclosedClaims, nonce, audience, kid, transaction)
+
+    private suspend fun buildVpToken(
+        credential: String,
+        disclosedClaims: List<String>?,
+        nonce: String,
+        audience: String,
+        kid: String?,
+        transaction: TransactionBinding?,
     ): String = mutex.withLock {
         requireUnlocked()
         // The credential's own `cnf` is authoritative about which key it is
@@ -807,9 +825,11 @@ class JweKeystore(
             .issueTime(Date())
             .claim("nonce", nonce)
             .claim("sd_hash", sdHash)
-            .build()
+        // null for every presentation without transaction_data, which is
+        // therefore unchanged: same claims as before this parameter existed.
+        transaction?.applyTo(kbClaims)
 
-        val kbJwt = SignedJWT(kbHeader, kbClaims)
+        val kbJwt = SignedJWT(kbHeader, kbClaims.build())
         kbJwt.sign(ECDSASigner(key))
 
         // Assemble: sdJwtPresentation + KB-JWT (no separator — presentation already ends with ~)

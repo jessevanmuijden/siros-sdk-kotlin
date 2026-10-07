@@ -19,20 +19,6 @@ import java.util.Date
 import java.util.UUID
 
 /**
- * Transaction data item for TS12 payment SCA.
- *
- * Each item represents one entry from the `transaction_data` array in an
- * OID4VP authorization request. The [rawJson] is the canonical JSON
- * serialization used for hashing into `transaction_data_hashes`.
- */
-data class TransactionDataItem(
-    /** Transaction type (e.g. "payment", "login_risk", "account_access", "e_mandate"). */
-    val type: String,
-    /** Canonical JSON serialization of this transaction data item. */
-    val rawJson: String,
-)
-
-/**
  * Adapts a [Signer] (e.g. backed by WSCD/UniFFI bindings) into the
  * full [KeystoreManager] interface expected by [SirosWallet].
  *
@@ -359,18 +345,50 @@ class WscdKeystoreAdapter private constructor(
         nonce: String,
         audience: String,
         kid: String?,
-    ): String {
-        return signVpToken(credential, disclosedClaims, nonce, audience, null, kid)
-    }
+    ): String = buildVpToken(credential, disclosedClaims, nonce, audience, kid, null)
 
-    /** Extended VP token signing with transaction data (Phase I: TS12 payment SCA). */
-    suspend fun signVpToken(
+    override suspend fun signVpToken(
         credential: String,
         disclosedClaims: List<String>?,
         nonce: String,
         audience: String,
-        transactionData: List<TransactionDataItem>?,
-        kid: String? = null,
+        kid: String?,
+        transaction: TransactionBinding,
+    ): String = buildVpToken(credential, disclosedClaims, nonce, audience, kid, transaction)
+
+    /**
+     * The `amr` side of a KB-JWT. SCA: the TS12 claims (hashes, `jti`,
+     * `response_mode`, and a two-category `amr` built for this operation); the
+     * RFC 8176 string array describes the PREVIOUS authentication and is the
+     * wrong shape for TS12, so it is not emitted. Non-SCA presentations are
+     * unchanged: the signer's last-operation `amr`, when it reports one.
+     */
+    private suspend fun addAuthenticationClaims(
+        claims: JWTClaimsSet.Builder,
+        keyId: String,
+        transaction: TransactionBinding?,
+    ) {
+        if (transaction != null) {
+            transaction.applyTo(claims)
+            return
+        }
+        try {
+            val props = signer.securityProperties(keyId)
+            if (props.amr.isNotEmpty()) {
+                claims.claim("amr", props.amr)
+            }
+        } catch (_: Exception) {
+            // Security properties not available: omit amr
+        }
+    }
+
+    private suspend fun buildVpToken(
+        credential: String,
+        disclosedClaims: List<String>?,
+        nonce: String,
+        audience: String,
+        kid: String?,
+        transaction: TransactionBinding?,
     ): String {
         checkUnlocked()
         val keys = signer.listKeys()
@@ -437,30 +455,7 @@ class WscdKeystoreAdapter private constructor(
             .claim("nonce", nonce)
             .claim("sd_hash", sdHash)
 
-        // Include amr from WSCD security properties (E7: TS12 compliance).
-        // NOTE: amr reflects the auth method from the *previous* sign operation
-        // since we query it before signing the KB-JWT. This is acceptable because
-        // WSCD-backed signing requires prior authentication, and the amr is
-        // updated during that authentication phase (not during the sign itself).
-        try {
-            val props = signer.securityProperties(key.keyId)
-            if (props.amr.isNotEmpty()) {
-                claims.claim("amr", props.amr)
-            }
-        } catch (_: Exception) {
-            // Security properties not available — omit amr
-        }
-
-        // Phase I: Transaction data hashes (TS12 payment SCA)
-        if (!transactionData.isNullOrEmpty()) {
-            val md = MessageDigest.getInstance("SHA-256")
-            val hashes = transactionData.map { item ->
-                base64UrlEncode(md.digest(item.rawJson.toByteArray(Charsets.UTF_8)))
-            }
-            claims.claim("transaction_data_hashes", hashes)
-            claims.claim("transaction_data_hashes_alg", "sha-256")
-            claims.jwtID(UUID.randomUUID().toString())
-        }
+        addAuthenticationClaims(claims, key.keyId, transaction)
 
         val claimsSet = claims.build()
 

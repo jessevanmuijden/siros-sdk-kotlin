@@ -161,6 +161,29 @@ interface KeystoreManager {
     ): String
 
     /**
+     * As [signVpToken], for an SCA presentation that binds OpenID4VP
+     * `transaction_data` (EC TS12): the KB-JWT additionally carries the
+     * claims of [transaction] and no other `amr`.
+     *
+     * The default refuses: a keystore that does not override it cannot
+     * produce a compliant SCA key binding JWT, and must not fall back to
+     * signing one without the transaction hashes.
+     *
+     * @throws KeystoreException from the default implementation.
+     */
+    suspend fun signVpToken(
+        credential: String,
+        disclosedClaims: List<String>?,
+        nonce: String,
+        audience: String,
+        kid: String?,
+        transaction: TransactionBinding,
+    ): String = throw KeystoreException(
+        "This keystore cannot bind transaction_data to a presentation",
+        errorCode = "transaction_data_unsupported_keystore",
+    )
+
+    /**
      * Build an mDoc DeviceResponse (ISO 18013-5) for OID4VP presentation.
      *
      * @param credentialBytes Raw CBOR bytes of the IssuerSigned structure.

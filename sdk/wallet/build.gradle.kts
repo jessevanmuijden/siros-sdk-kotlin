@@ -60,6 +60,10 @@ dependencies {
     // sdk:keystore depends on this too, but only as `implementation`, so it
     // isn't visible here transitively.
     implementation(libs.nimbus.jose.jwt)
+    // JSON Schema (2020-12) validation of transaction_data payloads (EC TS12
+    // 3.2 step 4). Validates a kotlinx JsonElement; never fetches a $ref itself,
+    // every referenced schema is registered by this SDK.
+    implementation(libs.json.schema.validator)
 
     testImplementation(libs.junit)
     testImplementation(libs.mockk)

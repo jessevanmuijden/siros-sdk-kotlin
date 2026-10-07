@@ -578,4 +578,57 @@ class WscdKeystoreAdapterTest {
             // expected
         }
     }
+
+    // ── SCA (transaction_data) key binding ──────────────────────────
+
+    private fun kbClaims(vpToken: String): Map<String, Any?> =
+        com.nimbusds.jwt.SignedJWT.parse(vpToken.split("~").last { it.isNotEmpty() }).jwtClaimsSet.claims
+
+    private val scaBinding = TransactionBinding(
+        hashes = listOf("aGFzaDE"),
+        hashAlg = "sha-512",
+        responseMode = "dc_api",
+        authenticationFactors = listOf(
+            AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "other"),
+            AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd"),
+        ),
+    )
+
+    @Test
+    fun signVpToken_nonSca_keepsTheSignersRfc8176Amr_andNothingElse() = runTest {
+        val signer = createMultiKeyMockSigner()
+        coEvery { signer.securityProperties(any()) } returns SignerSecurityProperties(
+            keyStorage = listOf("hardware"), amr = listOf("hwk", "pin"),
+        )
+        val adapter = WscdKeystoreAdapter(signer)
+        adapter.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0))
+
+        val claims = kbClaims(adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-a"))
+
+        assertEquals(setOf("aud", "iat", "nonce", "sd_hash", "amr"), claims.keys)
+        assertEquals(listOf("hwk", "pin"), claims["amr"])
+    }
+
+    @Test
+    fun signVpToken_sca_carriesTheTs12Claims_andNotTheStaleRfc8176Amr() = runTest {
+        val signer = createMultiKeyMockSigner()
+        coEvery { signer.securityProperties(any()) } returns SignerSecurityProperties(
+            keyStorage = listOf("hardware"), amr = listOf("hwk", "pin"),
+        )
+        val adapter = WscdKeystoreAdapter(signer)
+        adapter.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0))
+
+        val claims = kbClaims(adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding))
+
+        assertEquals(
+            setOf("aud", "iat", "nonce", "sd_hash", "transaction_data_hashes", "transaction_data_hashes_alg", "jti", "response_mode", "amr"),
+            claims.keys,
+        )
+        assertEquals("sha-512", claims["transaction_data_hashes_alg"])
+        assertEquals(
+            listOf(mapOf("knowledge" to "other"), mapOf("possession" to "key_in_remote_wscd")),
+            claims["amr"],
+        )
+        coVerify { signer.sign("key-b", any()) }
+    }
 }

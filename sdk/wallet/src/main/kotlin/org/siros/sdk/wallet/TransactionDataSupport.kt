@@ -19,7 +19,7 @@ internal object TransactionDataSupport {
     const val CAPABILITY = "transaction_data"
 
     /** Hash algorithms (`transaction_data_hashes_alg` names) this SDK can compute. */
-    val HASH_ALGS: List<String> = listOf("sha-256", "sha-384", "sha-512")
+    val HASH_ALGS: List<String> = org.siros.sdk.keystore.TransactionBinding.HASH_ALGS
 
     /**
      * Whether the SDK contains a complete `transaction_data` pipeline
