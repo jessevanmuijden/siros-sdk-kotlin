@@ -176,6 +176,9 @@
     <string name="error_idv_nfc_skipped">Chipet i din handling måste läsas. Försök igen och håll handlingen mot telefonen när du ombeds.</string>
     <string name="error_idv_nfc_chip_read_failed">Chipet i din handling kunde inte läsas. Försök igen och håll handlingen stilla mot telefonen.</string>
     <string name="error_idv_nfc_not_authenticated">Chipet i din handling kunde inte verifieras, så ingen legitimation utfärdades.</string>
+    <string name="error_idv_chip_untrusted">Chipet i din handling kunde inte bekräftas som utfärdat av en erkänd myndighet, så ingen legitimation utfärdades. Försök igen senare eller använd en annan identitetshandling.</string>
+    <string name="error_idv_document_expired">Den här handlingen har gått ut, så ingen legitimation utfärdades. Använd en giltig identitetshandling.</string>
+    <string name="error_idv_session_expired">Verifieringen tog för lång tid eller har redan använts. Börja om från början.</string>
     <string name="error_ctap2_not_available">Transport för säkerhetsnyckel är inte tillgänglig.</string>
     <string name="error_ctap2_connection_failed">Det gick inte att ansluta till säkerhetsnyckeln.</string>
     <string name="error_ctap2_timeout">Kommunikation med säkerhetsnyckeln tog för lång tid.</string>

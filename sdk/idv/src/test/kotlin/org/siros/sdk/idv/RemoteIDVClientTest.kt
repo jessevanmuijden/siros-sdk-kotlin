@@ -51,6 +51,30 @@ class RemoteIDVClientTest {
     }
 
     @Test
+    fun `chip_untrusted, document_expired and session_expired have typed exceptions`() {
+        val untrusted = idvExceptionFor422("chip_untrusted", "chip not trusted", "{}", fallback)
+        assertTrue(untrusted is IDVException.ChipUntrusted)
+        assertEquals("idv_chip_untrusted", untrusted.errorCode)
+        assertEquals("chip not trusted", untrusted.message)
+
+        val expired = idvExceptionFor422("document_expired", "document has expired", "{}", fallback)
+        assertTrue(expired is IDVException.DocumentExpired)
+        assertEquals("idv_document_expired", expired.errorCode)
+
+        val session = idvExceptionFor422("session_expired", null, "raw body", fallback)
+        assertTrue(session is IDVException.SessionExpired)
+        assertEquals("idv_session_expired", session.errorCode)
+        assertEquals("raw body", session.message)
+    }
+
+    @Test
+    fun `codes without a typed exception have no mapping`() {
+        for (code in listOf("match_failed", "policy_rejected", "document_unreadable", "liveness_failed", "issuance_failed", "internal_error", "new_code")) {
+            assertEquals(code, null, idvExceptionForCode(code, "m"))
+        }
+    }
+
+    @Test
     fun `a body without a code keeps the step's own exception`() {
         val e = idvExceptionFor422(null, null, "not json", fallback)
 
@@ -116,6 +140,23 @@ class RemoteIDVClientTest {
 
         assertTrue(e is IDVException.VerificationFailed)
         assertEquals(body, e.message)
+    }
+
+    @Test
+    fun `submitDocument maps chip_untrusted, document_expired and session_expired`() {
+        val cases = mapOf(
+            "chip_untrusted" to "idv_chip_untrusted",
+            "document_expired" to "idv_document_expired",
+            "session_expired" to "idv_session_expired",
+        )
+        for ((code, errorCode) in cases) {
+            val e = thrownBy(422, """{"error":"refused: $code","error_code":"$code"}""") {
+                it.submitDocument(JSONObject().put("livenessSessionId", "s"))
+            }
+
+            assertEquals(code, errorCode, e.errorCode)
+            assertEquals("refused: $code", e.message)
+        }
     }
 
     @Test

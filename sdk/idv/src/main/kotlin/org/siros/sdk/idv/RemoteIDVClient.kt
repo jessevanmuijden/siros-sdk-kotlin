@@ -85,8 +85,17 @@ class RemoteIDVClient(private val config: Config) {
      * Submit document images for identity verification and credential issuance.
      *
      * @param payload JSON object containing document images and the liveness session ID.
+     * The liveness step this refers to is single-use and short-lived (facetec-api's default is two
+     * minutes): the backend consumes it on the first call, whatever the outcome, so a failed
+     * submission cannot be retried with the same `livenessSessionId`. Start over from
+     * [submitBiometric]. Every request must also reach the instance that holds the liveness step.
+     *
      * @return [IDVResult] with the credential offer URI for OID4VCI issuance.
-     * @throws IDVException.VerificationFailed if document verification fails (HTTP 422).
+     * @throws IDVException.SessionExpired if the liveness step has expired or was already used.
+     * @throws IDVException.DocumentChipNotVerified if the document's chip was not authenticated.
+     * @throws IDVException.ChipUntrusted if the chip data is not trusted.
+     * @throws IDVException.DocumentExpired if the document has expired.
+     * @throws IDVException.VerificationFailed for any other refusal (HTTP 422).
      */
     suspend fun submitDocument(payload: JSONObject): IDVResult = withContext(Dispatchers.IO) {
         val json = postJson("$baseUrl${config.idScanPath}", payload) { msg ->
@@ -147,9 +156,9 @@ class RemoteIDVClient(private val config: Config) {
 
 /**
  * Maps a 422 from the IDV backend to an [IDVException]. The backend's error body is
- * `{"error": "<message>", "error_code": "<code>"}`: an `nfc_*` code means the document's
- * chip was not read and authenticated ([IDVException.DocumentChipNotVerified]); anything
- * else goes to the step's own [fallback], with the raw body as before.
+ * `{"error": "<message>", "error_code": "<code>"}`. A code with a typed exception of its own
+ * (see [idvExceptionForCode]) becomes that exception; anything else goes to the step's own
+ * [fallback], with the raw body as before.
  */
 internal fun idvExceptionFor422(
     errorCode: String?,
@@ -157,10 +166,26 @@ internal fun idvExceptionFor422(
     responseBody: String,
     fallback: (String) -> IDVException,
 ): IDVException =
-    if (errorCode != null && errorCode.startsWith("nfc_")) {
-        IDVException.DocumentChipNotVerified(errorCode, errorMessage ?: responseBody)
-    } else {
-        fallback(responseBody)
+    errorCode?.let { idvExceptionForCode(it, errorMessage ?: responseBody) } ?: fallback(responseBody)
+
+/**
+ * The typed [IDVException] for a facetec-api error code, or `null` for a code that has none
+ * and is left to the caller's generic handling (`match_failed`, `policy_rejected`,
+ * `document_unreadable`, `liveness_failed`, `issuance_failed`, `internal_error`, anything new).
+ * Shared by the legacy `/v1` error bodies and `/process-request`'s `credentialIssueErrorCode`.
+ *
+ * - `nfc_*`: the chip was not read and authenticated ([IDVException.DocumentChipNotVerified]).
+ * - `chip_untrusted`: [IDVException.ChipUntrusted].
+ * - `document_expired`: [IDVException.DocumentExpired].
+ * - `session_expired`: [IDVException.SessionExpired].
+ */
+internal fun idvExceptionForCode(code: String, message: String): IDVException? =
+    when {
+        code.startsWith("nfc_") -> IDVException.DocumentChipNotVerified(code, message)
+        code == "chip_untrusted" -> IDVException.ChipUntrusted(message)
+        code == "document_expired" -> IDVException.DocumentExpired(message)
+        code == "session_expired" -> IDVException.SessionExpired(message)
+        else -> null
     }
 
 /**

@@ -176,6 +176,9 @@
     <string name="error_idv_nfc_skipped">Asiakirjan siru on luettava. Yritä uudelleen ja pidä asiakirjaa puhelinta vasten pyydettäessä.</string>
     <string name="error_idv_nfc_chip_read_failed">Asiakirjan sirua ei voitu lukea. Yritä uudelleen ja pidä asiakirja paikallaan puhelinta vasten.</string>
     <string name="error_idv_nfc_not_authenticated">Asiakirjan sirua ei voitu varmentaa, joten todistetta ei myönnetty.</string>
+    <string name="error_idv_chip_untrusted">Asiakirjan sirua ei voitu vahvistaa tunnustetun viranomaisen myöntämäksi, joten todistusta ei myönnetty. Yritä myöhemmin uudelleen tai käytä toista henkilöllisyysasiakirjaa.</string>
+    <string name="error_idv_document_expired">Asiakirja on vanhentunut, joten todistusta ei myönnetty. Käytä voimassa olevaa henkilöllisyysasiakirjaa.</string>
+    <string name="error_idv_session_expired">Tunnistautuminen kesti liian kauan tai se on jo käytetty. Aloita alusta.</string>
     <string name="error_ctap2_not_available">Turva-avaimen siirto ei ole saatavilla.</string>
     <string name="error_ctap2_connection_failed">Turva-avaimeen yhdistäminen epäonnistui.</string>
     <string name="error_ctap2_timeout">Turva-avaimen viestintä aikakatkaistiin.</string>

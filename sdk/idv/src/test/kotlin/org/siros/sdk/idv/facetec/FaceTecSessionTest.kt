@@ -82,12 +82,51 @@ class FaceTecSessionTest {
         for (code in listOf("match_failed", "policy_rejected", "document_unreadable")) {
             assertTrue(code, refusalToException(code, null) is IDVException.VerificationFailed)
         }
-        for (code in listOf("chip_untrusted", "issuance_failed", "internal_error", "session_expired", "something_new")) {
+        assertTrue(refusalToException("chip_untrusted", null) is IDVException.ChipUntrusted)
+        assertTrue(refusalToException("document_expired", null) is IDVException.DocumentExpired)
+        assertTrue(refusalToException("session_expired", null) is IDVException.SessionExpired)
+        assertEquals("idv_chip_untrusted", refusalToException("chip_untrusted", null).errorCode)
+        assertEquals("idv_document_expired", refusalToException("document_expired", null).errorCode)
+        assertEquals("idv_session_expired", refusalToException("session_expired", null).errorCode)
+        for (code in listOf("issuance_failed", "internal_error", "something_new")) {
             val e = refusalToException(code, null)
             assertTrue(code, e is IDVException.ProviderError)
             assertEquals(code, (e as IDVException.ProviderError).providerCode)
             assertEquals("idv_provider_$code", e.errorCode)
         }
+    }
+
+    @Test
+    fun `every error code facetec-api v0_16_0 returns maps to some exception`() {
+        // The codes of internal/idverrors/errors.go at v0.16.0.
+        val codes = listOf(
+            "liveness_failed", "match_failed", "document_unreadable", "policy_rejected", "session_expired",
+            "nfc_skipped", "chip_untrusted", "nfc_not_requested", "nfc_device_not_capable",
+            "nfc_chip_read_failed", "nfc_not_authenticated", "document_expired", "issuance_failed", "internal_error",
+        )
+        for (code in codes) {
+            val e = refusalToException(code, "m")
+            assertEquals(code, "m", e.message?.removePrefix("[$code] "))
+        }
+    }
+
+    @Test
+    fun `a stale liveness proof is a LivenessFailed refusal to restart from`() {
+        val relay = relayAnswering(
+            ProcessRequestResponse("r", credentialIssueErrorCode = "liveness_failed", credentialIssueError = "liveness check did not pass"),
+        )
+
+        assertTrue(failureOf { sessionOutcome("SESSION_COMPLETED", relay) } is IDVException.LivenessFailed)
+    }
+
+    @Test
+    fun `a new session after a refusal starts with a fresh relay and no carried-over refusal`() {
+        val refused = relayAnswering(ProcessRequestResponse("r", credentialIssueErrorCode = "liveness_failed"))
+        val next = relayAnswering(ProcessRequestResponse("r", credentialOfferURI = "openid-credential-offer://y"))
+
+        assertNotEquals(refused.externalDatabaseRefID, next.externalDatabaseRefID)
+        assertNull(next.credentialIssueErrorCode)
+        assertEquals("openid-credential-offer://y", sessionOutcome("SESSION_COMPLETED", next).credentialOfferURI)
     }
 
     @Test

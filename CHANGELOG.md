@@ -65,6 +65,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `credentials_to_include` and `features: ["transaction_data.v1"]` /
   `capabilities_offered.transaction_data`. Nothing is declared to the
   orchestrator yet: this build contains no `transaction_data` pipeline.
+- **Typed IDV errors for facetec-api v0.15/v0.16 refusals:
+  `IDVException.ChipUntrusted` (`chip_untrusted`),
+  `IDVException.DocumentExpired` (`document_expired`) and
+  `IDVException.SessionExpired` (`session_expired`),** with `errorCode`s
+  `idv_chip_untrusted`, `idv_document_expired` and `idv_session_expired`.
+  Until now these reached the app as a generic `VerificationFailed` carrying
+  a raw body (`RemoteIDVClient`) or as `ProviderError` (`FaceTecIDVProvider`).
+  Adding subclasses breaks exhaustive `when`s over `IDVException`. The sample
+  app has a message for each, in every language it ships.
+- **`FaceTecIDVProvider` documents facetec-api v0.16.0's session rules:** one
+  `externalDatabaseRefID` on every request of a session, a single-use liveness
+  proof that expires after 15 minutes (an expired or used proof is
+  `liveness_failed`; restart from the face scan with a new
+  `startVerification`), and session affinity across facetec-api replicas.
 - **`FaceTecIDVProvider`: identity verification with the FaceTec 10 SDK**
   (#246). FaceTec 10 replaced the FaceScan/IDScan processors the SDK's
   FaceTec support was written against with one opaque blob relay, so the

@@ -15,9 +15,17 @@ public final class org/siros/sdk/idv/IDVException$Cancelled : org/siros/sdk/idv/
 	public fun <init> ()V
 }
 
+public final class org/siros/sdk/idv/IDVException$ChipUntrusted : org/siros/sdk/idv/IDVException {
+	public fun <init> (Ljava/lang/String;)V
+}
+
 public final class org/siros/sdk/idv/IDVException$DocumentChipNotVerified : org/siros/sdk/idv/IDVException {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
 	public final fun getReason ()Ljava/lang/String;
+}
+
+public final class org/siros/sdk/idv/IDVException$DocumentExpired : org/siros/sdk/idv/IDVException {
+	public fun <init> (Ljava/lang/String;)V
 }
 
 public final class org/siros/sdk/idv/IDVException$LivenessFailed : org/siros/sdk/idv/IDVException {
@@ -31,6 +39,10 @@ public final class org/siros/sdk/idv/IDVException$NetworkError : org/siros/sdk/i
 public final class org/siros/sdk/idv/IDVException$ProviderError : org/siros/sdk/idv/IDVException {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
 	public final fun getProviderCode ()Ljava/lang/String;
+}
+
+public final class org/siros/sdk/idv/IDVException$SessionExpired : org/siros/sdk/idv/IDVException {
+	public fun <init> (Ljava/lang/String;)V
 }
 
 public final class org/siros/sdk/idv/IDVException$Unavailable : org/siros/sdk/idv/IDVException {

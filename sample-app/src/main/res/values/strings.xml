@@ -204,6 +204,9 @@
     <string name="error_idv_nfc_skipped">Reading the chip in your document is required. Please try again and hold your document against the phone when asked.</string>
     <string name="error_idv_nfc_chip_read_failed">The chip in your document could not be read. Please try again and hold the document still against the phone.</string>
     <string name="error_idv_nfc_not_authenticated">The chip in your document could not be verified, so no credential was issued.</string>
+    <string name="error_idv_chip_untrusted">The chip in your document could not be confirmed as issued by a recognised authority, so no credential was issued. Please try again later, or use another identity document.</string>
+    <string name="error_idv_document_expired">This document has expired, so no credential was issued. Please use a valid identity document.</string>
+    <string name="error_idv_session_expired">The verification took too long or was already used. Please start again.</string>
     <string name="error_ctap2_not_available">Security key transport is not available.</string>
     <string name="error_ctap2_connection_failed">Failed to connect to security key.</string>
     <string name="error_ctap2_timeout">Security key communication timed out.</string>
