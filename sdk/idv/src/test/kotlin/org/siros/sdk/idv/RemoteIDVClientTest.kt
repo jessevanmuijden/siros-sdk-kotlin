@@ -68,6 +68,14 @@ class RemoteIDVClientTest {
     }
 
     @Test
+    fun `chip_photo_mismatch has a typed exception`() {
+        val e = idvExceptionFor422("chip_photo_mismatch", "the face does not match the chip photo", "{}", fallback)
+        assertTrue(e is IDVException.ChipPhotoMismatch)
+        assertEquals("idv_chip_photo_mismatch", e.errorCode)
+        assertEquals("the face does not match the chip photo", e.message)
+    }
+
+    @Test
     fun `codes without a typed exception have no mapping`() {
         for (code in listOf("match_failed", "policy_rejected", "document_unreadable", "liveness_failed", "issuance_failed", "internal_error", "new_code")) {
             assertEquals(code, null, idvExceptionForCode(code, "m"))
@@ -148,6 +156,7 @@ class RemoteIDVClientTest {
             "chip_untrusted" to "idv_chip_untrusted",
             "document_expired" to "idv_document_expired",
             "session_expired" to "idv_session_expired",
+            "chip_photo_mismatch" to "idv_chip_photo_mismatch",
         )
         for ((code, errorCode) in cases) {
             val e = thrownBy(422, """{"error":"refused: $code","error_code":"$code"}""") {

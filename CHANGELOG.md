@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction: TransactionBinding)`.
 
 ### Added
+- **`IDVException.ChipPhotoMismatch` (`chip_photo_mismatch`, `errorCode`
+  `idv_chip_photo_mismatch`):** facetec-api now refuses a scan whose face does
+  not match the photo stored on the document's chip
+  (sirosfoundation/facetec-api#77). Until now the code would have reached the
+  app as a `ProviderError` (`FaceTecIDVProvider`) or a generic
+  `VerificationFailed` carrying a raw body (`RemoteIDVClient`). Adding a
+  subclass breaks exhaustive `when`s over `IDVException`. The sample app has a
+  message for it in every language it ships.
 - Sample app: a settings toggle for payment confirmation (EC TS12) requests
   applied at runtime, a consent dialog rendering the SDK's model (level 1
   prominent, 2 and 3 below, 4 omitted, unsigned-request warning), a

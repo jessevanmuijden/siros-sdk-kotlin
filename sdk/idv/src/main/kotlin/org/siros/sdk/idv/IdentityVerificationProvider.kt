@@ -76,6 +76,15 @@ sealed class IDVException(
     class DocumentExpired(message: String) : IDVException(message, errorCode = "idv_document_expired")
 
     /**
+     * The backend refused because the face did not match the photo stored on the document's chip
+     * (facetec-api's `chip_photo_mismatch`, from FaceTec's `matchLevelNFCToFaceMap`), or could
+     * not be compared with it. Matching the photo printed on the document is not enough: only the
+     * chip photo ties the chip, and so the identity, to the person scanned. [errorCode] is
+     * `idv_chip_photo_mismatch`.
+     */
+    class ChipPhotoMismatch(message: String) : IDVException(message, errorCode = "idv_chip_photo_mismatch")
+
+    /**
      * The backend no longer holds the liveness step this request relies on (`session_expired`):
      * it expired, or was already used. A liveness step is single-use, so it is never retried;
      * start a new verification from the face scan. [errorCode] is `idv_session_expired`.

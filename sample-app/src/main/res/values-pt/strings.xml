@@ -177,6 +177,7 @@
     <string name="error_idv_nfc_chip_read_failed">Não foi possível ler o chip do seu documento. Tente novamente e mantenha o documento imóvel encostado ao telemóvel.</string>
     <string name="error_idv_nfc_not_authenticated">Não foi possível verificar o chip do seu documento, pelo que não foi emitida nenhuma credencial.</string>
     <string name="error_idv_chip_untrusted">O chip do seu documento não pôde ser confirmado como emitido por uma autoridade reconhecida, pelo que não foi emitida nenhuma credencial. Tente novamente mais tarde ou utilize outro documento de identificação.</string>
+    <string name="error_idv_chip_photo_mismatch">O seu rosto não correspondeu à fotografia guardada no chip do seu documento, pelo que não foi emitida nenhuma credencial. Tente novamente ou utilize outro documento de identificação.</string>
     <string name="error_idv_document_expired">Este documento expirou, pelo que não foi emitida nenhuma credencial. Utilize um documento de identificação válido.</string>
     <string name="error_idv_session_expired">A verificação demorou demasiado tempo ou já foi utilizada. Comece de novo.</string>
     <string name="error_ctap2_not_available">O transporte de chave de segurança não está disponível.</string>

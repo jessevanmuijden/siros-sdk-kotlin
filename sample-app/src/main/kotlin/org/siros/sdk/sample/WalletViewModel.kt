@@ -2695,6 +2695,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             "idv_nfc_chip_read_failed" to R.string.error_idv_nfc_chip_read_failed,
             "idv_nfc_not_authenticated" to R.string.error_idv_nfc_not_authenticated,
             "idv_chip_untrusted" to R.string.error_idv_chip_untrusted,
+            "idv_chip_photo_mismatch" to R.string.error_idv_chip_photo_mismatch,
             "idv_document_expired" to R.string.error_idv_document_expired,
             "idv_session_expired" to R.string.error_idv_session_expired,
             "ctap2_not_available" to R.string.error_ctap2_not_available,

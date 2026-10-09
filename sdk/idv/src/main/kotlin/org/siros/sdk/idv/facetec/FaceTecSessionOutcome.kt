@@ -36,7 +36,8 @@ internal fun sessionOutcome(status: String?, relay: FaceTecSessionRequestRelay):
  *
  * - `nfc_*`: the document's chip was not read and authenticated
  *   ([IDVException.DocumentChipNotVerified]).
- * - `chip_untrusted`: [IDVException.ChipUntrusted]; `document_expired`:
+ * - `chip_untrusted`: [IDVException.ChipUntrusted]; `chip_photo_mismatch`:
+ *   [IDVException.ChipPhotoMismatch]; `document_expired`:
  *   [IDVException.DocumentExpired]; `session_expired`: [IDVException.SessionExpired].
  * - `liveness_failed`: [IDVException.LivenessFailed]. facetec-api sends it when FaceTec Server's
  *   liveness verdict for this session was not proven, but also when the proof is missing, used

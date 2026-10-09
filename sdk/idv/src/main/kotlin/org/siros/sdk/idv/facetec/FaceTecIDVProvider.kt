@@ -67,6 +67,8 @@ import org.siros.sdk.idv.IdentityVerificationProvider
  * - [IDVException.ChipUntrusted]: the chip was read, but its data is not trusted by facetec-api's
  *   trust decision point (`chip_untrusted`). Usually another document is needed, but a temporary
  *   trust-service outage is reported the same way, so offer a retry later too.
+ * - [IDVException.ChipPhotoMismatch]: the face did not match the photo on the document's chip
+ *   (`chip_photo_mismatch`).
  * - [IDVException.DocumentExpired]: the document has expired (`document_expired`).
  * - [IDVException.SessionExpired]: facetec-api reports the liveness step as expired or used
  *   (`session_expired`); start over.
