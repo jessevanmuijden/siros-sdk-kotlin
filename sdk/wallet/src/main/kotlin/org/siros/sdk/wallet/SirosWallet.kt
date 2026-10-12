@@ -2672,7 +2672,19 @@ class SirosWallet private constructor(
      * OAuth Client Attestation instance key ID - see [SessionStore.instanceKeyId].
      */
     private suspend fun ensureInstanceKeyId(): String {
-        sessionStore.instanceKeyId?.let { return it }
+        // The recorded id is trusted only once confirmed live in the
+        // keystore: a value that predates the fix persisting the key itself
+        // (see below) - or, for a hardware-backed plugin, one simply
+        // evicted/rotated out from under this wallet - would otherwise be
+        // returned and reused forever, with every sign_client_auth for it
+        // failing "Key not found" for the rest of this account's life. Not
+        // just first use after that fix shipped: ANY loss of the underlying
+        // key, by any cause, is self-healed the same way, here, rather than
+        // needing its own special case.
+        sessionStore.instanceKeyId?.let { existing ->
+            if (keystore.listKeys().any { it.keyId == existing }) return existing
+            Timber.w("Instance key $existing is recorded but missing from the keystore; regenerating")
+        }
         // First use has to be serialised. Two callers arriving together - an
         // engine `request_attestation` and a Devices listing, say - would
         // otherwise each generate an ES256 key and each persist it, and
@@ -2687,13 +2699,31 @@ class SirosWallet private constructor(
         // under the wrong lifecycle identity.
         val account = sessionStore.activeAccountId
         return instanceKeyMutex.withLock {
-            // Re-check: a caller that was waiting here may have persisted one.
-            sessionStore.instanceKeyId ?: run {
+            // Re-check: a caller that was waiting here may have persisted (and
+            // confirmed live) one, or healed a stale one away.
+            val current = sessionStore.instanceKeyId
+            if (current != null && keystore.listKeys().any { it.keyId == current }) {
+                current
+            } else {
                 val keyId = keystore.generateKey("ES256")
                 if (sessionStore.activeAccountId != account) {
                     throw WalletException("Account changed while generating the wallet instance key")
                 }
                 sessionStore.instanceKeyId = keyId
+                // The id alone surviving in SessionStore is not enough: for
+                // the software ("softkey") WSCD plugin, the key this id
+                // names only ever lives in that plugin's own process memory
+                // (see WscdKeystoreAdapter's class doc comment) until it's
+                // folded into the exported container and synced - without
+                // this, the id a cold start recalls here would name a key
+                // that process restart already lost, and every later
+                // sign_client_auth/DPoP request for it would fail with
+                // "Key not found" forever (go-wallet-backend's engine has
+                // no way to recover from that - it just hangs waiting for a
+                // DPoP proof that can never arrive). A hardware-backed
+                // plugin's key persists on its own, so this is a no-op for
+                // those - see [WscdKeystoreAdapter.exportEncryptedContainer].
+                persistAndSyncKeystore()
                 keyId
             }
         }
@@ -4254,6 +4284,15 @@ class SirosWallet private constructor(
                 )
             }
         },
+        // See WalletConfig.vegaProfilingEnabled's doc comment for the file
+        // location and why external-files (not internal) storage is used.
+        vegaProfilingSink = if (config.vegaProfilingEnabled) {
+            org.siros.sdk.keystore.VegaProfilingFileSink(
+                java.io.File(activity.applicationContext.getExternalFilesDir(null), "vega_profiling.jsonl"),
+            )
+        } else {
+            null
+        },
     )
 
     private val zkProofSystemRegistry: ZkProofSystemRegistry get() = zkPresentation.registry
@@ -4518,6 +4557,50 @@ class SirosWallet private constructor(
      * Removed once consumed or once the flow reaches a terminal state.
      */
     private val pendingMatchResultsByFlow = mutableMapOf<String, List<CredentialMatcher.MatchResult>>()
+
+    /**
+     * Fires [ZkMdocPresentation.prewarmVega] for every ZK-eligible match as
+     * soon as a verifier's request names its claims - well before the user
+     * has approved anything, let alone before `sign_presentation` arrives -
+     * so the ~1.2s `prep_prove` cost (see [VegaProofSystem.prewarm]'s doc
+     * comment) lands during the consent screen's dead time instead of the
+     * live proving path. Pure speculative optimization: fire-and-forget,
+     * every failure mode swallowed, and a miss here just means the next
+     * real [ZkMdocPresentation.present] call pays the cost itself, exactly
+     * as if this was never called at all.
+     *
+     * Only the first candidate per query is warmed - with more than one
+     * eligible copy of a credential, which one the user (or this wallet's
+     * own consumption policy) ends up picking isn't known yet, and warming
+     * every copy would multiply this by the candidate count for a benefit
+     * that only ever pays off for whichever one is actually selected.
+     */
+    private fun prewarmZkMatches(matchResults: List<CredentialMatcher.MatchResult>) {
+        for (result in matchResults) {
+            val zkSystems = result.zkSystemTypes ?: continue
+            val candidate = result.candidates.firstOrNull() ?: continue
+            val disclosedClaims = result.requestedClaims.mapNotNull { it.lastOrNull() }
+            scope.launch {
+                try {
+                    val credBytes = android.util.Base64.decode(
+                        candidate.raw, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
+                    )
+                    zkPresentation.prewarmVega(
+                        ZkMdocPresentation.Request(
+                            credentialBytes = credBytes,
+                            requestedSystems = zkSystems,
+                            sessionTranscript = ByteArray(0),
+                            requestedClaims = disclosedClaims,
+                        )
+                    )
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Timber.d(e, "ZK prep-prove prewarm failed for credential ${candidate.id} - the real presentation will just run it fresh")
+                }
+            }
+        }
+    }
 
     /** Resume context for in-progress OAuth authorizations, keyed by flow ID - see [PendingAuthorization]. */
     private val pendingAuthorizations = mutableMapOf<String, PendingAuthorization>()
@@ -6451,6 +6534,7 @@ class SirosWallet private constructor(
                     ))
 
                     pendingMatchResultsByFlow[msg.flowId] = matchResults
+                    prewarmZkMatches(matchResults)
 
                     val matches = selectedIds.mapNotNull { id ->
                         allCreds.find { it.id == id }?.let { cred ->
@@ -7958,6 +8042,7 @@ class SirosWallet private constructor(
                 // flow type. sign_presentation's ZK branch needs this cached
                 // so it knows the originating query's format/zkSystemTypes.
                 pendingMatchResultsByFlow[flowId] = matchResults
+                prewarmZkMatches(matchResults)
 
                 val listener = eventListener
                 // Hoisted: the decline branch below needs to tell "holds

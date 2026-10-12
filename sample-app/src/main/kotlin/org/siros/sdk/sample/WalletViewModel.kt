@@ -200,6 +200,17 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _transactionDataEnabled: MutableStateFlow<Boolean>
     val transactionDataEnabled: StateFlow<Boolean> get() = _transactionDataEnabled
 
+    /**
+     * See [org.siros.sdk.wallet.WalletConfig.vegaProfilingEnabled]'s doc
+     * comment. Unlike [transactionDataEnabled], this is a constructor-time
+     * [WalletConfig] value, not something [SirosWallet] exposes as a
+     * mutable var - [updateVegaProfilingEnabled] only persists the setting
+     * and triggers a rebuild on the next opportunity ([rebuildWalletIfNeeded]),
+     * same as [preferLocalReaderTrustEvaluation].
+     */
+    private val _vegaProfilingEnabled: MutableStateFlow<Boolean>
+    val vegaProfilingEnabled: StateFlow<Boolean> get() = _vegaProfilingEnabled
+
     init {
         // Read test overrides - set either via the settings sheet UI, or (debug
         // builds only) via `adb shell am start ... --es backend_url ... --es
@@ -258,6 +269,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         )
         _transactionDataEnabled = MutableStateFlow(
             activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE).getBoolean("transaction_data_enabled", false),
+        )
+        _vegaProfilingEnabled = MutableStateFlow(
+            activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE).getBoolean("vega_profiling_enabled", false),
         )
     }
 
@@ -394,6 +408,15 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         activity.getSharedPreferences("siros_test_overrides", android.content.Context.MODE_PRIVATE)
             .edit()
             .putBoolean("prefer_local_reader_trust_evaluation", enabled)
+            .apply()
+    }
+
+    /** Persists the setting; takes effect on the wallet instance [rebuildWalletIfNeeded] next creates - see [vegaProfilingEnabled]'s doc comment. */
+    fun updateVegaProfilingEnabled(enabled: Boolean) {
+        _vegaProfilingEnabled.value = enabled
+        activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("vega_profiling_enabled", enabled)
             .apply()
     }
 
@@ -2614,6 +2637,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             preferLocalReaderTrustEvaluation = _preferLocalReaderTrustEvaluation.value,
             readerTrustRootCertificatesPem = _readerTrustRootCertificatePem.value.takeIf { it.isNotBlank() }
                 ?.let { listOf(it) } ?: emptyList(),
+            vegaProfilingEnabled = _vegaProfilingEnabled.value,
             // Mirrors enrollWscd/rotateLifecycle's own prefetch-PIN-before-
             // transport pattern (see awaitFido2PinEntry's doc comment) for
             // real credential issuance too - found necessary via live

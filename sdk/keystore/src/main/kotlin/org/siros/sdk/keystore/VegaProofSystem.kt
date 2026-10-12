@@ -64,6 +64,15 @@ class VegaProofSystem(
     private val zkCircuitClient: ZkCircuitClient,
     /** Where the loaded prover key lives; share one across proof systems so the process holds one prover at a time. */
     private val residency: ZkProverResidency = ZkProverResidency(),
+    /** Caches `prep_prove` output per (credential, exact disclosure combination) - see [VegaProofCache]'s own doc comment. */
+    private val proofCache: VegaProofCache = VegaProofCache(),
+    /**
+     * Optional structured timing sink - null (default, matching
+     * [org.siros.sdk.wallet.WalletConfig.vegaProfilingEnabled]'s default)
+     * collects no profiling data beyond the [Timber] log line this class
+     * already emits. See [VegaProfilingEntry]/[VegaProfilingFileSink].
+     */
+    private val profilingSink: VegaProfilingSink? = null,
 ) : ZkProofSystem {
 
     companion object {
@@ -125,6 +134,49 @@ class VegaProofSystem(
     private fun residencyKey(spec: ZkSystemSpec) = "$systemId:${spec.id}"
 
     /**
+     * Runs [block] with this (coroutine worker) thread's priority temporarily
+     * raised, restoring the prior value afterward regardless of how [block]
+     * exits. `Dispatchers.Default`'s pooled threads run at the normal Linux
+     * "nice" priority Android gives a background/non-UI thread by default -
+     * on a big.LITTLE device, its energy-aware scheduler (EAS) keeps threads
+     * at that priority off the big/performance cores entirely, even while
+     * the app is the one the user is actively looking at. Measured on real
+     * hardware (a Pixel 10a) with `zk-cred-vega`'s own `perf_profile_traced`
+     * example, `taskset`-pinned: `prep_prove`/`prove` both run roughly 2.2x
+     * slower confined to the small cores (`taskset -c 0-3`: 1.56s/2.73s)
+     * than the big ones (`taskset -c 4-7`: 0.59s/1.24s) - and the small-core
+     * numbers match this SDK's own in-app Timber-logged timings almost
+     * exactly, meaning every real presentation has been paying this tax.
+     * An app cannot set its own thread's CPU affinity directly (`sched_setaffinity`
+     * is blocked for regular apps), but raising thread *priority* is
+     * something EAS already uses as its own placement signal, and is the
+     * standard Android technique for pulling a short-lived, latency-sensitive
+     * background computation onto a big core (the same trick audio/camera
+     * pipelines use) - this does not request realtime/FIFO scheduling, only
+     * a priority hint, so it cannot starve the UI thread's own (separately
+     * boosted) top-app scheduling.
+     */
+    private inline fun <T> withBoostedThreadPriority(block: () -> T): T {
+        val tid = android.os.Process.myTid()
+        val priorPriority = try {
+            android.os.Process.getThreadPriority(tid)
+        } catch (e: Exception) {
+            Timber.d(e, "Could not read thread priority before ZK proving - leaving it alone")
+            return block()
+        }
+        return try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            block()
+        } finally {
+            try {
+                android.os.Process.setThreadPriority(tid, priorPriority)
+            } catch (e: Exception) {
+                Timber.w(e, "Could not restore ZK proving thread's prior priority ($priorPriority)")
+            }
+        }
+    }
+
+    /**
      * Matches any requested spec declaring `system == systemId` for a proof
      * over AT MOST [MAX_CLAIMS_V1] claims - unlike Longfellow's exact-match
      * requirement (a circuit compiled per attribute count), VEGA's circuit
@@ -156,26 +208,49 @@ class VegaProofSystem(
         ) { proverKey ->
             val (claims, ecdsaWitness, msoBody) = buildWitness(mdoc, requestedClaims)
 
-            // prep_prove/prove are synchronous, CPU-bound native calls (~5s for
-            // this circuit) - running them on whatever dispatcher the caller
-            // happens to be on (often Dispatchers.Main for a UI-triggered
-            // presentation flow) blocks the UI thread for their full duration,
-            // freezing any in-progress animation (e.g. a spinner). Dispatchers.Default
-            // moves the blocking work off the calling thread so the coroutine
-            // genuinely suspends here instead.
+            // An explicit caller-supplied priorState (a host that persists
+            // ZkProofResult.nextState itself across process restarts, say)
+            // always wins; otherwise consult this system's own in-memory
+            // cache - see VegaProofCache's doc comment for why a cache keyed
+            // on (credential, EXACT disclosed-claims set) exists at all,
+            // and why disclosedClaims here must be requestedClaims, never a
+            // normalized/reordered copy of it.
+            val cachedState = priorState ?: proofCache.priorStateFor(credentialBytes, requestedClaims)
+            val usedCachedState = cachedState != null
+
+            // prep_prove/prove are synchronous, CPU-bound native calls -
+            // running them on whatever dispatcher the caller happens to be
+            // on (often Dispatchers.Main for a UI-triggered presentation
+            // flow) blocks the UI thread for their full duration, freezing
+            // any in-progress animation (e.g. a spinner). Dispatchers.Default
+            // moves the blocking work off the calling thread so the
+            // coroutine genuinely suspends here instead.
             val result = withContext(Dispatchers.Default) {
-                // Fold-and-reuse: prep_prove only runs once per credential, ever -
-                // every subsequent presentation reuses the previous prove() call's
-                // own nextState instead. See ZkProofResult.nextState's doc comment.
                 val prepStart = System.nanoTime()
-                val state = priorState ?: prepProve(proverKey, claims, ecdsaWitness, msoBody)
+                val state = cachedState ?: withBoostedThreadPriority { prepProve(proverKey, claims, ecdsaWitness, msoBody) }
                 val prepMs = (System.nanoTime() - prepStart) / 1_000_000
                 val proveStart = System.nanoTime()
-                val proveResult = prove(proverKey, claims, ecdsaWitness, msoBody, state)
+                val proveResult = withBoostedThreadPriority { prove(proverKey, claims, ecdsaWitness, msoBody, state) }
                 val proveMs = (System.nanoTime() - proveStart) / 1_000_000
-                Timber.i("Vega prepProve took ${prepMs}ms, prove took ${proveMs}ms")
+                Timber.i(
+                    "Vega prepProve took ${prepMs}ms (${if (usedCachedState) "cache hit, skipped" else "ran fresh"}), " +
+                        "prove took ${proveMs}ms",
+                )
+                profilingSink?.record(
+                    VegaProfilingEntry(
+                        timestampMs = System.currentTimeMillis(),
+                        event = "generateProof",
+                        usedCachedState = usedCachedState,
+                        prepProveMs = if (usedCachedState) null else prepMs,
+                        proveMs = proveMs,
+                        deviceModel = android.os.Build.MODEL,
+                        abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
+                    ),
+                )
                 proveResult
             }
+
+            proofCache.record(credentialBytes, requestedClaims, result.nextState, usedCachedState)
 
             return@use ZkProofResult(
                 proofBytes = result.proofBytes,
@@ -187,6 +262,62 @@ class VegaProofSystem(
                 pseudonymOutcome = PseudonymOutcome.NOT_SUPPORTED_BY_SYSTEM,
             )
         }
+    }
+
+    /**
+     * Runs `prep_prove` for [requestedClaims] ahead of time and caches the
+     * result, so the first REAL presentation disclosing that exact
+     * combination skips straight to `prove()` - the credential-issuance-time
+     * precompute this class's own cache exists to make possible. Produces no
+     * proof and touches no verifier-specific data (there is none at this
+     * point - [generateProof]'s `sessionTranscript`/`verifierIdentity` never
+     * reach `prep_prove`/`prove` at all, confirmed against the real crate).
+     *
+     * Safe to call speculatively (e.g. right after issuance, or the moment a
+     * presentation REQUEST names its claims but before the user has approved
+     * it) - a redundant call for a combination already cached is a cheap
+     * no-op below the native layer, since [VegaProofCache.priorStateFor]
+     * would be consulted by the next real [generateProof] regardless of
+     * whether this ran again. Callers that don't know which claims will be
+     * requested can skip this entirely; [generateProof] still warms the
+     * cache for whatever combination a real presentation actually used, for
+     * next time.
+     */
+    suspend fun prewarm(spec: ZkSystemSpec, document: CredentialDocument, requestedClaims: List<String>) {
+        val credentialBytes = (document as? CredentialDocument.Mdoc)?.bytes
+            ?: throw IllegalArgumentException("$systemId proves over mdoc only, got ${document::class.simpleName}")
+        if (proofCache.priorStateFor(credentialBytes, requestedClaims) != null) return
+        val mdoc = MdocCbor.parseStoredCredential(credentialBytes)
+        residency.use(key = residencyKey(spec), load = { loadProverKey(spec) }) { proverKey ->
+            val (claims, ecdsaWitness, msoBody) = buildWitness(mdoc, requestedClaims)
+            val prepStart = System.nanoTime()
+            val state = withContext(Dispatchers.Default) { withBoostedThreadPriority { prepProve(proverKey, claims, ecdsaWitness, msoBody) } }
+            val prepMs = (System.nanoTime() - prepStart) / 1_000_000
+            profilingSink?.record(
+                VegaProfilingEntry(
+                    timestampMs = System.currentTimeMillis(),
+                    event = "prewarm",
+                    usedCachedState = false,
+                    prepProveMs = prepMs,
+                    proveMs = null,
+                    deviceModel = android.os.Build.MODEL,
+                    abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown",
+                ),
+            )
+            proofCache.record(credentialBytes, requestedClaims, state, usedCachedState = false)
+        }
+    }
+
+    /**
+     * Loads this circuit's prover key into the shared [residency] without
+     * proving anything - for a host that wants the ~150MB key already
+     * resident (not just the much smaller prep-chain cache warm) before the
+     * user reaches a presentation, e.g. as soon as a QR code is scanned or a
+     * proximity session starts, so a cold key load never stacks on top of a
+     * live `prove()` call.
+     */
+    suspend fun warmResidency(spec: ZkSystemSpec) {
+        residency.use(key = residencyKey(spec), load = { loadProverKey(spec) }) { }
     }
 
     /**
@@ -220,15 +351,29 @@ class VegaProofSystem(
      * single disclosed namespace to have EXACTLY [MAX_CLAIMS_V1] elements
      * (a real v1 scope limit, not a bug - VEGA's circuit is sized for
      * small, fixed-shape credentials like the real 4-claim mDL test vector,
-     * not arbitrarily large ones). Slot assignment is the namespace's own
-     * document order (stable per credential, independent of which claims a
-     * given presentation discloses) - `disclose` only varies per slot based
-     * on membership in [requestedClaims]. This keeps [ZkProofResult.nextState]
-     * reuse valid across repeat presentations of the SAME disclosed-claim
-     * set; a later presentation disclosing a DIFFERENT subset still reuses
-     * the same slot/witness identity (only the `disclose` flags change), so
-     * reuse stays sound regardless - this is the same claims list `prove()`
-     * takes each time regardless of `priorState`.
+     * not arbitrarily large ones; a future circuit sized for a real mDL/PID/
+     * photoID credential whose claim count vastly exceeds [MAX_CLAIMS_V1]
+     * will need this to become "select the circuit's designated slot
+     * claims out of a larger namespace" rather than "the whole namespace,
+     * positionally" - not yet done, since no such circuit is deployed yet).
+     * Slot assignment is the namespace's own document order (stable per
+     * credential, independent of which claims a given presentation
+     * discloses) - `disclose` only varies per slot based on membership in
+     * [requestedClaims].
+     *
+     * **This does NOT make [ZkProofResult.nextState] reuse valid across
+     * presentations disclosing a DIFFERENT subset of the same credential -
+     * an earlier version of this comment claimed it did, and that claim was
+     * never actually verified against the real crate.** Confirmed
+     * empirically (flip every `disclose` flag between a `prep_prove` call
+     * and the `prove()` call consuming its state, same claims otherwise):
+     * the native call fails outright, the same "Step circuit N public
+     * values changed between prep_prove and prove" class of error
+     * `zk-cred-vega`'s own `fresh_nonce()` doc describes for a changed
+     * nonce - `disclose` is baked into the step circuit's public values at
+     * `prep_prove` time right alongside the nonce, not a free per-`prove()`
+     * choice. [VegaProofCache] keys on the exact disclosed-claims SET for
+     * exactly this reason; see its own doc comment.
      */
     private fun buildWitness(
         document: org.siros.sdk.credentials.mdoc.DocumentMdoc,

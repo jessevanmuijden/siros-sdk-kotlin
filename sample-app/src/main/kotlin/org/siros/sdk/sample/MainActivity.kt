@@ -693,6 +693,8 @@ fun WalletScreen(viewModel: WalletViewModel) {
                             onUpdatePreferLocalReaderTrustEvaluation = viewModel::updatePreferLocalReaderTrustEvaluation,
                             readerTrustRootCertificatePem = viewModel.readerTrustRootCertificatePem.collectAsState().value,
                             onUpdateReaderTrustRootCertificatePem = viewModel::updateReaderTrustRootCertificatePem,
+                            vegaProfilingEnabled = viewModel.vegaProfilingEnabled.collectAsState().value,
+                            onUpdateVegaProfilingEnabled = viewModel::updateVegaProfilingEnabled,
                         )
                         else -> CredentialsTab(
                             state = state,
@@ -1399,6 +1401,8 @@ fun SettingsTab(
     onUpdatePreferLocalReaderTrustEvaluation: ((Boolean) -> Unit)? = null,
     readerTrustRootCertificatePem: String = "",
     onUpdateReaderTrustRootCertificatePem: ((String) -> Unit)? = null,
+    vegaProfilingEnabled: Boolean = false,
+    onUpdateVegaProfilingEnabled: ((Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1597,6 +1601,42 @@ fun SettingsTab(
                     enabled = onUpdateReaderTrustRootCertificatePem != null,
                     singleLine = false,
                 )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // VEGA ZK proof profiling - see WalletConfig.vegaProfilingEnabled's
+        // doc comment for the file location and why it needs no root to pull.
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            stringResource(R.string.settings_vega_profiling),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Text(
+                            stringResource(R.string.settings_vega_profiling_description),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = vegaProfilingEnabled,
+                        onCheckedChange = onUpdateVegaProfilingEnabled,
+                        enabled = onUpdateVegaProfilingEnabled != null,
+                    )
+                }
             }
         }
 

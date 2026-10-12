@@ -1574,6 +1574,7 @@ class SirosWalletTest {
         val sessionStore = mockk<SessionStore>(relaxed = true)
         every { sessionStore.instanceKeyId } returns "instance-key-1"
         val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
         val apiClient = mockk<BackendApiClient>(relaxed = true)
 
         val issuerUrl = "https://issuer.example.com"
@@ -2205,6 +2206,7 @@ class SirosWalletTest {
             val sessionStore = mockk<SessionStore>(relaxed = true)
             every { sessionStore.instanceKeyId } returns "instance-key-1"
             val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
             val apiClient = mockk<BackendApiClient>(relaxed = true)
 
             val wallet = newWallet(
@@ -2266,6 +2268,7 @@ class SirosWalletTest {
             val sessionStore = mockk<SessionStore>(relaxed = true)
             every { sessionStore.instanceKeyId } returns "instance-key-1"
             val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
             coEvery {
                 keystore.generateKeyProof(keyId = any(), typ = any(), issuer = any(), audience = any(), extraClaims = any())
             } returns "pop-jwt"
@@ -2359,6 +2362,7 @@ class SirosWalletTest {
             val sessionStore = mockk<SessionStore>(relaxed = true)
             every { sessionStore.instanceKeyId } returns "instance-key-1"
             val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
             coEvery {
                 keystore.generateKeyProof(keyId = any(), typ = any(), issuer = any(), audience = any(), extraClaims = any())
             } returns "pop-jwt"
@@ -2452,6 +2456,7 @@ class SirosWalletTest {
         val sessionStore = mockk<SessionStore>(relaxed = true)
         every { sessionStore.instanceKeyId } returns "instance-key-1"
         val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
         coEvery {
             keystore.generateDPoPProof(keyId = any(), htm = any(), htu = any(), nonce = any(), accessTokenHash = any())
         } returns "dpop-jwt"
@@ -3137,6 +3142,7 @@ class SirosWalletTest {
             val sessionStore = mockk<SessionStore>(relaxed = true)
             every { sessionStore.instanceKeyId } returns "instance-key-1"
             val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
             coEvery {
                 keystore.generateKeyProof(keyId = any(), typ = any(), issuer = any(), audience = any(), extraClaims = any())
             } returns "pop-jwt"
@@ -3224,6 +3230,7 @@ class SirosWalletTest {
             val sessionStore = mockk<SessionStore>(relaxed = true)
             every { sessionStore.instanceKeyId } returns "instance-key-1"
             val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
             coEvery {
                 keystore.generateKeyProof(
                     keyId = any(), typ = any(), issuer = "siros-sample://callback",
@@ -3313,6 +3320,7 @@ class SirosWalletTest {
             val sessionStore = mockk<SessionStore>(relaxed = true)
             every { sessionStore.instanceKeyId } returns "instance-key-1"
             val keystore = mockk<KeystoreManager>(relaxed = true)
+            every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
             coEvery {
                 keystore.generateKeyProof(
                     keyId = "instance-key-1", typ = "oauth-client-attestation-pop+jwt",
@@ -3385,6 +3393,7 @@ class SirosWalletTest {
         val sessionStore = mockk<SessionStore>(relaxed = true)
         every { sessionStore.instanceKeyId } returns "instance-key-1"
         val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
         val apiClient = mockk<BackendApiClient>(relaxed = true)
         coEvery { apiClient.requestWIAChallenge() } throws java.io.IOException("backend unreachable")
 
@@ -6658,6 +6667,7 @@ class SirosWalletTest {
         every { sessionStore.instanceKeyId } returns "instance-key-1"
         every { sessionStore.credentialId } returns "stale-passkey"
         val keystore = mockk<KeystoreManager>(relaxed = true)
+        every { keystore.listKeys() } returns listOf(KeyInfo("instance-key-1", "ES256", 0L))
         coEvery {
             keystore.generateKeyProof(keyId = any(), typ = any(), issuer = any(), audience = any(), extraClaims = any())
         } returns "pop-jwt"

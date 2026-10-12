@@ -249,6 +249,10 @@
     <string name="settings_transaction_data_description">Διαχείριση αιτημάτων επιβεβαίωσης πληρωμής (SCA, EC TS12): εμφάνιση της συναλλαγής, αίτημα επιβεβαίωσης και καταγραφή. Ισχύει για το επόμενο αίτημα. Αυτή η έκδοση δεν παρέχει παράγοντες ταυτοποίησης, επομένως ακόμη και τα επιβεβαιωμένα αιτήματα απορρίπτονται.</string>
     <string name="settings_transaction_log">Αρχείο συναλλαγών</string>
     <string name="transaction_log_title">Αρχείο συναλλαγών</string>
+
+    <!-- VEGA ZK proof profiling -->
+    <string name="settings_vega_profiling">Προφίλ αποδείξεων VEGA</string>
+    <string name="settings_vega_profiling_description">Καταγραφή του χρόνου prep_prove/prove για κάθε απόδειξη VEGA ZK στο αρχείο vega_profiling.jsonl, στον κατάλογο εξωτερικών αρχείων της εφαρμογής, ανακτήσιμο με adb pull. Ισχύει την επόμενη φορά που θα (ξανα)δημιουργηθεί η περίοδος σύνδεσης του πορτοφολιού.</string>
     <string name="transaction_log_empty">Δεν υπάρχουν ακόμη επιβεβαιώσεις πληρωμής</string>
     <string name="transaction_log_outcome_consented">Επιβεβαιώθηκε</string>
     <string name="transaction_log_outcome_declined">Απορρίφθηκε από τον χρήστη</string>

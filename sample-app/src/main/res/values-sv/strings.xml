@@ -249,6 +249,10 @@
     <string name="settings_transaction_data_description">Hantera betalningsbekräftelser (EC TS12 SCA): visa transaktionen, be om bekräftelse och logga den. Gäller nästa begäran. Den här versionen levererar inga autentiseringsfaktorer, så bekräftade begäranden nekas ändå.</string>
     <string name="settings_transaction_log">Transaktionslogg</string>
     <string name="transaction_log_title">Transaktionslogg</string>
+
+    <!-- VEGA ZK proof profiling -->
+    <string name="settings_vega_profiling">VEGA-bevisprofilering</string>
+    <string name="settings_vega_profiling_description">Spela in prep_prove/prove-tidtagning för varje VEGA ZK-bevis till vega_profiling.jsonl under appens externa filkatalog, hämtningsbar med adb pull. Börjar gälla nästa gång plånbokssessionen (åter)skapas.</string>
     <string name="transaction_log_empty">Inga betalningsbekräftelser ännu</string>
     <string name="transaction_log_outcome_consented">Bekräftad</string>
     <string name="transaction_log_outcome_declined">Avböjd</string>

@@ -309,6 +309,23 @@ data class WalletConfig(
      * tolerance wallet-frontend applies to signature verification.
      */
     val clockToleranceSeconds: Long = 60,
+    /**
+     * Collects structured `prep_prove`/`prove` timing data for every VEGA ZK
+     * proof this wallet generates, as one JSON-Lines record per call,
+     * appended to a file under the app's external-files directory
+     * (`<applicationId>/vega_profiling.jsonl`) - retrievable with
+     * `adb pull /sdcard/Android/data/<applicationId>/files/vega_profiling.jsonl`
+     * on a debuggable build, no root needed. `false` by default: this is a
+     * diagnostic for investigating VEGA's own performance (see
+     * [org.siros.sdk.keystore.VegaProofSystem]'s `profilingSink` parameter),
+     * not something a production deployment needs on by default - the
+     * [org.siros.sdk.keystore.VegaProfilingEntry] data is harmless (timing
+     * numbers and device model/ABI, no credential content) but there is no
+     * reason to write it to disk unasked. Applied once, at [SirosWallet]
+     * construction - unlike [transactionDataEnabled], there is no runtime
+     * toggle; flip this and rebuild the wallet to change it.
+     */
+    val vegaProfilingEnabled: Boolean = false,
 ) {
     /**
      * The reader-trust mode actually in force: [readerTrustEvaluationMode] if

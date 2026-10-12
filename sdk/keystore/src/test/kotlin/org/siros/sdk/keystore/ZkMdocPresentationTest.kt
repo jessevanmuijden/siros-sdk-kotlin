@@ -193,6 +193,34 @@ class ZkMdocPresentationTest {
     }
 
     @Test
+    fun `prewarmVega is a no-op when the resolved system is not Vega`() = runTest {
+        // Must not throw, and (since FakeSystem isn't a VegaProofSystem)
+        // there is nothing real to exercise - this just confirms the type
+        // check actually gates the call rather than assuming every
+        // registered system understands prewarm.
+        presentation(FakeSystem(accepted = 2)).prewarmVega(
+            ZkMdocPresentation.Request(
+                credentialBytes = storedCredential(),
+                requestedSystems = listOf(spec),
+                sessionTranscript = ByteArray(0),
+                requestedClaims = listOf("family_name", "issue_date"),
+            ),
+        )
+    }
+
+    @Test
+    fun `prewarmVega is a no-op when nothing resolves`() = runTest {
+        presentation(FakeSystem(accepted = 1)).prewarmVega(
+            ZkMdocPresentation.Request(
+                credentialBytes = storedCredential(),
+                requestedSystems = listOf(spec),
+                sessionTranscript = ByteArray(0),
+                requestedClaims = listOf("family_name", "given_name"),
+            ),
+        )
+    }
+
+    @Test
     fun `the standard assembly registers the shipped mdoc systems in preference order`() {
         val circuitClient = org.siros.sdk.credentials.ZkCircuitClient(sources = emptyList())
         val p = ZkMdocPresentation.standard(circuitClient)

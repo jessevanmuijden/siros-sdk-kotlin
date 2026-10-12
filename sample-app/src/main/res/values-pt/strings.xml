@@ -249,6 +249,10 @@
     <string name="settings_transaction_data_description">Tratar pedidos de confirmação de pagamento (SCA, EC TS12): mostrar a transação, pedir confirmação e registá-la. Aplica-se ao próximo pedido. Esta versão não fornece fatores de autenticação, pelo que os pedidos confirmados são, ainda assim, recusados.</string>
     <string name="settings_transaction_log">Registo de transações</string>
     <string name="transaction_log_title">Registo de transações</string>
+
+    <!-- VEGA ZK proof profiling -->
+    <string name="settings_vega_profiling">Definição de perfil de provas VEGA</string>
+    <string name="settings_vega_profiling_description">Regista os tempos de prep_prove/prove de cada prova de conhecimento zero VEGA no ficheiro vega_profiling.jsonl, no diretório de ficheiros externos da aplicação, recuperável com adb pull. Produz efeito da próxima vez que a sessão da carteira for (re)criada.</string>
     <string name="transaction_log_empty">Ainda sem confirmações de pagamento</string>
     <string name="transaction_log_outcome_consented">Confirmada</string>
     <string name="transaction_log_outcome_declined">Recusada pelo utilizador</string>

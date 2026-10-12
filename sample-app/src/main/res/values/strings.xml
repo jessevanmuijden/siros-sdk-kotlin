@@ -267,6 +267,10 @@
     <string name="settings_transaction_data_description">Handle EC TS12 payment confirmation (SCA) requests: show the transaction, ask for confirmation and record it. Applies to the next request. This build supplies no authentication factors, so confirmed requests are still refused.</string>
     <string name="settings_transaction_log">Transaction log</string>
     <string name="transaction_log_title">Transaction log</string>
+
+    <!-- VEGA ZK proof profiling -->
+    <string name="settings_vega_profiling">VEGA proof profiling</string>
+    <string name="settings_vega_profiling_description">Record prep_prove/prove timing for every VEGA ZK proof to vega_profiling.jsonl under this app\'s external-files directory, retrievable with adb pull. Takes effect next time the wallet session is (re)created.</string>
     <string name="transaction_log_empty">No payment confirmations yet</string>
     <string name="transaction_log_outcome_consented">Confirmed</string>
     <string name="transaction_log_outcome_declined">Declined</string>
