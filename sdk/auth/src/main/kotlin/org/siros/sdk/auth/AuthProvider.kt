@@ -15,8 +15,16 @@ interface AuthProvider {
     /** Authenticate with an existing passkey (assertion). */
     suspend fun authenticate(options: AuthenticateOptions): AuthenticateResult
 
-    /** Obtain PRF output for keystore key derivation. */
-    suspend fun getPrfOutput(credentialId: ByteArray, salt: ByteArray): PrfOutput
+    /**
+     * Obtain PRF output for keystore key derivation via a standalone
+     * assertion against [credentialId]. [rpId] is required, not optional or
+     * inferred from the credential: a platform assertion request with an
+     * empty rpId is rejected outright by some authenticator UIs (confirmed:
+     * Google Play Services' FIDO2 full-screen UI crashes on it with
+     * `IllegalArgumentException: rpId cannot be empty`) rather than falling
+     * back to whatever RP the credential itself was created under.
+     */
+    suspend fun getPrfOutput(credentialId: ByteArray, salt: ByteArray, rpId: String): PrfOutput
 }
 
 data class RegisterOptions(

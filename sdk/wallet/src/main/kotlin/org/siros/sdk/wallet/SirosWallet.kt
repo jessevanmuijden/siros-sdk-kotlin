@@ -108,6 +108,7 @@ import org.siros.sdk.credentials.MddlSchemaFetcher
 import org.siros.sdk.keystore.BbsHolderStateVault
 import org.siros.sdk.keystore.CredentialRefreshTokenEntry
 import org.siros.sdk.keystore.DCAPIResponseEncryption
+import org.siros.sdk.keystore.EncryptedContainer
 import org.siros.sdk.keystore.JweKeystore
 import org.siros.sdk.keystore.KeypairInfo
 import org.siros.sdk.keystore.KeystoreManager
@@ -1022,7 +1023,15 @@ class SirosWallet private constructor(
     }
 
     private suspend fun newAsRegister(displayName: String) {
-        // Generate a fresh PRF salt for this registration
+        // This salt (and [result.prfOutput] it produces) is what the
+        // account's encryption key depends on forever after. It doesn't
+        // need to be deterministic or regenerable on its own: unlike
+        // [accountRegistry]'s purely local, on-device cache,
+        // [finishRegistration] persists it into the server-synced
+        // container's own `PrfKeyInfo.prfSalt` field (see
+        // [KeystoreManager.unlock]'s prfSalt parameter), so any device that
+        // can fetch this account's privateData can recover it later even
+        // with an empty local cache - see newAsLogin's recovery path.
         val prfSalt = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val hkdfSalt = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val hkdfInfo = HKDF_INFO.toByteArray(Charsets.UTF_8)
@@ -1097,7 +1106,7 @@ class SirosWallet private constructor(
     }
 
     private suspend fun legacyRegister(displayName: String) {
-        // Generate a fresh PRF salt for this registration
+        // See newAsRegister's identical pattern/comment on this salt.
         val prfSalt = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val hkdfSalt = ByteArray(32).also { SecureRandom().nextBytes(it) }
         val hkdfInfo = HKDF_INFO.toByteArray(Charsets.UTF_8)
@@ -1135,8 +1144,8 @@ class SirosWallet private constructor(
         appToken: String?,
     ) {
         // Derive key and initialise empty keystore
-        keystore.unlock(prfOutput.first, ByteArray(0), hkdfSalt, hkdfInfo)
-        unlockAvailableKeystores(prfOutput.first, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.unlock(prfOutput.first, ByteArray(0), hkdfSalt, hkdfInfo, prfSalt)
+        unlockAvailableKeystores(prfOutput.first, ByteArray(0), hkdfSalt, hkdfInfo, prfSalt)
         keystore.setCredentialId(credId)
         val encryptedContainer = try {
             keystore.exportEncryptedContainer()
@@ -1366,12 +1375,22 @@ class SirosWallet private constructor(
         val credId = extractLastCredentialId()
             ?: throw WalletException("No credential ID after login")
         scopeSessionStoreToCredential(credId)
-        val prfOutput = extractLastPrfOutput()
-            ?: throw WalletException("PRF not supported by authenticator — cannot decrypt wallet data")
 
-        // Set up API client with AuthTokens and fetch private data
+        // Set up API client with AuthTokens - needed before fetchPrivateData
+        // below, in the recovery branch this login may need to take.
         setupApiClientWithTokens()
-        finishLogin(session.uuid, session.displayName, credId, prfOutput)
+
+        val recovered = resolveLoginPrfOutput(credId, rpId)
+        finishLogin(
+            session.uuid,
+            session.displayName,
+            credId,
+            recovered.prfOutput,
+            recovered.recoveredPrfSalt,
+            recovered.recoveredHkdfSalt,
+            recovered.recoveredHkdfInfo,
+            recovered.prefetchedPrivateData,
+        )
     }
 
     private suspend fun legacyLogin(accountId: String?, refused: RefusedAccount) {
@@ -1391,13 +1410,68 @@ class SirosWallet private constructor(
         val credId = extractLastCredentialId()
             ?: throw WalletException("No credential ID after login")
         scopeSessionStoreToCredential(credId)
-        val prfOutput = extractLastPrfOutput()
-            ?: throw WalletException("PRF not supported by authenticator — cannot decrypt wallet data")
+        val rpId = legacyAuthClient.lastRpId
+            ?: throw WalletException("Missing rpId after login")
 
         setupApiClient(session)
         legacyAppToken = session.appToken
         sessionStore.appToken = session.appToken
-        finishLogin(session.uuid, session.displayName, credId, prfOutput)
+
+        val recovered = resolveLoginPrfOutput(credId, rpId)
+        finishLogin(
+            session.uuid,
+            session.displayName,
+            credId,
+            recovered.prfOutput,
+            recovered.recoveredPrfSalt,
+            recovered.recoveredHkdfSalt,
+            recovered.recoveredHkdfInfo,
+            recovered.prefetchedPrivateData,
+        )
+    }
+
+    /** [resolveLoginPrfOutput]'s result - see its own doc comment. */
+    private data class RecoveredLoginPrf(
+        val prfOutput: PrfOutput,
+        val recoveredPrfSalt: ByteArray? = null,
+        val recoveredHkdfSalt: ByteArray? = null,
+        val recoveredHkdfInfo: ByteArray? = null,
+        val prefetchedPrivateData: ByteArray? = null,
+    )
+
+    /**
+     * extractLastPrfOutput() is non-null exactly when loginCandidates(credId)
+     * included this credential - i.e. this device's local account cache
+     * already had the right salt on hand for the single evalByCredential
+     * ceremony [newAsLogin]/[legacyLogin] just ran. When it's null - most
+     * commonly because that local cache was wiped (reinstall, app data
+     * cleared, device migration) while the credential itself is perfectly
+     * intact in the platform authenticator - recover the real salt from the
+     * account's own server-synced privateData container (every PrfKeyInfo
+     * entry there carries the exact salt + hkdfSalt/hkdfInfo this credential
+     * was registered with, keyed by credentialId - see
+     * [KeystoreManager.unlock]'s prfSalt parameter), then spend one more
+     * ceremony (one extra tap) getting the real PRF output for it, rather
+     * than treating an otherwise-healthy passkey as permanently unusable.
+     */
+    private suspend fun resolveLoginPrfOutput(credId: ByteArray, rpId: String): RecoveredLoginPrf {
+        extractLastPrfOutput()?.let { return RecoveredLoginPrf(prfOutput = it) }
+        val privateData = fetchPrivateData()
+        val prfKeyInfo = EncryptedContainer.parse(privateData).prfKeys
+            .firstOrNull { it.credentialId.contentEquals(credId) }
+            ?: throw WalletException("PRF not supported by authenticator — cannot decrypt wallet data")
+        val prfOutput = try {
+            authProvider.getPrfOutput(credId, prfKeyInfo.prfSalt, rpId)
+        } catch (e: AuthException) {
+            throw WalletException("PRF not supported by authenticator — cannot decrypt wallet data", e)
+        }
+        return RecoveredLoginPrf(
+            prfOutput = prfOutput,
+            recoveredPrfSalt = prfKeyInfo.prfSalt,
+            recoveredHkdfSalt = prfKeyInfo.hkdfSalt,
+            recoveredHkdfInfo = prfKeyInfo.hkdfInfo,
+            prefetchedPrivateData = privateData,
+        )
     }
 
     private suspend fun finishLogin(
@@ -1405,18 +1479,36 @@ class SirosWallet private constructor(
         displayName: String?,
         credId: ByteArray,
         prfOutput: PrfOutput,
+        // Non-null exactly when this login recovered PRF from the account's
+        // own privateData container (see newAsLogin/legacyLogin) because the
+        // local account cache didn't have this credential on file. These
+        // are the exact values that credential's own PrfKeyInfo entry was
+        // registered with - not a guess - so they take priority over
+        // whatever's in [sessionStore] (stale, or simply absent on a device
+        // that never completed a normal login for this account). Writing
+        // them back into [accountRegistry] below heals that local cache so
+        // the *next* login for this account is a normal one-tap
+        // loginCandidates() match again, instead of needing this recovery
+        // ceremony every time.
+        recoveredPrfSalt: ByteArray? = null,
+        recoveredHkdfSalt: ByteArray? = null,
+        recoveredHkdfInfo: ByteArray? = null,
+        prefetchedPrivateData: ByteArray? = null,
     ) {
-        val privateData = fetchPrivateData()
+        val privateData = prefetchedPrivateData ?: fetchPrivateData()
 
-        val hkdfSalt = sessionStore.hkdfSalt?.let { b64Decode(it) }
+        val hkdfSalt = recoveredHkdfSalt
+            ?: sessionStore.hkdfSalt?.let { b64Decode(it) }
             ?: ByteArray(32).also { SecureRandom().nextBytes(it) }
-        val hkdfInfo = sessionStore.hkdfInfo?.let { b64Decode(it) }
+        val hkdfInfo = recoveredHkdfInfo
+            ?: sessionStore.hkdfInfo?.let { b64Decode(it) }
             ?: HKDF_INFO.toByteArray(Charsets.UTF_8)
-        val prfSaltBytes = sessionStore.prfSalt?.let { b64Decode(it) }
+        val prfSaltBytes = recoveredPrfSalt
+            ?: sessionStore.prfSalt?.let { b64Decode(it) }
             ?: ByteArray(32).also { SecureRandom().nextBytes(it) }
 
-        keystore.unlock(prfOutput.first, privateData, hkdfSalt, hkdfInfo)
-        unlockAvailableKeystores(prfOutput.first, privateData, hkdfSalt, hkdfInfo)
+        keystore.unlock(prfOutput.first, privateData, hkdfSalt, hkdfInfo, prfSaltBytes)
+        unlockAvailableKeystores(prfOutput.first, privateData, hkdfSalt, hkdfInfo, prfSaltBytes)
 
         // Scope session store to this account
         val accountId = "${config.tenantId}:${userId}"
@@ -1429,6 +1521,26 @@ class SirosWallet private constructor(
         sessionStore.prfSalt = b64Encode(prfSaltBytes)
         sessionStore.hkdfSalt = b64Encode(hkdfSalt)
         sessionStore.hkdfInfo = b64Encode(hkdfInfo)
+
+        if (recoveredPrfSalt != null) {
+            val existing = accountRegistry.findAccount(accountId)
+            val healedPasskey = CachedPasskey(
+                credentialId = b64UrlEncode(credId),
+                prfSalt = b64Encode(recoveredPrfSalt),
+            )
+            val passkeys = existing?.passkeys.orEmpty()
+                .filterNot { it.credentialId == healedPasskey.credentialId } + healedPasskey
+            accountRegistry.upsertAccount(
+                (existing ?: CachedAccount(
+                    userId = userId,
+                    tenantId = config.tenantId,
+                    displayName = displayName ?: "",
+                    backendUrl = config.backendUrl,
+                    hkdfSalt = recoveredHkdfSalt?.let { b64Encode(it) } ?: "",
+                    hkdfInfo = recoveredHkdfInfo?.let { b64Encode(it) } ?: "",
+                )).copy(passkeys = passkeys)
+            )
+        }
 
         // Connect engine with anonymous token (new AS) or app token (legacy AS)
         connectEngineWithToken()
@@ -5612,12 +5724,13 @@ class SirosWallet private constructor(
         encryptedContainer: ByteArray,
         hkdfSalt: ByteArray,
         hkdfInfo: ByteArray,
+        prfSalt: ByteArray = ByteArray(32),
     ) {
         val seen = mutableSetOf<KeystoreManager>(keystore)
         config.availableKeystores?.values?.forEach { manager ->
             if (seen.add(manager)) {
                 try {
-                    manager.unlock(prfOutput, encryptedContainer, hkdfSalt, hkdfInfo)
+                    manager.unlock(prfOutput, encryptedContainer, hkdfSalt, hkdfInfo, prfSalt)
                 } catch (e: Exception) {
                     Timber.w(e, "unlockAvailableKeystores: failed to unlock an availableKeystores entry")
                 }

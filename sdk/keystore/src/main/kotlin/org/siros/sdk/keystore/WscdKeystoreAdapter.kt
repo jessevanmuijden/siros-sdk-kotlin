@@ -169,8 +169,9 @@ class WscdKeystoreAdapter private constructor(
         encryptedContainer: ByteArray,
         hkdfSalt: ByteArray,
         hkdfInfo: ByteArray,
+        prfSalt: ByteArray,
     ) {
-        credentialsKeystore.unlock(prfOutput, encryptedContainer, hkdfSalt, hkdfInfo)
+        credentialsKeystore.unlock(prfOutput, encryptedContainer, hkdfSalt, hkdfInfo, prfSalt)
         // Restore the signer's own private keys (if it has any exportable -
         // see the class doc comment) from what credentialsKeystore just
         // parsed out of privatedata's own S.keypairs. Must happen before any

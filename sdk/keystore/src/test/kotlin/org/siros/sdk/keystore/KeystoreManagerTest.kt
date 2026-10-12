@@ -16,7 +16,7 @@ class KeystoreManagerTest {
     // override (every first-party keystore in this SDK overrides it).
     private fun preDiipKeystore(): KeystoreManager = object : KeystoreManager {
         override val isUnlocked = true
-        override suspend fun unlock(prfOutput: ByteArray, encryptedContainer: ByteArray, hkdfSalt: ByteArray, hkdfInfo: ByteArray) {}
+        override suspend fun unlock(prfOutput: ByteArray, encryptedContainer: ByteArray, hkdfSalt: ByteArray, hkdfInfo: ByteArray, prfSalt: ByteArray) {}
         override fun lock() {}
         override suspend fun generateKey(algorithm: String) = "key-1"
         override suspend fun sign(keyId: String, payload: ByteArray, algorithm: String) = ByteArray(0)
@@ -68,7 +68,7 @@ class KeystoreManagerTest {
     fun generateKeypairsDefaultThrowsUnsupported() = runTest {
         val keystore = object : KeystoreManager {
             override val isUnlocked = true
-            override suspend fun unlock(prfOutput: ByteArray, encryptedContainer: ByteArray, hkdfSalt: ByteArray, hkdfInfo: ByteArray) {}
+            override suspend fun unlock(prfOutput: ByteArray, encryptedContainer: ByteArray, hkdfSalt: ByteArray, hkdfInfo: ByteArray, prfSalt: ByteArray) {}
             override fun lock() {}
             override suspend fun generateKey(algorithm: String) = "key-1"
             override suspend fun sign(keyId: String, payload: ByteArray, algorithm: String) = ByteArray(0)

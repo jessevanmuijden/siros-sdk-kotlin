@@ -86,7 +86,7 @@ class TransactionBindingTest {
     fun `a keystore that does not override the SCA overload refuses rather than signing without the hashes`() = runTest {
         val keystore = object : KeystoreManager {
             override val isUnlocked = true
-            override suspend fun unlock(prfOutput: ByteArray, encryptedContainer: ByteArray, hkdfSalt: ByteArray, hkdfInfo: ByteArray) {}
+            override suspend fun unlock(prfOutput: ByteArray, encryptedContainer: ByteArray, hkdfSalt: ByteArray, hkdfInfo: ByteArray, prfSalt: ByteArray) {}
             override fun lock() {}
             override suspend fun generateKey(algorithm: String) = "k"
             override suspend fun sign(keyId: String, payload: ByteArray, algorithm: String) = ByteArray(0)

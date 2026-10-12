@@ -46,7 +46,7 @@ public final class org/siros/sdk/auth/AllowCredential {
 
 public abstract interface class org/siros/sdk/auth/AuthProvider {
 	public abstract fun authenticate (Lorg/siros/sdk/auth/AuthenticateOptions;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
-	public abstract fun getPrfOutput ([B[BLkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public abstract fun getPrfOutput ([B[BLjava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public abstract fun register (Lorg/siros/sdk/auth/RegisterOptions;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 }
 
@@ -244,7 +244,7 @@ public final class org/siros/sdk/auth/CredentialManagerAuthProvider : org/siros/
 	public final fun getLastAuthenticatorAttachment ()Ljava/lang/String;
 	public final fun getLastCredentialId ()[B
 	public final fun getLastPrfOutput ()Lorg/siros/sdk/auth/PrfOutput;
-	public fun getPrfOutput ([B[BLkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public fun getPrfOutput ([B[BLjava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public fun register (Lorg/siros/sdk/auth/RegisterOptions;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public fun suggestsWscdCapableDevice ()Z
 }
@@ -279,7 +279,7 @@ public final class org/siros/sdk/auth/LocalAuthProvider : org/siros/sdk/auth/Aut
 	public fun authenticate (Lorg/siros/sdk/auth/AuthenticateOptions;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun getLastCredentialId ()[B
 	public final fun getLastPrfOutput ()Lorg/siros/sdk/auth/PrfOutput;
-	public fun getPrfOutput ([B[BLkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public fun getPrfOutput ([B[BLjava/lang/String;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public fun register (Lorg/siros/sdk/auth/RegisterOptions;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun rollbackLastRegistration ()V
 	public final fun setLastPrfOutput (Lorg/siros/sdk/auth/PrfOutput;)V
@@ -613,6 +613,7 @@ public final class org/siros/sdk/auth/WebAuthnAuthClient {
 	public static final field Companion Lorg/siros/sdk/auth/WebAuthnAuthClient$Companion;
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/auth/AuthProvider;Lokhttp3/OkHttpClient;Lkotlinx/serialization/json/Json;)V
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/auth/AuthProvider;Lokhttp3/OkHttpClient;Lkotlinx/serialization/json/Json;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getLastRpId ()Ljava/lang/String;
 	public final fun login ([BLjava/util/List;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public static synthetic fun login$default (Lorg/siros/sdk/auth/WebAuthnAuthClient;[BLjava/util/List;Lkotlin/jvm/functions/Function1;Lkotlin/coroutines/Continuation;ILjava/lang/Object;)Ljava/lang/Object;
 	public final fun register (Ljava/lang/String;[BLkotlin/coroutines/Continuation;)Ljava/lang/Object;

@@ -113,13 +113,13 @@ class CredentialManagerAuthProvider(
         }
     }
 
-    override suspend fun getPrfOutput(credentialId: ByteArray, salt: ByteArray): PrfOutput {
+    override suspend fun getPrfOutput(credentialId: ByteArray, salt: ByteArray, rpId: String): PrfOutput {
         // Issue a standalone credentials.get with PRF extension for the given credential+salt.
         // The challenge is a random throwaway — we only care about the PRF output.
         val challenge = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
         val requestJson = buildJsonObject {
             put("challenge", b64url(challenge))
-            put("rpId", "")  // Will be overridden by the credential's RP
+            put("rpId", rpId)
             put("timeout", 60000)
             put("userVerification", "required")
             put("allowCredentials", buildJsonArray {

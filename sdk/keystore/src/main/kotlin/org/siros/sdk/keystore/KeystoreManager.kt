@@ -25,12 +25,23 @@ interface KeystoreManager {
      * @param encryptedContainer the JWE container (may be empty for first-time setup).
      * @param hkdfSalt    HKDF extraction salt (32 bytes).
      * @param hkdfInfo    HKDF expansion info (e.g. "eDiplomas PRF").
+     * @param prfSalt     the WebAuthn PRF extension salt (`prf.eval.first`)
+     *   that was used to obtain [prfOutput] from the authenticator. Only
+     *   consumed on first-time setup (an empty [encryptedContainer]), where
+     *   it is persisted into the new container's `PrfKeyInfo.prfSalt` -
+     *   matching the wallet-frontend wire format - so a later login, even
+     *   from a device whose local cache never saw this registration, can
+     *   recover the exact salt this credential needs rather than guessing.
+     *   Ignored once a container already exists: an existing entry's own
+     *   stored salt is always authoritative over whatever salt a caller
+     *   happened to use for *this* unlock call.
      */
     suspend fun unlock(
         prfOutput: ByteArray,
         encryptedContainer: ByteArray,
         hkdfSalt: ByteArray = ByteArray(32),
         hkdfInfo: ByteArray = "eDiplomas PRF".toByteArray(Charsets.UTF_8),
+        prfSalt: ByteArray = ByteArray(32),
     )
 
     /** Lock the keystore, clearing key material from memory. */

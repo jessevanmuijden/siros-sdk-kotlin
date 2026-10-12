@@ -29,6 +29,16 @@ class WebAuthnAuthClient(
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     private val baseUrl = baseUrl.trimEnd('/')
+
+    /**
+     * The `rpId` from the most recent [register]/[login] challenge. Lets a
+     * caller (e.g. [org.siros.sdk.wallet.SirosWallet]'s legacy register/login
+     * paths) make a follow-up [AuthProvider.getPrfOutput] call against the
+     * right RP without this client needing to expose its own internals.
+     */
+    var lastRpId: String? = null
+        private set
+
     /** Register a new user with WebAuthn. Returns an authenticated session. */
     suspend fun register(displayName: String, prfSalt: ByteArray? = null): AuthSession = withContext(Dispatchers.IO) {
         // Step 1: Get registration challenge from backend
@@ -47,6 +57,7 @@ class WebAuthnAuthClient(
 
         val rpId = publicKey["rp"]?.jsonObject?.get("id")?.jsonPrimitive?.content
             ?: throw AuthException("Missing rp.id")
+        lastRpId = rpId
         val rpName = publicKey["rp"]?.jsonObject?.get("name")?.jsonPrimitive?.content ?: rpId
         val challenge = decodeBase64Url(publicKey["challenge"]?.jsonPrimitive?.content
             ?: throw AuthException("Missing challenge"))
@@ -128,6 +139,7 @@ class WebAuthnAuthClient(
 
         val rpId = publicKey["rpId"]?.jsonPrimitive?.content
             ?: throw AuthException("Missing rpId")
+        lastRpId = rpId
         val challenge = decodeBase64Url(publicKey["challenge"]?.jsonPrimitive?.content
             ?: throw AuthException("Missing challenge"))
 

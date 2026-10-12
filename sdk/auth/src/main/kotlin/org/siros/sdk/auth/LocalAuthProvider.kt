@@ -218,7 +218,7 @@ class LocalAuthProvider(
         )
     }
 
-    override suspend fun getPrfOutput(credentialId: ByteArray, salt: ByteArray): PrfOutput {
+    override suspend fun getPrfOutput(credentialId: ByteArray, salt: ByteArray, rpId: String): PrfOutput {
         return computePrf(credentialId, salt)
     }
 

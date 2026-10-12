@@ -157,6 +157,7 @@ class JweKeystore(
         encryptedContainer: ByteArray,
         hkdfSalt: ByteArray,
         hkdfInfo: ByteArray,
+        prfSalt: ByteArray,
     ) = mutex.withLock {
         if (encryptedContainer.isNotEmpty()) {
             // Parse the full container format from the wallet-frontend
@@ -207,7 +208,14 @@ class JweKeystore(
                     PrfKeyInfo(
                         credentialId = ByteArray(0), // will be set by SirosWallet
                         transports = null,
-                        prfSalt = ByteArray(32).also { SecureRandom().nextBytes(it) },
+                        // The real PRF extension salt this credential's
+                        // assertions must be evaluated with - not a fresh
+                        // random value independent of it - so it round-trips
+                        // through the server-synced container and a later
+                        // login (even with no local cache at all for this
+                        // credential) can recover it. See [unlock]'s own doc
+                        // comment on the [prfSalt] parameter.
+                        prfSalt = prfSalt,
                         hkdfSalt = hkdfSalt,
                         hkdfInfo = hkdfInfo,
                         algorithm = AesGcmKeyAlgorithm("AES-GCM", 256),
