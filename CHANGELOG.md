@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-10-12
+
+### Fixed
+- **A wallet installation's OAuth Client Attestation instance key could be
+  lost forever, silently failing every `sign_client_auth` after.**
+  `ensureInstanceKeyId` persisted only the key's id, never the key itself
+  for the software WSCD plugin - after a process restart the id it recalled
+  named a key that plugin's in-memory state had already lost, and every
+  later DPoP/PoP request for it failed `Key not found` for the rest of the
+  account's life. It now verifies the recorded id is actually live in the
+  keystore before trusting it, self-healing by regenerating (and this time
+  persisting) the key whenever it finds a stale or missing one.
+- **A login on a device whose local passkey cache doesn't carry the
+  signing-in credential (reinstall, cleared app data, device migration) now
+  recovers instead of failing outright with "PRF not supported by
+  authenticator."** The credential itself can be perfectly healthy in the
+  platform authenticator; the account's server-synced `privateData`
+  container already carries the exact PRF salt/HKDF parameters it was
+  registered with. A successful recovery heals the local account cache so
+  the next login is a normal one-tap match again. `AuthProvider.getPrfOutput`
+  gained a required `rpId` parameter (an empty one crashes Google Play
+  Services' FIDO2 UI) and `KeystoreManager.unlock` a `prfSalt` parameter,
+  threaded through to the newly-created container on first-time setup
+  instead of a disconnected random salt.
+
+### Added
+- **VEGA (ZK) proof generation is noticeably faster on repeat
+  presentations of the same credential+disclosure set.** `prep_prove`'s
+  witness-setup output is now cached and reused (`VegaProofCache`), and
+  speculatively prewarmed as soon as a verifier's request names its claims
+  - well before the user approves anything - so that cost lands during the
+  consent screen's dead time instead of the live proving path.
+
 ### Security
 - **A request carrying OpenID4VP `transaction_data` is now refused instead of
   silently ignored.** The DC API path parsed the request and dropped
