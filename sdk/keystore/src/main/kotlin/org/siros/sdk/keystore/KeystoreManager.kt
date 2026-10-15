@@ -174,7 +174,8 @@ interface KeystoreManager {
     /**
      * As [signVpToken], for an SCA presentation that binds OpenID4VP
      * `transaction_data` (EC TS12): the KB-JWT additionally carries the
-     * claims of [transaction] and no other `amr`.
+     * claims of [transaction] and no other `amr`; the `amr` is the factors the
+     * signing operation itself applied, never a precomputed set.
      *
      * The default refuses: a keystore that does not override it cannot
      * produce a compliant SCA key binding JWT, and must not fall back to
@@ -193,6 +194,16 @@ interface KeystoreManager {
         "This keystore cannot bind transaction_data to a presentation",
         errorCode = "transaction_data_unsupported_keystore",
     )
+
+    /**
+     * Whether an SCA presentation of [credential] (signed with [kid], or the key
+     * the credential is bound to) could reach two authentication categories, asked
+     * BEFORE the user is shown the transaction. Never prompts. The default says it
+     * cannot: a keystore that does not report the authentication its signatures
+     * apply must not be offered for SCA.
+     */
+    suspend fun scaAuthenticationCapability(credential: String, kid: String?): ScaAuthenticationCapability =
+        ScaAuthenticationCapability.cannot("This keystore does not report the authentication it applies")
 
     /**
      * Build an mDoc DeviceResponse (ISO 18013-5) for OID4VP presentation.

@@ -14,8 +14,8 @@ import kotlinx.serialization.json.contentOrNull
 import org.siros.sdk.credentials.TransactionDataError
 import org.siros.sdk.credentials.TransactionDataReason
 import org.siros.sdk.keystore.TransactionBinding
-import org.siros.sdk.wallet.AuthenticationFactorsProvider
-import org.siros.sdk.wallet.SigningOperation
+import org.siros.sdk.credentials.StoredCredential
+import org.siros.sdk.keystore.ScaAuthenticationCapability
 import org.siros.sdk.wallet.TransactionConsentHandler
 import org.siros.sdk.wallet.TransactionConsentRequest
 import org.siros.sdk.wallet.TransactionLogEntry
@@ -36,18 +36,24 @@ import timber.log.Timber
  */
 internal class ScaPresentationPlan(
     private val bindings: Map<String, TransactionBinding>,
-    private val onSigningFailed: suspend () -> Unit = {},
+    private val onSigningFailed: suspend (declined: Boolean) -> Unit = {},
 ) {
     fun bindingFor(queryId: String?): TransactionBinding? = queryId?.let { bindings[it] }
 
-    /** Records that signing failed after consent (outcome `refused`, reason `signingFailed`). */
-    suspend fun signingFailed() = onSigningFailed()
+    /**
+     * Records that signing failed after consent: outcome `refused` / `signingFailed`, except that a
+     * [TransactionDataReason.DECLINED] error (the user cancelled the authentication) is recorded as `declined`.
+     */
+    suspend fun signingFailed(error: Throwable? = null) =
+        onSigningFailed((error as? TransactionDataError)?.reason == TransactionDataReason.DECLINED)
 }
 
 /**
  * The whole `transaction_data` pipeline for one request (contract section 4):
- * validate, show and obtain consent, establish authentication factors, and
- * log the outcome. Throws a [TransactionDataError] to refuse or decline, with
+ * validate, check before consent that two authentication categories are
+ * reachable, show and obtain consent, and log the outcome. The factors themselves are never
+ * established here: the signing operation reports them and the KB-JWT claims
+ * only those. Throws a [TransactionDataError] to refuse or decline, with
  * nothing signed; returns the plan to sign with otherwise.
  *
  * Validation and display (schema validation, hashing, document fetches) run
@@ -62,7 +68,8 @@ internal class TransactionDataCoordinator(
     private val validator: TransactionDataValidator,
     private val display: TransactionDisplayBuilder,
     private val consentHandler: () -> TransactionConsentHandler?,
-    private val factorsProvider: () -> AuthenticationFactorsProvider,
+    /** Asks the keystore whether the key behind a credential could reach two categories; never prompts. */
+    private val capability: suspend (StoredCredential) -> ScaAuthenticationCapability,
     private val log: () -> TransactionLogStore,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val consentTimeoutMillis: Long = CONSENT_TIMEOUT_MILLIS,
@@ -102,8 +109,7 @@ internal class TransactionDataCoordinator(
             // One warning per validation, now that display has fetched what it needs.
             validated.trust.warnOnce()
 
-            val provider = factorsProvider()
-            requireFactorsCanBeEstablished(provider, validated, request)
+            requireFactorsCanBeEstablished(validated, request)
             val handler = consentHandler() ?: throw TransactionDataError(
                 TransactionDataReason.NO_CONSENT_HANDLER,
                 "No consent handler is registered, so the transaction cannot be shown to the user",
@@ -111,10 +117,14 @@ internal class TransactionDataCoordinator(
             if (!askUser(handler, consentModel)) {
                 throw TransactionDataError(TransactionDataReason.DECLINED, "The user did not confirm the transaction")
             }
-            val bindings = bind(provider, validated, request)
+            val bindings = bind(validated)
             record(request, validated, TransactionOutcome.CONSENTED, null)
-            return ScaPresentationPlan(bindings) {
-                record(request, validated, TransactionOutcome.REFUSED, SIGNING_FAILED)
+            return ScaPresentationPlan(bindings) { declined ->
+                if (declined) {
+                    record(request, validated, TransactionOutcome.DECLINED, TransactionDataReason.DECLINED.code)
+                } else {
+                    record(request, validated, TransactionOutcome.REFUSED, SIGNING_FAILED)
+                }
             }
         } catch (e: TransactionDataError) {
             record(
@@ -126,21 +136,35 @@ internal class TransactionDataCoordinator(
         }
     }
 
-    /** Refuses before the user reads anything if no two-category authentication can possibly follow. */
+    /**
+     * Refuses before the user reads anything if no two-category authentication can
+     * possibly follow, for EVERY credential presented for a bound query. Returns the
+     * ids of the credentials whose signer needs a host-verified factor. A capability
+     * that cannot be determined is a refusal.
+     */
     private suspend fun requireFactorsCanBeEstablished(
-        provider: AuthenticationFactorsProvider,
         validated: ValidatedTransactionData,
         request: TransactionDataRequest,
     ) {
         for (queryId in validated.boundQueryIds()) {
-            val operation = SigningOperation(request.credentials.getValue(queryId).first())
-            if (!canEstablish(provider, operation)) {
-                throw TransactionDataError(
-                    TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS,
-                    "No two-category authentication can be established for this operation",
-                )
+            for (credential in request.credentials.getValue(queryId)) {
+                if (!canReachTwoCategories(credential)) {
+                    throw TransactionDataError(
+                        TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS,
+                        "No two-category authentication can be established for this operation",
+                    )
+                }
             }
         }
+    }
+
+    /** Whether [credential]'s signer reaches two categories itself; a capability that cannot be determined is no. */
+    private suspend fun canReachTwoCategories(credential: StoredCredential): Boolean = try {
+        capability(credential).canReachTwoCategories
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        false
     }
 
     /**
@@ -160,36 +184,9 @@ internal class TransactionDataCoordinator(
         false
     }
 
-    /** The KB-JWT binding per bound query, with the factors established for each credential. */
-    private suspend fun bind(
-        provider: AuthenticationFactorsProvider,
-        validated: ValidatedTransactionData,
-        request: TransactionDataRequest,
-    ): Map<String, TransactionBinding> {
-        val bindings = LinkedHashMap<String, TransactionBinding>()
-        for (queryId in validated.boundQueryIds()) {
-            val credential = request.credentials.getValue(queryId).first()
-            // A provider that fails has established nothing.
-            val factors = try {
-                provider.factorsFor(SigningOperation(credential))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Timber.w("The authentication factors provider failed (${e.javaClass.simpleName})")
-                emptyList()
-            }
-            bindings[queryId] = validated.bindingFor(queryId, factors)!!
-        }
-        return bindings
-    }
-
-    private suspend fun canEstablish(provider: AuthenticationFactorsProvider, operation: SigningOperation): Boolean = try {
-        provider.canEstablish(operation)
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        false
-    }
+    /** The KB-JWT binding per bound query. The `amr` comes later, from each sign. */
+    private fun bind(validated: ValidatedTransactionData): Map<String, TransactionBinding> =
+        validated.boundQueryIds().associateWith { validated.bindingFor(it) ?: error("no binding for a bound query") }
 
     /**
      * Writes the log record(s). A refusal is ONE record per request (the first

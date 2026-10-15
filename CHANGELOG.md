@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING (unreleased TS12 API): payment SCA takes its authentication
+  factors from the signing operation, not from a provider.**
+  `siros-wscd-manager` 0.9.1 -> 0.10.0 (UniFFI bindings regenerated:
+  `signWithFactors`, `authenticationCapability`, fresh user authentication).
+  `AuthenticationFactorsProvider`, `ConservativeAuthenticationFactorsProvider`
+  and `SirosWallet.authenticationFactorsProvider` are removed. Before the user
+  is shown a transaction the wallet asks the key's signer whether two
+  authentication categories are reachable (`KeystoreManager.scaAuthenticationCapability`,
+  never prompts) and refuses (`insufficientAuthenticationFactors`) if not or if
+  that cannot be determined. After consent the SCA sign is a fresh user
+  authentication (`requireFreshUserAuthentication`; a cached OPAQUE session or
+  token is never reused) and the KB-JWT `amr` is exactly the factors that sign
+  applied, with the PIN class measured from the PIN typed for it. Because the
+  `amr` is inside the signed bytes it is stated before the signature; the sign's
+  own report must then equal it (as a set) or the presentation is discarded and
+  refused. `TransactionBinding` no longer takes factors. `Signer` gains
+  `scaAuthenticationCapability` and `beginScaSign` (defaults refuse), implemented
+  by `UniFFISigner` for R2PS (`key_in_remote_wscd`) and FIDO2
+  (`key_in_local_external_wscd`). `JweKeystore` (software keys, no user
+  authentication of its own) now refuses an SCA sign. Non-SCA signing is
+  unchanged.
+- A signer that reaches possession alone and would need the host to vouch for
+  a second factor (R2PS WebAuthn, a UV-performing FIDO2 transport) is reported
+  as not possible and refused BEFORE consent: the manager refuses a
+  fresh-authentication sign for exactly those, so offering them would let the
+  user consent and verify before a certain refusal. There is no host-verified
+  factor hook. Cancelling the PIN prompt (or a prompt that fails) declines the
+  transaction (`declined`, `access_denied`) rather than reporting insufficient
+  factors.
+
 ## [0.20.5] - 2026-10-12
 
 ### Fixed

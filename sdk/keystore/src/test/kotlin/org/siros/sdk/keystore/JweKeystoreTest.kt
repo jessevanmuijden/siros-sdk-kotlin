@@ -425,10 +425,6 @@ class JweKeystoreTest {
         hashes = listOf("aGFzaDE", "aGFzaDI"),
         hashAlg = "sha-256",
         responseMode = "direct_post",
-        authenticationFactors = listOf(
-            AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "other"),
-            AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_local_native_wscd"),
-        ),
     )
 
     @Test
@@ -442,41 +438,24 @@ class JweKeystoreTest {
     }
 
     @Test
-    fun signVpToken_withTransaction_carriesTheTs12Claims_andVerifies() = runTest {
+    fun signVpToken_withTransaction_isRefused_becauseTheSoftwareKeystoreEstablishesNoFactor() = runTest {
         val keystore = unlockedWithKey()
 
-        val vp = keystore.signVpToken(scaCredential, null, "n", "https://v.example", null, binding())
+        val e = runCatching {
+            keystore.signVpToken(scaCredential, null, "n", "https://v.example", null, binding())
+        }.exceptionOrNull()
 
-        val kb = com.nimbusds.jwt.SignedJWT.parse(vp.split("~").last())
-        assertTrue("KB-JWT signature must verify against the jwk in its own header",
-            kb.verify(com.nimbusds.jose.crypto.ECDSAVerifier(kb.header.jwk.toECKey())))
-        val claims = kb.jwtClaimsSet.claims
+        assertTrue(e.toString(), e is org.siros.sdk.credentials.TransactionDataError)
         assertEquals(
-            setOf("aud", "iat", "nonce", "sd_hash", "transaction_data_hashes", "transaction_data_hashes_alg", "jti", "response_mode", "amr"),
-            claims.keys,
+            org.siros.sdk.credentials.TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS,
+            (e as org.siros.sdk.credentials.TransactionDataError).reason,
         )
-        assertEquals(listOf("aGFzaDE", "aGFzaDI"), claims["transaction_data_hashes"])
-        assertEquals("sha-256", claims["transaction_data_hashes_alg"])
-        assertEquals("direct_post", claims["response_mode"])
-        assertEquals(
-            listOf(mapOf("knowledge" to "other"), mapOf("possession" to "key_in_local_native_wscd")),
-            claims["amr"],
-        )
-        // sd_hash still covers the presentation exactly as before
-        val presentation = vp.substringBeforeLast("~") + "~"
-        val expected = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-            java.security.MessageDigest.getInstance("SHA-256").digest(presentation.toByteArray(Charsets.US_ASCII)),
-        )
-        assertEquals(expected, claims["sd_hash"])
     }
 
     @Test
-    fun signVpToken_withTransaction_hasAFreshJtiEachTime() = runTest {
-        val keystore = unlockedWithKey()
+    fun scaAuthenticationCapability_defaultsToCannot() = runTest {
+        val c = unlockedWithKey().scaAuthenticationCapability(scaCredential, null)
 
-        val a = kbClaims(keystore.signVpToken(scaCredential, null, "n", "a", null, binding()))["jti"]
-        val b = kbClaims(keystore.signVpToken(scaCredential, null, "n", "a", null, binding()))["jti"]
-
-        assertNotEquals(a, b)
+        assertFalse(c.isPossible)
     }
 }

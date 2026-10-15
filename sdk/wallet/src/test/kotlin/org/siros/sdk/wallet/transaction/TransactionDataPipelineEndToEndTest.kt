@@ -9,7 +9,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.siros.sdk.keystore.AuthenticationCategory
 import org.siros.sdk.keystore.AuthenticationFactor
-import org.siros.sdk.keystore.JweKeystore
+import io.mockk.coEvery
+import io.mockk.mockk
+import org.siros.sdk.keystore.WscdKeystoreAdapter
 import org.siros.sdk.wallet.transaction.TransactionTestFixtures.FakeSource
 import org.siros.sdk.wallet.transaction.TransactionTestFixtures.credential
 import org.siros.sdk.wallet.transaction.TransactionTestFixtures.raw
@@ -23,26 +25,41 @@ import java.util.Base64
  * Core pipeline only; the transports are wired in a later change.
  */
 class TransactionDataPipelineEndToEndTest {
-    private val prf = ByteArray(32) { it.toByte() }
-    private val salt = ByteArray(32) { (it + 0x10).toByte() }
-    private val info = "SIROS Wallet PRF".toByteArray()
-
     private val factors = listOf(
         AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "pin_6_or_more_digits"),
-        AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_local_native_wscd"),
+        AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd"),
     )
+
+    /** A signer whose key really signs, and whose SCA session reports [applied] for the sign. */
+    private fun signer(ec: com.nimbusds.jose.jwk.ECKey, applied: List<AuthenticationFactor>): org.siros.sdk.keystore.Signer {
+        val signer = mockk<org.siros.sdk.keystore.Signer>(relaxed = true)
+        coEvery { signer.listKeys() } returns listOf(org.siros.sdk.keystore.SignerKeyInfo("k1", "ES256"))
+        coEvery { signer.exportPublicKey(any()) } returns ec.toPublicJWK().toJSONString().toByteArray()
+        coEvery { signer.beginScaSign(any()) } answers {
+            object : org.siros.sdk.keystore.ScaSignSession {
+                override val declaredFactors = applied
+                override suspend fun sign(data: ByteArray) = org.siros.sdk.keystore.ScaSignature(
+                    com.nimbusds.jose.crypto.ECDSASigner(ec)
+                        .sign(com.nimbusds.jose.JWSHeader(com.nimbusds.jose.JWSAlgorithm.ES256), data).decode(),
+                    applied,
+                )
+            }
+        }
+        return signer
+    }
 
     private fun independentHash(raw: String, jcaName: String) = Base64.getUrlEncoder().withoutPadding()
         .encodeToString(MessageDigest.getInstance(jcaName).digest(raw.toByteArray(Charsets.US_ASCII)))
 
     private fun run(rawEntries: List<String>): Pair<SignedJWT, String> = runBlocking {
-        val keystore = JweKeystore()
-        keystore.unlock(prf, ByteArray(0), salt, info)
-        val cred = credential(kid = keystore.generateKey())
+        val ec = com.nimbusds.jose.jwk.gen.ECKeyGenerator(com.nimbusds.jose.jwk.Curve.P_256).generate()
+        val keystore = WscdKeystoreAdapter(signer(ec, factors))
+        keystore.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0))
+        val cred = credential(kid = "k1")
         val req = request(rawEntries.map { TransactionDataEntry(it) }, mapOf("pay" to listOf(cred)), responseMode = "direct_post.jwt")
 
         val validated = TransactionDataValidator(FakeSource()).validate(req)
-        val binding = validated.bindingFor("pay", factors)!!
+        val binding = validated.bindingFor("pay")!!
         val vp = keystore.signVpToken(cred.raw, null, "verifier-nonce", "x509_san_dns:shop.example.com", cred.kid, binding)
         SignedJWT.parse(vp.split("~").last()) to vp
     }
@@ -66,6 +83,8 @@ class TransactionDataPipelineEndToEndTest {
         val amr = claims["amr"] as List<*>
         assertEquals(2, amr.size)
         assertEquals(2, amr.map { (it as Map<*, *>).keys.single() }.toSet().size)
+        // exactly what the sign reported, as single-key objects
+        assertEquals(factors.map { mapOf(it.category.wire to it.method) }.toSet(), amr.toSet())
     }
 
     @Test

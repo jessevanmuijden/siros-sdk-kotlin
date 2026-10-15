@@ -7221,7 +7221,8 @@ class SirosWalletTest {
     private class ScaFixture(
         val wallet: SirosWallet,
         val log: InMemoryTransactionLog,
-        val keystore: org.siros.sdk.keystore.JweKeystore,
+        val keystore: org.siros.sdk.keystore.WscdKeystoreAdapter,
+        val signer: ScaTestSigner,
         val consent: MutableList<TransactionConsentRequest>,
     )
 
@@ -7234,17 +7235,17 @@ class SirosWalletTest {
     private fun scaFixture(
         enabled: Boolean = true,
         answer: Boolean = true,
-        factors: List<org.siros.sdk.keystore.AuthenticationFactor> = scaFactors,
+        /** What the signer's SCA sign applies; null models a signer that cannot reach two categories. */
+        factors: List<org.siros.sdk.keystore.AuthenticationFactor>? = scaFactors,
         declaredEngine: Boolean = enabled,
         declaredWmp: Boolean = enabled,
         extra: Array<Pair<String, Any?>> = emptyArray(),
-        useDefaultProvider: Boolean = false,
-        keystoreWrapper: ((org.siros.sdk.keystore.JweKeystore) -> KeystoreManager)? = null,
+        userCancelsAuthentication: Boolean = false,
+        keystoreWrapper: ((org.siros.sdk.keystore.WscdKeystoreAdapter) -> KeystoreManager)? = null,
     ): ScaFixture {
-        val keystore = org.siros.sdk.keystore.JweKeystore()
-        runBlocking {
-            keystore.unlock(ByteArray(32) { it.toByte() }, ByteArray(0), ByteArray(32) { (it + 0x10).toByte() }, "SIROS Wallet PRF".toByteArray())
-        }
+        val signer = ScaTestSigner(factors, userCancelsAuthentication)
+        val keystore = org.siros.sdk.keystore.WscdKeystoreAdapter(signer)
+        runBlocking { keystore.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0)) }
         val kid = runBlocking { keystore.generateKey() }
         val cred = StoredCredential(
             id = 1L, format = "dc+sd-jwt",
@@ -7265,7 +7266,6 @@ class SirosWalletTest {
             ),
             "engineFlowDeclaredTransactionData" to declaredEngine,
             "wmpSessionDeclaredTransactionData" to declaredWmp,
-            *(if (useDefaultProvider) emptyArray() else arrayOf("customFactorsProvider" to AuthenticationFactorsProvider { factors })),
             "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
             "json" to Json { ignoreUnknownKeys = true },
             "httpClient" to OkHttpClient(),
@@ -7274,7 +7274,7 @@ class SirosWalletTest {
         )
         wallet.transactionDataEnabled = enabled
         wallet.transactionConsentHandler = TransactionConsentHandler { consent += it; answer }
-        return ScaFixture(wallet, log, keystore, consent)
+        return ScaFixture(wallet, log, keystore, signer, consent)
     }
 
     private val scaRaw = org.siros.sdk.wallet.transaction.TransactionTestFixtures.raw(algs = """["sha-384"]""")
@@ -7362,8 +7362,25 @@ class SirosWalletTest {
     }
 
     @Test
+    fun scaEngine_cancellingTheAuthenticationAfterConsent_isLoggedAsDeclined_notRefused() = runTest(dispatcher) {
+        val fx = scaFixture(userCancelsAuthentication = true)
+
+        val (sent, _) = sendEngineSignRequest(fx)
+
+        assertTrue(sent.isEmpty())
+        // signing and the log write finish on other dispatchers: keep the test scheduler running while waiting
+        val deadline = System.currentTimeMillis() + 5_000
+        while (fx.log.items.size < 2 && System.currentTimeMillis() < deadline) {
+            dispatcher.scheduler.runCurrent()
+            Thread.sleep(20)
+        }
+        assertEquals(listOf(TransactionOutcome.DECLINED, TransactionOutcome.CONSENTED), fx.log.items.map { it.outcome })
+        assertEquals("declined", fx.log.items.first().reason)
+    }
+
+    @Test
     fun scaEngine_insufficientFactors_signsNothing() = runTest(dispatcher) {
-        val fx = scaFixture(factors = emptyList())
+        val fx = scaFixture(factors = null)
 
         val (sent, _) = sendEngineSignRequest(fx)
 
@@ -7600,9 +7617,8 @@ class SirosWalletTest {
     // ── review fixes: ordering, defaults, TOCTOU, isolation, wording ──
 
     @Test
-    fun scaDefaults_theSdkDefaultProviderIsTheConservativeOne_andRefusesBeforeConsent() = runTest(dispatcher) {
-        val fx = scaFixture(useDefaultProvider = true)
-        assertTrue(fx.wallet.authenticationFactorsProvider === ConservativeAuthenticationFactorsProvider)
+    fun scaDefaults_aSignerThatCannotReachTwoCategoriesRefusesBeforeConsent() = runTest(dispatcher) {
+        val fx = scaFixture(factors = null)
 
         val (sent, _) = sendEngineSignRequest(fx)
 
@@ -7611,7 +7627,7 @@ class SirosWalletTest {
         assertEquals("insufficientAuthenticationFactors", fx.log.items.single().reason)
     }
 
-    private fun spyKeystore(events: MutableList<String>): (org.siros.sdk.keystore.JweKeystore) -> KeystoreManager = { real ->
+    private fun spyKeystore(events: MutableList<String>): (org.siros.sdk.keystore.WscdKeystoreAdapter) -> KeystoreManager = { real ->
         val spy = io.mockk.spyk(real)
         coEvery { spy.signVpToken(any(), any(), any(), any(), any(), any()) } answers { events += "sign"; callOriginal() }
         coEvery { spy.signVpToken(any(), any(), any(), any(), any()) } answers { events += "sign"; callOriginal() }
@@ -7720,7 +7736,7 @@ class SirosWalletTest {
     @Test
     fun scaEngine_refusalTextIsGenericAndADeclineIsNotAnError() = runTest(dispatcher) {
         val refused = mockk<WalletEventListener>(relaxed = true)
-        val a = scaFixture(factors = emptyList(), useDefaultProvider = true, extra = arrayOf("eventListener" to refused))
+        val a = scaFixture(factors = null, extra = arrayOf("eventListener" to refused))
         sendEngineSignRequest(a)
         verify(exactly = 1) { refused.onFlowError("flow-sca", "Payment confirmation refused: insufficientAuthenticationFactors", any()) }
 

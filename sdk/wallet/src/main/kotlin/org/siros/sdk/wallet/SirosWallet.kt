@@ -253,22 +253,6 @@ class SirosWallet private constructor(
         get() = transactionDataEnabled &&
             transactionConsentHandler != null
 
-    /**
-     * Reports the authentication factors that authorised an SCA signing
-     * operation (EC TS12 3.6 `amr`). The default establishes none, so SCA
-     * presentations are refused with `insufficientAuthenticationFactors`
-     * until a provider that can justify two categories for the operation is
-     * registered; see [AuthenticationFactorsProvider].
-     */
-    var authenticationFactorsProvider: AuthenticationFactorsProvider
-        get() = customFactorsProvider ?: ConservativeAuthenticationFactorsProvider
-        set(value) {
-            customFactorsProvider = value
-        }
-
-    @Volatile
-    private var customFactorsProvider: AuthenticationFactorsProvider? = null
-
     @Volatile
     private var customTransactionLogStore: TransactionLogStore? = null
 
@@ -331,7 +315,14 @@ class SirosWallet private constructor(
             validator = org.siros.sdk.wallet.transaction.TransactionDataValidator(source),
             display = org.siros.sdk.wallet.transaction.TransactionDisplayBuilder(source, java.util.Locale.getDefault().toLanguageTag()),
             consentHandler = { consentOverride ?: transactionConsentHandler },
-            factorsProvider = { authenticationFactorsProvider },
+            capability = {
+                try {
+                    keystore.scaAuthenticationCapability(it.raw, it.kid)
+                } catch (_: AbstractMethodError) {
+                    // A keystore compiled before this method existed reports no factors.
+                    org.siros.sdk.keystore.ScaAuthenticationCapability.cannot("This keystore does not report the authentication it applies")
+                }
+            },
             log = { transactionLogStore },
         )
     }
@@ -354,7 +345,7 @@ class SirosWallet private constructor(
         keystore.signVpToken(cred.raw, disclosedClaims, nonce, audience, cred.kid, binding)
     } catch (e: Throwable) {
         // Consent was given but nothing could be presented: the log must not stay "consented" alone.
-        plan.signingFailed()
+        plan.signingFailed(e)
         if (e is AbstractMethodError) {
             throw KeystoreException(
                 "This keystore cannot bind transaction_data to a presentation",

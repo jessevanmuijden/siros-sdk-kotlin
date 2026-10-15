@@ -15,8 +15,7 @@ import org.siros.sdk.credentials.TransactionDataError
 import org.siros.sdk.credentials.TransactionDataReason
 import org.siros.sdk.keystore.AuthenticationCategory
 import org.siros.sdk.keystore.AuthenticationFactor
-import org.siros.sdk.wallet.AuthenticationFactorsProvider
-import org.siros.sdk.wallet.ConservativeAuthenticationFactorsProvider
+import org.siros.sdk.keystore.ScaAuthenticationCapability
 import org.siros.sdk.wallet.TransactionConsentHandler
 import org.siros.sdk.wallet.TransactionConsentRequest
 import org.siros.sdk.wallet.TransactionLogEntry
@@ -35,14 +34,16 @@ class TransactionDataCoordinatorTest {
         override suspend fun clear() { items.clear() }
     }
 
-    private val twoFactors = listOf(
-        AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "other"),
-        AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd"),
-    )
+    private val CAN: suspend (org.siros.sdk.credentials.StoredCredential) -> ScaAuthenticationCapability =
+        { ScaAuthenticationCapability(true) }
+    private val CANNOT: suspend (org.siros.sdk.credentials.StoredCredential) -> ScaAuthenticationCapability =
+        { ScaAuthenticationCapability.cannot("softkey is single factor") }
+    private val HOST_ONLY: suspend (org.siros.sdk.credentials.StoredCredential) -> ScaAuthenticationCapability =
+        { ScaAuthenticationCapability.cannot("reaches a second category only through a host-verified factor") }
 
     private class Harness(
         val handler: TransactionConsentHandler?,
-        val factors: AuthenticationFactorsProvider,
+        val capability: suspend (org.siros.sdk.credentials.StoredCredential) -> ScaAuthenticationCapability,
         val log: MemoryLog = MemoryLog(),
         source: TransactionMetadataSource = FakeSource(metadata(types = PAYMENT_TYPES)),
         timeoutMs: Long = 5_000,
@@ -51,7 +52,7 @@ class TransactionDataCoordinatorTest {
             validator = TransactionDataValidator(source),
             display = TransactionDisplayBuilder(source, "en"),
             consentHandler = { handler },
-            factorsProvider = { factors },
+            capability = capability,
             log = { log },
             nowMillis = { 1234L },
             consentTimeoutMillis = timeoutMs,
@@ -73,8 +74,9 @@ class TransactionDataCoordinatorTest {
     @Test
     fun `consent, factors and a log entry yield the binding`() {
         var seen: TransactionConsentRequest? = null
-        val h = Harness(TransactionConsentHandler { seen = it; true }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { seen = it; true }, CAN)
         val raw = raw()
+        val cred = TransactionTestFixtures.credential()
 
         val plan = run(h, req(raw)).getOrThrow()
 
@@ -96,7 +98,7 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `the log holds the TS12 5_3 items and not the payload`() {
-        val h = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { true }, CAN)
 
         run(h, req(raw(payload = """{"transaction_id":"tx-9","payee":{"name":"Shop AB","id":"SE-SECRET-ID","website":"https://s.example"},"pisp":{"legal_name":"PayCo AB","brand_name":"b","domain_name":"d"},"currency":"EUR","amount":777.77}""")))
 
@@ -121,7 +123,7 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `a declined transaction signs nothing and is logged as declined`() {
-        val h = Harness(TransactionConsentHandler { false }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { false }, CAN)
 
         val r = run(h, req(raw()))
 
@@ -133,18 +135,18 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `a handler that throws or never answers is a decline, never consent`() {
-        val throwing = Harness(TransactionConsentHandler { throw IllegalStateException("ui crashed") }, AuthenticationFactorsProvider { twoFactors })
+        val throwing = Harness(TransactionConsentHandler { throw IllegalStateException("ui crashed") }, CAN)
         assertEquals(TransactionDataReason.DECLINED, reason(run(throwing, req(raw()))))
 
         val gate = CompletableDeferred<Boolean>()
-        val silent = Harness(TransactionConsentHandler { gate.await() }, AuthenticationFactorsProvider { twoFactors }, timeoutMs = 50)
+        val silent = Harness(TransactionConsentHandler { gate.await() }, CAN, timeoutMs = 50)
         assertEquals(TransactionDataReason.DECLINED, reason(run(silent, req(raw()))))
         assertEquals(TransactionOutcome.DECLINED, silent.log.items.single().outcome)
     }
 
     @Test
     fun `no handler registered refuses`() {
-        val h = Harness(null, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(null, CAN)
 
         assertEquals(TransactionDataReason.NO_CONSENT_HANDLER, reason(run(h, req(raw()))))
         assertEquals(TransactionOutcome.REFUSED, h.log.items.single().outcome)
@@ -153,7 +155,7 @@ class TransactionDataCoordinatorTest {
     @Test
     fun `the default provider refuses before the user is asked anything`() {
         var asked = false
-        val h = Harness(TransactionConsentHandler { asked = true; true }, ConservativeAuthenticationFactorsProvider)
+        val h = Harness(TransactionConsentHandler { asked = true; true }, CANNOT)
 
         val r = run(h, req(raw()))
 
@@ -164,39 +166,52 @@ class TransactionDataCoordinatorTest {
     }
 
     @Test
-    fun `a provider that can establish factors only after consent is still asked, and fewer than two categories refuses after`() {
+    fun `a capability that cannot be determined, or throws, refuses before consent`() {
         var asked = false
-        val few = Harness(TransactionConsentHandler { asked = true; true }, AuthenticationFactorsProvider { twoFactors.take(1) })
+        val throwing = Harness(TransactionConsentHandler { asked = true; true }, { throw IllegalStateException("x") })
 
-        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(few, req(raw()))))
-        assertTrue("canEstablish defaults to true, so consent was sought", asked)
-        assertEquals("insufficientAuthenticationFactors", few.log.items.single().reason)
-
-        val failing = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { throw IllegalStateException("x") })
-        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(failing, req(raw()))))
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(throwing, req(raw()))))
+        assertTrue(!asked)
     }
 
     @Test
-    fun `the probe is asked per bound credential, and a probe that throws means no`() {
+    fun `the capability is asked per bound credential`() {
         val probed = mutableListOf<Long>()
-        val provider = object : AuthenticationFactorsProvider {
-            override suspend fun factorsFor(operation: org.siros.sdk.wallet.SigningOperation) = twoFactors
-            override suspend fun canEstablish(operation: org.siros.sdk.wallet.SigningOperation): Boolean { probed += operation.credential.id; return true }
-        }
-        run(Harness(TransactionConsentHandler { true }, provider), req(raw())).getOrThrow()
-        assertEquals(listOf(1L), probed)
+        val h = Harness(TransactionConsentHandler { true }, { probed += it.id; ScaAuthenticationCapability(true) })
 
-        val throwing = object : AuthenticationFactorsProvider {
-            override suspend fun factorsFor(operation: org.siros.sdk.wallet.SigningOperation) = twoFactors
-            override suspend fun canEstablish(operation: org.siros.sdk.wallet.SigningOperation): Boolean = throw IllegalStateException("x")
-        }
-        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(Harness(TransactionConsentHandler { true }, throwing), req(raw()))))
+        run(h, req(raw())).getOrThrow()
+
+        assertEquals(listOf(1L), probed)
+    }
+
+    @Test
+    fun `a signer that needs a host-verified factor is refused before consent`() {
+        var asked = false
+        val h = Harness(TransactionConsentHandler { asked = true; true }, HOST_ONLY)
+
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(h, req(raw()))))
+        assertTrue("the user must not read and confirm what a sign will refuse", !asked)
+        assertEquals(TransactionOutcome.REFUSED, h.log.items.single().outcome)
+    }
+
+    @Test
+    fun `capability is checked for every credential presented for a query`() {
+        val a = TransactionTestFixtures.credential(1)
+        val b = TransactionTestFixtures.credential(2)
+        val twoCreds = TransactionDataRequest(
+            entries = listOf(TransactionDataEntry(raw())), responseMode = "direct_post",
+            credentials = mapOf("pay" to listOf(a, b)), verifier = "Shop",
+        )
+        // credential 2 cannot reach two categories: refused although credential 1 can
+        val mixedBad = Harness(TransactionConsentHandler { true }, { if (it.id == 1L) ScaAuthenticationCapability(true) else ScaAuthenticationCapability.cannot("x") })
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(mixedBad, twoCreds)))
+        assertTrue(runCatching { run(Harness(TransactionConsentHandler { true }, CAN), twoCreds).getOrThrow() }.isSuccess)
     }
 
     @Test
     fun `a validation refusal never reaches the user and is logged with what could be read`() {
         var asked = false
-        val h = Harness(TransactionConsentHandler { asked = true; true }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { asked = true; true }, CAN)
 
         val r = run(h, req(raw(payload = """{"transaction_id":"tx-bad","currency":"EUR","amount":1}""")))
 
@@ -207,7 +222,7 @@ class TransactionDataCoordinatorTest {
         assertEquals("tx-bad", entry.transactionId)
         assertEquals("schemaViolation", entry.reason)
 
-        val garbage = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors })
+        val garbage = Harness(TransactionConsentHandler { true }, CAN)
         run(garbage, req("###"))
         assertNull(garbage.log.items.single().transactionId)
         assertNull(garbage.log.items.single().transactionType)
@@ -223,7 +238,7 @@ class TransactionDataCoordinatorTest {
         val source = FakeSource(metadata(types = PAYMENT_TYPES))
         val c = TransactionDataCoordinator(
             TransactionDataValidator(source), TransactionDisplayBuilder(source, "en"),
-            { TransactionConsentHandler { true } }, { AuthenticationFactorsProvider { twoFactors } }, { failing },
+            { TransactionConsentHandler { true } }, CAN, { failing },
         )
 
         assertNotNull(runBlocking { c.process(req(raw())) })
@@ -231,7 +246,7 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `refuse and recordUnreadable log a refusal`() {
-        val h = Harness(null, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(null, CAN)
         val err = TransactionDataError(TransactionDataReason.DISABLED, "off")
 
         val r = runCatching { runBlocking { h.coordinator.refuse(req(raw()), err) } }
@@ -248,12 +263,12 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `a handler cancelled from its own scope, or throwing an Error, is a decline that is logged`() {
-        val cancelled = Harness(TransactionConsentHandler { throw kotlinx.coroutines.CancellationException("dialog gone") }, AuthenticationFactorsProvider { twoFactors })
+        val cancelled = Harness(TransactionConsentHandler { throw kotlinx.coroutines.CancellationException("dialog gone") }, CAN)
         assertEquals(TransactionDataReason.DECLINED, reason(run(cancelled, req(raw()))))
         assertEquals(TransactionOutcome.DECLINED, cancelled.log.items.single().outcome)
 
         class Boom : Error("boom")
-        val error = Harness(TransactionConsentHandler { throw Boom() }, AuthenticationFactorsProvider { twoFactors })
+        val error = Harness(TransactionConsentHandler { throw Boom() }, CAN)
         assertEquals(TransactionDataReason.DECLINED, reason(run(error, req(raw()))))
         assertEquals(TransactionOutcome.DECLINED, error.log.items.single().outcome)
     }
@@ -261,7 +276,7 @@ class TransactionDataCoordinatorTest {
     @Test
     fun `when the wallet's own coroutine is cancelled that propagates and nothing is logged as consent`() {
         val gate = CompletableDeferred<Boolean>()
-        val h = Harness(TransactionConsentHandler { gate.await() }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { gate.await() }, CAN)
         runBlocking {
             val job = launch(Dispatchers.Default) { h.coordinator.process(req(raw())) }
             delay(300)
@@ -280,7 +295,7 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `a request with many broken entries writes one refusal record`() {
-        val h = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { true }, CAN)
 
         run(h, req(*Array(32) { raw(payload = """{"transaction_id":"bad$it","currency":"EUR","amount":1}""") }))
 
@@ -290,7 +305,7 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `a refusal after validation of many entries is also one record`() {
-        val h = Harness(TransactionConsentHandler { true }, ConservativeAuthenticationFactorsProvider)
+        val h = Harness(TransactionConsentHandler { true }, CANNOT)
         val many = Array(5) { raw(payload = """{"transaction_id":"t$it","payee":{"name":"B","id":"2"},"currency":"EUR","amount":1}""") }
 
         assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, reason(run(h, req(*many))))
@@ -301,12 +316,12 @@ class TransactionDataCoordinatorTest {
     @Test
     fun `attacker-sized fields are capped in the log, with a marker`() {
         val huge = "x".repeat(50_000)
-        val h = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { true }, CAN)
 
         run(h, req(raw(type = "urn:eudi:sca:payment:1", payload = """{"transaction_id":"${"i".repeat(30)}","payee":{"name":"$huge","id":"1"},"currency":"EUR","amount":1}"""), verifier = huge))
 
         // the payee name is refused for length by the display builder (a refusal record), so also check a consent
-        val ok = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors })
+        val ok = Harness(TransactionConsentHandler { true }, CAN)
         run(ok, req(raw(payload = """{"transaction_id":"${"i".repeat(36)}","payee":{"name":"${"n".repeat(1500)}","id":"1"},"currency":"EUR","amount":1}"""), verifier = "v".repeat(5_000)))
         val e = ok.log.items.single()
         assertEquals(TransactionDataCoordinator.MAX_LOG_FIELD + "…[truncated]".length, e.entities.getValue("payee").length)
@@ -318,7 +333,7 @@ class TransactionDataCoordinatorTest {
 
     @Test
     fun `a signing failure after consent adds a refused record`() {
-        val h = Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors })
+        val h = Harness(TransactionConsentHandler { true }, CAN)
 
         val plan = run(h, req(raw())).getOrThrow()
         runBlocking { plan.signingFailed() }
@@ -339,18 +354,18 @@ class TransactionDataCoordinatorTest {
         timber.log.Timber.plant(tree)
         try {
             for (handler in listOf(TransactionConsentHandler { true }, TransactionConsentHandler { false }, TransactionConsentHandler { throw IllegalStateException("tx-SECRET-9") })) {
-                run(Harness(handler, AuthenticationFactorsProvider { twoFactors }), req(e))
-                run(Harness(handler, AuthenticationFactorsProvider { throw IllegalStateException("PAYEE-ID-888") }), req(e))
+                run(Harness(handler, CAN), req(e))
+                run(Harness(handler, { throw IllegalStateException("PAYEE-ID-888") }), req(e))
             }
-            run(Harness(TransactionConsentHandler { true }, ConservativeAuthenticationFactorsProvider), req(e))
+            run(Harness(TransactionConsentHandler { true }, CANNOT), req(e))
             val failing = object : TransactionLogStore {
                 override suspend fun append(entry: TransactionLogEntry) = throw java.io.IOException("cannot write tx-SECRET-9 Distinctive Payee")
                 override suspend fun entries() = emptyList<TransactionLogEntry>()
                 override suspend fun clear() {}
             }
-            run(Harness(TransactionConsentHandler { true }, AuthenticationFactorsProvider { twoFactors }, log = MemoryLog()), req(e))
+            run(Harness(TransactionConsentHandler { true }, CAN, log = MemoryLog()), req(e))
             val src = FakeSource(metadata(types = PAYMENT_TYPES))
-            TransactionDataCoordinator(TransactionDataValidator(src), TransactionDisplayBuilder(src, "en"), { TransactionConsentHandler { true } }, { AuthenticationFactorsProvider { twoFactors } }, { failing })
+            TransactionDataCoordinator(TransactionDataValidator(src), TransactionDisplayBuilder(src, "en"), { TransactionConsentHandler { true } }, CAN, { failing })
                 .let { runCatching { runBlocking { it.process(req(e)) } } }
         } finally {
             timber.log.Timber.uproot(tree)
@@ -378,7 +393,7 @@ class TransactionDataCoordinatorTest {
         val caller = Thread.currentThread().name
         val c = TransactionDataCoordinator(
             TransactionDataValidator(src), TransactionDisplayBuilder(src, "en"),
-            { TransactionConsentHandler { true } }, { AuthenticationFactorsProvider { twoFactors } }, { log },
+            { TransactionConsentHandler { true } }, CAN, { log },
         )
 
         runBlocking { c.process(req(raw())) }

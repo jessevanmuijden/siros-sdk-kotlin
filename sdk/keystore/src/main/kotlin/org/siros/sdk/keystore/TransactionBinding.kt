@@ -66,13 +66,15 @@ class AuthenticationFactor(val category: AuthenticationCategory, val method: Str
  * a fresh `jti`, `response_mode`, and an `amr` of at least two different
  * authentication categories.
  *
- * Built by the wallet after it has validated and obtained consent for the
- * transaction; the keystore only signs what it is given. [hashes] are
- * `base64url(HASH(ASCII bytes of the request's raw entry))` in the verifier's
- * order (OpenID4VP 1.0 Appendix B), computed by the caller.
+ * Built by the wallet after it has validated the transaction; the keystore
+ * signs what it is given. [hashes] are `base64url(HASH(ASCII bytes of the
+ * request's raw entry))` in the verifier's order (OpenID4VP 1.0 Appendix B),
+ * computed by the caller.
  *
- * @throws TransactionDataError with `INSUFFICIENT_AUTHENTICATION_FACTORS`
- *   when [authenticationFactors] do not span two categories.
+ * The `amr` is NOT part of the binding: the factors are established by the
+ * keystore's own signing operation ([ScaSignSession]) and only the factors that
+ * operation backs are claimed.
+ *
  * @throws IllegalArgumentException for an empty [hashes], an unknown
  *   [hashAlg] or a blank [responseMode].
  */
@@ -80,35 +82,31 @@ class TransactionBinding(
     hashes: List<String>,
     val hashAlg: String,
     val responseMode: String,
-    authenticationFactors: List<AuthenticationFactor>,
 ) {
     /** Copied on construction: the caller's list cannot change what gets signed. */
     val hashes: List<String> = hashes.toList()
-
-    /** The factors, copied on construction. */
-    val authenticationFactors: List<AuthenticationFactor> = authenticationFactors.toList()
 
     init {
         require(hashes.isNotEmpty() && hashes.none { it.isEmpty() }) { "transaction_data_hashes must be non-empty" }
         require(hashAlg in HASH_ALGS) { "unsupported transaction_data_hashes_alg '$hashAlg'" }
         require(responseMode.isNotBlank()) { "response_mode is required" }
-        if (authenticationFactors.map { it.category }.toSet().size < 2) {
+    }
+
+    /** Adds this binding's claims, and [factors] as the `amr`, to a key binding JWT under construction. */
+    internal fun applyTo(claims: JWTClaimsSet.Builder, factors: List<AuthenticationFactor>) {
+        if (factors.map { it.category }.toSet().size < 2) {
             throw TransactionDataError(
                 TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS,
                 "An SCA presentation needs at least two different authentication categories; " +
-                    "got ${authenticationFactors.map { it.category.wire }.distinct()}",
+                    "got ${factors.map { it.category.wire }.distinct()}",
             )
         }
-    }
-
-    /** Adds this binding's claims to a key binding JWT under construction. */
-    internal fun applyTo(claims: JWTClaimsSet.Builder) {
         claims.claim("transaction_data_hashes", hashes)
         claims.claim("transaction_data_hashes_alg", hashAlg)
         // A random (v4) UUID: 122 bits from SecureRandom, fresh per presentation.
         claims.jwtID(UUID.randomUUID().toString())
         claims.claim("response_mode", responseMode)
-        claims.claim("amr", authenticationFactors.map { it.toAmrEntry() })
+        claims.claim("amr", factors.map { it.toAmrEntry() })
     }
 
     companion object {

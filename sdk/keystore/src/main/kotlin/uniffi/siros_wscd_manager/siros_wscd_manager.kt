@@ -59,7 +59,7 @@ open class RustBuffer : Structure() {
     companion object {
         internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
-            UniffiLib.INSTANCE.ffi_siros_wscd_manager_rustbuffer_alloc(size.toLong(), status)
+            UniffiLib.ffi_siros_wscd_manager_rustbuffer_alloc(size.toLong(), status)
         }.also {
             if(it.data == null) {
                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
@@ -75,49 +75,15 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.ffi_siros_wscd_manager_rustbuffer_free(buf, status)
+            UniffiLib.ffi_siros_wscd_manager_rustbuffer_free(buf, status)
         }
     }
 
     @Suppress("TooGenericExceptionThrown")
     fun asByteBuffer() =
-        this.data?.getByteBuffer(0, this.len.toLong())?.also {
+        this.data?.getByteBuffer(0, this.len)?.also {
             it.order(ByteOrder.BIG_ENDIAN)
         }
-}
-
-/**
- * The equivalent of the `*mut RustBuffer` type.
- * Required for callbacks taking in an out pointer.
- *
- * Size is the sum of all values in the struct.
- *
- * @suppress
- */
-class RustBufferByReference : ByReference(16) {
-    /**
-     * Set the pointed-to `RustBuffer` to the given value.
-     */
-    fun setValue(value: RustBuffer.ByValue) {
-        // NOTE: The offsets are as they are in the C-like struct.
-        val pointer = getPointer()
-        pointer.setLong(0, value.capacity)
-        pointer.setLong(8, value.len)
-        pointer.setPointer(16, value.data)
-    }
-
-    /**
-     * Get a `RustBuffer.ByValue` from this reference.
-     */
-    fun getValue(): RustBuffer.ByValue {
-        val pointer = getPointer()
-        val value = RustBuffer.ByValue()
-        value.writeField("capacity", pointer.getLong(0))
-        value.writeField("len", pointer.getLong(8))
-        value.writeField("data", pointer.getLong(16))
-
-        return value
-    }
 }
 
 // This is a helper for safely passing byte references into the rust code.
@@ -132,6 +98,43 @@ internal open class ForeignBytes : Structure() {
     @JvmField var data: Pointer? = null
 
     class ByValue : ForeignBytes(), Structure.ByValue
+}
+
+// Converter for `&[u8]` / `[ByRef] bytes` arguments.
+//
+// Only `lower` is valid — zero-copy byte buffers only flow foreign -> Rust,
+// and only in argument position. `lift`, `read`, `write`, and
+// `allocationSize` have no sound implementation here and all panic at
+// runtime. The `FfiConverter` interface is implemented so that the
+// compiler enforces the full method set (rather than relying on eyeball).
+//
+// The provided `ByteBuffer` MUST be direct — only direct buffers have a
+// stable native address that JNA can expose via `getDirectBufferPointer`.
+// The returned `ForeignBytes.ByValue` is only valid for the duration of
+// the FFI call; the Rust side treats it as a borrow.
+internal object FfiConverterByRefBytes : FfiConverter<java.nio.ByteBuffer, ForeignBytes.ByValue> {
+    override fun lower(value: java.nio.ByteBuffer): ForeignBytes.ByValue {
+        require(value.isDirect) { "UniFFI zero-copy &[u8] requires a direct ByteBuffer. Use ByteBuffer.allocateDirect()." }
+        val remaining = value.remaining()
+        val fb = ForeignBytes.ByValue()
+        fb.len = remaining
+        // Zero-length direct buffers: skip getDirectBufferPointer (platform-variable behavior)
+        // and pass null. The Rust side treats (null, 0) as &[].
+        fb.data = if (remaining == 0) null else com.sun.jna.Native.getDirectBufferPointer(value)
+        return fb
+    }
+
+    override fun lift(value: ForeignBytes.ByValue): java.nio.ByteBuffer =
+        error("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
+
+    override fun read(buf: java.nio.ByteBuffer): java.nio.ByteBuffer =
+        error("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+
+    override fun write(value: java.nio.ByteBuffer, buf: java.nio.ByteBuffer): Unit =
+        error("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+
+    override fun allocationSize(value: java.nio.ByteBuffer): ULong =
+        error("ByRef bytes have no RustBuffer allocation size: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
 }
 /**
  * The FfiConverter interface handles converter types to and from the FFI
@@ -316,8 +319,9 @@ internal inline fun<T> uniffiTraitInterfaceCall(
     try {
         writeReturn(makeCall())
     } catch(e: kotlin.Exception) {
+        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-        callStatus.error_buf = FfiConverterString.lower(e.toString())
+        callStatus.error_buf = FfiConverterString.lower(err)
     }
 }
 
@@ -334,26 +338,39 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
+            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-            callStatus.error_buf = FfiConverterString.lower(e.toString())
+            callStatus.error_buf = FfiConverterString.lower(err)
         }
     }
 }
+// Initial value and increment amount for handles. 
+// These ensure that Kotlin-generated handles always have the lowest bit set
+private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
+private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
+
 // Map handles to objects
 //
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    private val counter = java.util.concurrent.atomic.AtomicLong(0)
+    // Start 
+    private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
         get() = map.size
 
     // Insert a new object into the handle map and get a handle for it
     fun insert(obj: T): Long {
-        val handle = counter.getAndAdd(1)
+        val handle = counter.getAndAdd(UNIFFI_HANDLEMAP_DELTA)
         map.put(handle, obj)
         return handle
+    }
+
+    // Clone a handle, creating a new one
+    fun clone(handle: Long): Long {
+        val obj = map.get(handle) ?: throw InternalException("UniffiHandleMap.clone: Invalid handle")
+        return insert(obj)
     }
 
     // Get an object from the handle map
@@ -378,281 +395,260 @@ private fun findLibraryName(componentName: String): String {
     return "siros_wscd_manager"
 }
 
-private inline fun <reified Lib : Library> loadIndirect(
-    componentName: String
-): Lib {
-    return Native.load<Lib>(findLibraryName(componentName), Lib::class.java)
-}
-
 // Define FFI callback types
 internal interface UniffiRustFutureContinuationCallback : com.sun.jna.Callback {
     fun callback(`data`: Long,`pollResult`: Byte,)
 }
-internal interface UniffiForeignFutureFree : com.sun.jna.Callback {
+internal interface UniffiForeignFutureDroppedCallback : com.sun.jna.Callback {
     fun callback(`handle`: Long,)
 }
 internal interface UniffiCallbackInterfaceFree : com.sun.jna.Callback {
     fun callback(`handle`: Long,)
 }
+internal interface UniffiCallbackInterfaceClone : com.sun.jna.Callback {
+    fun callback(`handle`: Long,)
+    : Long
+}
 @Structure.FieldOrder("handle", "free")
-internal open class UniffiForeignFuture(
+internal open class UniffiForeignFutureDroppedCallbackStruct(
     @JvmField internal var `handle`: Long = 0.toLong(),
-    @JvmField internal var `free`: UniffiForeignFutureFree? = null,
+    @JvmField internal var `free`: UniffiForeignFutureDroppedCallback? = null,
 ) : Structure() {
     class UniffiByValue(
         `handle`: Long = 0.toLong(),
-        `free`: UniffiForeignFutureFree? = null,
-    ): UniffiForeignFuture(`handle`,`free`,), Structure.ByValue
+        `free`: UniffiForeignFutureDroppedCallback? = null,
+    ): UniffiForeignFutureDroppedCallbackStruct(`handle`,`free`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFuture) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
         `handle` = other.`handle`
         `free` = other.`free`
     }
 
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU8(
+internal open class UniffiForeignFutureResultU8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU8(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU8(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU8.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU8.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI8(
+internal open class UniffiForeignFutureResultI8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI8(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI8(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI8 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI8.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI8.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU16(
+internal open class UniffiForeignFutureResultU16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU16(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU16(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU16.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU16.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI16(
+internal open class UniffiForeignFutureResultI16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI16(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI16(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI16 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI16.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI16.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU32(
+internal open class UniffiForeignFutureResultU32(
     @JvmField internal var `returnValue`: Int = 0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI32(
+internal open class UniffiForeignFutureResultI32(
     @JvmField internal var `returnValue`: Int = 0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructU64(
+internal open class UniffiForeignFutureResultU64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructU64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultU64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructU64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteU64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructU64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructI64(
+internal open class UniffiForeignFutureResultI64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructI64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultI64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructI64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteI64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructI64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructF32(
+internal open class UniffiForeignFutureResultF32(
     @JvmField internal var `returnValue`: Float = 0.0f,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Float = 0.0f,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructF32(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultF32(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructF32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteF32 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructF32.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF32.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructF64(
+internal open class UniffiForeignFutureResultF64(
     @JvmField internal var `returnValue`: Double = 0.0,
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: Double = 0.0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructF64(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultF64(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructF64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteF64 : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructF64.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF64.UniffiByValue,)
 }
 @Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructPointer(
-    @JvmField internal var `returnValue`: Pointer = Pointer.NULL,
-    @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-) : Structure() {
-    class UniffiByValue(
-        `returnValue`: Pointer = Pointer.NULL,
-        `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructPointer(`returnValue`,`callStatus`,), Structure.ByValue
-
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructPointer) {
-        `returnValue` = other.`returnValue`
-        `callStatus` = other.`callStatus`
-    }
-
-}
-internal interface UniffiForeignFutureCompletePointer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructPointer.UniffiByValue,)
-}
-@Structure.FieldOrder("returnValue", "callStatus")
-internal open class UniffiForeignFutureStructRustBuffer(
+internal open class UniffiForeignFutureResultRustBuffer(
     @JvmField internal var `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructRustBuffer) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteRustBuffer : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructRustBuffer.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,)
 }
 @Structure.FieldOrder("callStatus")
-internal open class UniffiForeignFutureStructVoid(
+internal open class UniffiForeignFutureResultVoid(
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ): UniffiForeignFutureStructVoid(`callStatus`,), Structure.ByValue
+    ): UniffiForeignFutureResultVoid(`callStatus`,), Structure.ByValue
 
-   internal fun uniffiSetValue(other: UniffiForeignFutureStructVoid) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
         `callStatus` = other.`callStatus`
     }
 
 }
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
-    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureStructVoid.UniffiByValue,)
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
 internal interface UniffiCallbackInterfaceFfiAuthCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`pluginId`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
@@ -669,547 +665,482 @@ internal interface UniffiCallbackInterfaceFfiHttpTransportMethod0 : com.sun.jna.
 internal interface UniffiCallbackInterfaceFfiProgressCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`progress`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("requestPin", "requestWebauthnAssertion", "uniffiFree")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "requestPin", "requestWebauthnAssertion")
 internal open class UniffiVTableCallbackInterfaceFfiAuthCallback(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `requestPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod0? = null,
     @JvmField internal var `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod1? = null,
-    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
 ) : Structure() {
     class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `requestPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod0? = null,
         `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod1? = null,
-        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    ): UniffiVTableCallbackInterfaceFfiAuthCallback(`requestPin`,`requestWebauthnAssertion`,`uniffiFree`,), Structure.ByValue
+    ): UniffiVTableCallbackInterfaceFfiAuthCallback(`uniffiFree`,`uniffiClone`,`requestPin`,`requestWebauthnAssertion`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiAuthCallback) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
         `requestPin` = other.`requestPin`
         `requestWebauthnAssertion` = other.`requestWebauthnAssertion`
-        `uniffiFree` = other.`uniffiFree`
     }
 
 }
-@Structure.FieldOrder("ctap2SendCommand", "uniffiFree")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "ctap2SendCommand")
 internal open class UniffiVTableCallbackInterfaceFfiCtap2Transport(
-    @JvmField internal var `ctap2SendCommand`: UniffiCallbackInterfaceFfiCtap2TransportMethod0? = null,
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `ctap2SendCommand`: UniffiCallbackInterfaceFfiCtap2TransportMethod0? = null,
 ) : Structure() {
     class UniffiByValue(
-        `ctap2SendCommand`: UniffiCallbackInterfaceFfiCtap2TransportMethod0? = null,
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    ): UniffiVTableCallbackInterfaceFfiCtap2Transport(`ctap2SendCommand`,`uniffiFree`,), Structure.ByValue
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `ctap2SendCommand`: UniffiCallbackInterfaceFfiCtap2TransportMethod0? = null,
+    ): UniffiVTableCallbackInterfaceFfiCtap2Transport(`uniffiFree`,`uniffiClone`,`ctap2SendCommand`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiCtap2Transport) {
-        `ctap2SendCommand` = other.`ctap2SendCommand`
         `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `ctap2SendCommand` = other.`ctap2SendCommand`
     }
 
 }
-@Structure.FieldOrder("send", "uniffiFree")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "send")
 internal open class UniffiVTableCallbackInterfaceFfiHttpTransport(
-    @JvmField internal var `send`: UniffiCallbackInterfaceFfiHttpTransportMethod0? = null,
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `send`: UniffiCallbackInterfaceFfiHttpTransportMethod0? = null,
 ) : Structure() {
     class UniffiByValue(
-        `send`: UniffiCallbackInterfaceFfiHttpTransportMethod0? = null,
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    ): UniffiVTableCallbackInterfaceFfiHttpTransport(`send`,`uniffiFree`,), Structure.ByValue
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `send`: UniffiCallbackInterfaceFfiHttpTransportMethod0? = null,
+    ): UniffiVTableCallbackInterfaceFfiHttpTransport(`uniffiFree`,`uniffiClone`,`send`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiHttpTransport) {
-        `send` = other.`send`
         `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `send` = other.`send`
     }
 
 }
-@Structure.FieldOrder("onProgress", "uniffiFree")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "onProgress")
 internal open class UniffiVTableCallbackInterfaceFfiProgressCallback(
-    @JvmField internal var `onProgress`: UniffiCallbackInterfaceFfiProgressCallbackMethod0? = null,
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `onProgress`: UniffiCallbackInterfaceFfiProgressCallbackMethod0? = null,
 ) : Structure() {
     class UniffiByValue(
-        `onProgress`: UniffiCallbackInterfaceFfiProgressCallbackMethod0? = null,
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
-    ): UniffiVTableCallbackInterfaceFfiProgressCallback(`onProgress`,`uniffiFree`,), Structure.ByValue
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `onProgress`: UniffiCallbackInterfaceFfiProgressCallbackMethod0? = null,
+    ): UniffiVTableCallbackInterfaceFfiProgressCallback(`uniffiFree`,`uniffiClone`,`onProgress`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiProgressCallback) {
-        `onProgress` = other.`onProgress`
         `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `onProgress` = other.`onProgress`
     }
 
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
-internal interface UniffiLib : Library {
-    companion object {
-        internal val INSTANCE: UniffiLib by lazy {
-            loadIndirect<UniffiLib>(componentName = "siros_wscd_manager")
-            .also { lib: UniffiLib ->
-                uniffiCheckContractApiVersion(lib)
-                uniffiCheckApiChecksums(lib)
-                uniffiCallbackInterfaceFfiAuthCallback.register(lib)
-                uniffiCallbackInterfaceFfiCtap2Transport.register(lib)
-                uniffiCallbackInterfaceFfiHttpTransport.register(lib)
-                uniffiCallbackInterfaceFfiProgressCallback.register(lib)
-                }
-        }
-        
-        // The Cleaner for the whole library
-        internal val CLEANER: UniffiCleaner by lazy {
-            UniffiCleaner.create()
-        }
+// For large crates we prevent `MethodTooLargeException` (see #2340)
+// N.B. the name of the extension is very misleading, since it is
+// rather `InterfaceTooLargeException`, caused by too many methods
+// in the interface for large crates.
+//
+// By splitting the otherwise huge interface into two parts
+// * UniffiLib (this)
+// * IntegrityCheckingUniffiLib
+// And all checksum methods are put into `IntegrityCheckingUniffiLib`
+// we allow for ~2x as many methods in the UniffiLib interface.
+//
+// Note: above all written when we used JNA's `loadIndirect` etc.
+// We now use JNA's "direct mapping" - unclear if same considerations apply exactly.
+internal object IntegrityCheckingUniffiLib {
+    init {
+        Native.register(IntegrityCheckingUniffiLib::class.java, findLibraryName(componentName = "siros_wscd_manager"))
+        uniffiCheckContractApiVersion(this)
+        uniffiCheckApiChecksums(this)
     }
 
-    fun uniffi_siros_wscd_manager_fn_clone_ffiwscdmanager(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_siros_wscd_manager_fn_free_ffiwscdmanager(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_constructor_ffiwscdmanager_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_activate_lifecycle(`ptr`: Pointer,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_attestation_chain(`ptr`: Pointer,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(`ptr`: Pointer,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(`ptr`: Pointer,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_public_key(`ptr`: Pointer,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_softkey_container(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_generate_key(`ptr`: Pointer,`algorithm`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_import_softkey_container(`ptr`: Pointer,`container`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_lifecycle_status(`ptr`: Pointer,`pluginId`: RustBuffer.ByValue,`contextId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_list_keys(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_migrate_key(`ptr`: Pointer,`kid`: RustBuffer.ByValue,`targetPluginId`: RustBuffer.ByValue,`auth`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin(`ptr`: Pointer,`transport`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin_with_state(`ptr`: Pointer,`transport`: Long,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_lifecycle(`ptr`: Pointer,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_r2ps_plugin(`ptr`: Pointer,`config`: RustBuffer.ByValue,`transport`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_softkey_plugin(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_rotate_lifecycle(`ptr`: Pointer,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_security_properties(`ptr`: Pointer,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign(`ptr`: Pointer,`kid`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`algorithm`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiauthcallback(`vtable`: UniffiVTableCallbackInterfaceFfiAuthCallback,
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffictap2transport(`vtable`: UniffiVTableCallbackInterfaceFfiCtap2Transport,
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffihttptransport(`vtable`: UniffiVTableCallbackInterfaceFfiHttpTransport,
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiprogresscallback(`vtable`: UniffiVTableCallbackInterfaceFfiProgressCallback,
-    ): Unit
-    fun uniffi_siros_wscd_manager_fn_func_decode_cose_ec2_public_key(`coseBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_func_extract_previewsign_signature(`authenticatorData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_siros_wscd_manager_fn_func_wscd_manager_version(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun ffi_siros_wscd_manager_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun ffi_siros_wscd_manager_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun ffi_siros_wscd_manager_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun ffi_siros_wscd_manager_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun ffi_siros_wscd_manager_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_u8(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_u8(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    fun ffi_siros_wscd_manager_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_i8(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_i8(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    fun ffi_siros_wscd_manager_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_u16(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_u16(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
-    fun ffi_siros_wscd_manager_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_i16(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_i16(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
-    fun ffi_siros_wscd_manager_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_u32(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_u32(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    internal fun ensureInitialized() = Unit
+    external fun uniffi_siros_wscd_manager_checksum_func_decode_cose_ec2_public_key(
     ): Int
-    fun ffi_siros_wscd_manager_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_i32(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_i32(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    external fun uniffi_siros_wscd_manager_checksum_func_extract_previewsign_signature(
     ): Int
-    fun ffi_siros_wscd_manager_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_u64(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_u64(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    fun ffi_siros_wscd_manager_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_i64(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_i64(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    fun ffi_siros_wscd_manager_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_f32(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_f32(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Float
-    fun ffi_siros_wscd_manager_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_f64(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_f64(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Double
-    fun ffi_siros_wscd_manager_rust_future_poll_pointer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_pointer(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_pointer(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_pointer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Pointer
-    fun ffi_siros_wscd_manager_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_rust_buffer(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_rust_buffer(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun ffi_siros_wscd_manager_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_cancel_void(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_free_void(`handle`: Long,
-    ): Unit
-    fun ffi_siros_wscd_manager_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_siros_wscd_manager_checksum_func_decode_cose_ec2_public_key(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_func_extract_previewsign_signature(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_func_wscd_manager_version(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_activate_lifecycle(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_attestation_chain(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_public_key(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_softkey_container(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_generate_key(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_import_softkey_container(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_lifecycle_status(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_list_keys(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_migrate_key(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin_with_state(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_lifecycle(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_r2ps_plugin(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_softkey_plugin(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_rotate_lifecycle(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_security_properties(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffihttptransport_send(
-    ): Short
-    fun uniffi_siros_wscd_manager_checksum_method_ffiprogresscallback_on_progress(
-    ): Short
-    fun ffi_siros_wscd_manager_uniffi_contract_version(
+    external fun uniffi_siros_wscd_manager_checksum_func_wscd_manager_version(
     ): Int
-    
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_activate_lifecycle(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_attestation_chain(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_authentication_capability(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_public_key(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_softkey_container(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_generate_key(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_import_softkey_container(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_lifecycle_status(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_list_keys(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_migrate_key(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin_with_state(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_lifecycle(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_r2ps_plugin(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_softkey_plugin(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_rotate_lifecycle(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_security_properties(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign_with_factors(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffihttptransport_send(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiprogresscallback_on_progress(
+    ): Int
+    external fun ffi_siros_wscd_manager_uniffi_contract_version(
+    ): Int
+
+        
 }
 
-private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
+internal object UniffiLib {
+    
+    // The Cleaner for the whole library
+    internal val CLEANER: UniffiCleaner by lazy {
+        UniffiCleaner.create()
+    }
+    
+
+    init {
+        Native.register(UniffiLib::class.java, findLibraryName(componentName = "siros_wscd_manager"))
+        uniffiCallbackInterfaceFfiAuthCallback.register(this)
+        uniffiCallbackInterfaceFfiCtap2Transport.register(this)
+        uniffiCallbackInterfaceFfiHttpTransport.register(this)
+        uniffiCallbackInterfaceFfiProgressCallback.register(this)
+        
+    }
+
+    internal fun ensureInitialized() = Unit
+    external fun uniffi_siros_wscd_manager_fn_clone_ffiwscdmanager(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_siros_wscd_manager_fn_free_ffiwscdmanager(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_constructor_ffiwscdmanager_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_activate_lifecycle(`ptr`: Long,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_attestation_chain(`ptr`: Long,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_authentication_capability(`ptr`: Long,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(`ptr`: Long,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(`ptr`: Long,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_public_key(`ptr`: Long,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_softkey_container(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_generate_key(`ptr`: Long,`algorithm`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_import_softkey_container(`ptr`: Long,`container`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_lifecycle_status(`ptr`: Long,`pluginId`: RustBuffer.ByValue,`contextId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_list_keys(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_migrate_key(`ptr`: Long,`kid`: RustBuffer.ByValue,`targetPluginId`: RustBuffer.ByValue,`auth`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin(`ptr`: Long,`transport`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin_with_state(`ptr`: Long,`transport`: Long,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_lifecycle(`ptr`: Long,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_r2ps_plugin(`ptr`: Long,`config`: RustBuffer.ByValue,`transport`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_softkey_plugin(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_rotate_lifecycle(`ptr`: Long,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_security_properties(`ptr`: Long,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign(`ptr`: Long,`kid`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`algorithm`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign_with_factors(`ptr`: Long,`kid`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`algorithm`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiauthcallback(`vtable`: UniffiVTableCallbackInterfaceFfiAuthCallback,
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffictap2transport(`vtable`: UniffiVTableCallbackInterfaceFfiCtap2Transport,
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffihttptransport(`vtable`: UniffiVTableCallbackInterfaceFfiHttpTransport,
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_init_callback_vtable_ffiprogresscallback(`vtable`: UniffiVTableCallbackInterfaceFfiProgressCallback,
+    ): Unit
+    external fun uniffi_siros_wscd_manager_fn_func_decode_cose_ec2_public_key(`coseBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_func_extract_previewsign_signature(`authenticatorData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_siros_wscd_manager_fn_func_wscd_manager_version(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_siros_wscd_manager_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_siros_wscd_manager_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_siros_wscd_manager_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun ffi_siros_wscd_manager_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_siros_wscd_manager_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_siros_wscd_manager_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun ffi_siros_wscd_manager_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_siros_wscd_manager_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Short
+    external fun ffi_siros_wscd_manager_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_siros_wscd_manager_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_siros_wscd_manager_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_siros_wscd_manager_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_siros_wscd_manager_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Float
+    external fun ffi_siros_wscd_manager_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Double
+    external fun ffi_siros_wscd_manager_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_siros_wscd_manager_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_cancel_void(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_free_void(`handle`: Long,
+    ): Unit
+    external fun ffi_siros_wscd_manager_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+
+        
+}
+
+private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
     // Get the bindings contract version from our ComponentInterface
-    val bindings_contract_version = 26
+    val bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
     val scaffolding_contract_version = lib.ffi_siros_wscd_manager_uniffi_contract_version()
     if (bindings_contract_version != scaffolding_contract_version) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
-
 @Suppress("UNUSED_PARAMETER")
-private fun uniffiCheckApiChecksums(lib: UniffiLib) {
-    if (lib.uniffi_siros_wscd_manager_checksum_func_decode_cose_ec2_public_key() != 41138.toShort()) {
+private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_func_decode_cose_ec2_public_key() and 0xFFFF) != 53817) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_func_extract_previewsign_signature() != 41377.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_func_extract_previewsign_signature() and 0xFFFF) != 22369) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_func_wscd_manager_version() != 29401.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_func_wscd_manager_version() and 0xFFFF) != 30931) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_activate_lifecycle() != 28478.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_activate_lifecycle() and 0xFFFF) != 45559) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_attestation_chain() != 40546.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_attestation_chain() and 0xFFFF) != 25756) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key() != 19797.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_authentication_capability() and 0xFFFF) != 43672) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle() != 23469.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key() and 0xFFFF) != 50338) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state() != 37798.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle() and 0xFFFF) != 3691) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_public_key() != 14419.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state() and 0xFFFF) != 64045) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_softkey_container() != 4318.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_public_key() and 0xFFFF) != 16251) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_generate_key() != 60570.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_softkey_container() and 0xFFFF) != 12042) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_import_softkey_container() != 33000.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_generate_key() and 0xFFFF) != 35191) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_lifecycle_status() != 14109.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_import_softkey_container() and 0xFFFF) != 44885) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_list_keys() != 30610.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_lifecycle_status() and 0xFFFF) != 52325) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_migrate_key() != 41362.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_list_keys() and 0xFFFF) != 39363) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin() != 25606.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_migrate_key() and 0xFFFF) != 11675) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin_with_state() != 38216.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin() and 0xFFFF) != 39324) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_lifecycle() != 59574.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_fido2_plugin_with_state() and 0xFFFF) != 36526) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_r2ps_plugin() != 61563.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_lifecycle() and 0xFFFF) != 32083) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_softkey_plugin() != 48657.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_r2ps_plugin() and 0xFFFF) != 30249) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_rotate_lifecycle() != 1449.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_register_softkey_plugin() and 0xFFFF) != 51291) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_security_properties() != 38213.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_rotate_lifecycle() and 0xFFFF) != 41757) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign() != 5679.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_security_properties() and 0xFFFF) != 41426) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new() != 22870.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign() and 0xFFFF) != 4015) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() != 17826.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_sign_with_factors() and 0xFFFF) != 3987) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() != 63746.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new() and 0xFFFF) != 9101) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command() != 64354.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() and 0xFFFF) != 23519) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffihttptransport_send() != 15795.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() and 0xFFFF) != 26184) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_siros_wscd_manager_checksum_method_ffiprogresscallback_on_progress() != 24301.toShort()) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command() and 0xFFFF) != 35187) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffihttptransport_send() and 0xFFFF) != 57917) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiprogresscallback_on_progress() and 0xFFFF) != 5963) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+}
+
+/**
+ * @suppress
+ */
+public fun uniffiEnsureInitialized() {
+    // Call arbitrary methods on IntegrityCheckingUniffiLib and UniffiLib to ensure that
+    // their init blocks run. This ensures initialization across crates works as expected.
+    IntegrityCheckingUniffiLib.ensureInitialized()
+    UniffiLib.ensureInitialized()
 }
 
 // Async support
@@ -1229,8 +1160,33 @@ interface Disposable {
     fun destroy()
     companion object {
         fun destroy(vararg args: Any?) {
-            args.filterIsInstance<Disposable>()
-                .forEach(Disposable::destroy)
+            for (arg in args) {
+                when (arg) {
+                    is Disposable -> arg.destroy()
+                    is ArrayList<*> -> {
+                        for (idx in arg.indices) {
+                            val element = arg[idx]
+                            if (element is Disposable) {
+                                element.destroy()
+                            }
+                        }
+                    }
+                    is Map<*, *> -> {
+                        for (element in arg.values) {
+                            if (element is Disposable) {
+                                element.destroy()
+                            }
+                        }
+                    }
+                    is Iterable<*> -> {
+                        for (element in arg) {
+                            if (element is Disposable) {
+                                element.destroy()
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1251,11 +1207,117 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
     }
 
 /** 
+ * Placeholder object used to signal that we're constructing an interface with a FFI handle.
+ *
+ * This is the first argument for interface constructors that input a raw handle. It exists is that
+ * so we can avoid signature conflicts when an interface has a regular constructor than inputs a
+ * Long.
+ *
+ * @suppress
+ * */
+object UniffiWithHandle
+
+/** 
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
  * */
-object NoPointer
+object NoHandle// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+internal const val IDX_CALLBACK_FREE = 0
+// Callback return codes
+internal const val UNIFFI_CALLBACK_SUCCESS = 0
+internal const val UNIFFI_CALLBACK_ERROR = 1
+internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
+
+/**
+ * @suppress
+ */
+public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
+    internal val handleMap = UniffiHandleMap<CallbackInterface>()
+
+    internal fun drop(handle: Long) {
+        handleMap.remove(handle)
+    }
+
+    override fun lift(value: Long): CallbackInterface {
+        return handleMap.get(value)
+    }
+
+    override fun read(buf: ByteBuffer) = lift(buf.getLong())
+
+    override fun lower(value: CallbackInterface) = handleMap.insert(value)
+
+    override fun allocationSize(value: CallbackInterface) = 8UL
+
+    override fun write(value: CallbackInterface, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+/**
+ * The cleaner interface for Object finalization code to run.
+ * This is the entry point to any implementation that we're using.
+ *
+ * The cleaner registers objects and returns cleanables, so now we are
+ * defining a `UniffiCleaner` with a `UniffiClenaer.Cleanable` to abstract the
+ * different implmentations available at compile time.
+ *
+ * @suppress
+ */
+interface UniffiCleaner {
+    interface Cleanable {
+        fun clean()
+    }
+
+    fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable
+
+    companion object
+}
+
+// The fallback Jna cleaner, which is available for both Android, and the JVM.
+private class UniffiJnaCleaner : UniffiCleaner {
+    private val cleaner = com.sun.jna.internal.Cleaner.getCleaner()
+
+    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
+        UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
+}
+
+private class UniffiJnaCleanable(
+    private val cleanable: com.sun.jna.internal.Cleaner.Cleanable,
+) : UniffiCleaner.Cleanable {
+    override fun clean() = cleanable.clean()
+}
+
+
+// We decide at uniffi binding generation time whether we were
+// using Android or not.
+// There are further runtime checks to chose the correct implementation
+// of the cleaner.
+private fun UniffiCleaner.Companion.create(): UniffiCleaner =
+    try {
+        // For safety's sake: if the library hasn't been run in android_cleaner = true
+        // mode, but is being run on Android, then we still need to think about
+        // Android API versions.
+        // So we check if java.lang.ref.Cleaner is there, and use that…
+        java.lang.Class.forName("java.lang.ref.Cleaner")
+        JavaLangRefCleaner()
+    } catch (e: ClassNotFoundException) {
+        // … otherwise, fallback to the JNA cleaner.
+        UniffiJnaCleaner()
+    }
+
+private class JavaLangRefCleaner : UniffiCleaner {
+    val cleaner = java.lang.ref.Cleaner.create()
+
+    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
+        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
+}
+
+private class JavaLangRefCleanable(
+    val cleanable: java.lang.ref.Cleaner.Cleanable
+) : UniffiCleaner.Cleanable {
+    override fun clean() = cleanable.clean()
+}
 
 /**
  * @suppress
@@ -1403,21 +1465,18 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 }
 
 
-// This template implements a class for working with a Rust struct via a Pointer/Arc<T>
+// This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
-//
-// Each instance implements core operations for working with the Rust `Arc<T>` and the
-// Kotlin Pointer to work with the live Rust struct on the other side of the FFI.
 //
 // There's some subtlety here, because we have to be careful not to operate on a Rust
 // struct after it has been dropped, and because we must expose a public API for freeing
 // theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
 //
-//   * Each instance holds an opaque pointer to the underlying Rust struct.
-//     Method calls need to read this pointer from the object's state and pass it in to
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
 //     the Rust FFI.
 //
-//   * When an instance is no longer needed, its pointer should be passed to a
+//   * When an instance is no longer needed, its handle should be passed to a
 //     special destructor function provided by the Rust FFI, which will drop the
 //     underlying Rust struct.
 //
@@ -1442,13 +1501,13 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
 //         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
 //
-// If we try to implement this with mutual exclusion on access to the pointer, there is the
+// If we try to implement this with mutual exclusion on access to the handle, there is the
 // possibility of a race between a method call and a concurrent call to `destroy`:
 //
-//    * Thread A starts a method call, reads the value of the pointer, but is interrupted
-//      before it can pass the pointer over the FFI to Rust.
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
 //    * Thread B calls `destroy` and frees the underlying Rust struct.
-//    * Thread A resumes, passing the already-read pointer value to Rust and triggering
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
 //      a use-after-free.
 //
 // One possible solution would be to use a `ReadWriteLock`, with each method call taking
@@ -1501,69 +1560,6 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 
 
-/**
- * The cleaner interface for Object finalization code to run.
- * This is the entry point to any implementation that we're using.
- *
- * The cleaner registers objects and returns cleanables, so now we are
- * defining a `UniffiCleaner` with a `UniffiClenaer.Cleanable` to abstract the
- * different implmentations available at compile time.
- *
- * @suppress
- */
-interface UniffiCleaner {
-    interface Cleanable {
-        fun clean()
-    }
-
-    fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable
-
-    companion object
-}
-
-// The fallback Jna cleaner, which is available for both Android, and the JVM.
-private class UniffiJnaCleaner : UniffiCleaner {
-    private val cleaner = com.sun.jna.internal.Cleaner.getCleaner()
-
-    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
-        UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
-}
-
-private class UniffiJnaCleanable(
-    private val cleanable: com.sun.jna.internal.Cleaner.Cleanable,
-) : UniffiCleaner.Cleanable {
-    override fun clean() = cleanable.clean()
-}
-
-// We decide at uniffi binding generation time whether we were
-// using Android or not.
-// There are further runtime checks to chose the correct implementation
-// of the cleaner.
-private fun UniffiCleaner.Companion.create(): UniffiCleaner =
-    try {
-        // For safety's sake: if the library hasn't been run in android_cleaner = true
-        // mode, but is being run on Android, then we still need to think about
-        // Android API versions.
-        // So we check if java.lang.ref.Cleaner is there, and use that…
-        java.lang.Class.forName("java.lang.ref.Cleaner")
-        JavaLangRefCleaner()
-    } catch (e: ClassNotFoundException) {
-        // … otherwise, fallback to the JNA cleaner.
-        UniffiJnaCleaner()
-    }
-
-private class JavaLangRefCleaner : UniffiCleaner {
-    val cleaner = java.lang.ref.Cleaner.create()
-
-    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
-        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
-}
-
-private class JavaLangRefCleanable(
-    val cleanable: java.lang.ref.Cleaner.Cleanable
-) : UniffiCleaner.Cleanable {
-    override fun clean() = cleanable.clean()
-}
 public interface FfiWscdManagerInterface {
     
     /**
@@ -1579,6 +1575,12 @@ public interface FfiWscdManagerInterface {
      * proving the key was generated in a certified WSCD.
      */
     fun `attestationChain`(`kid`: kotlin.String): FfiAttestationChain?
+    
+    /**
+     * Whether a sign with this key could reach two TS12 categories. Never
+     * prompts; ask it before showing the user a transaction.
+     */
+    fun `authenticationCapability`(`kid`: kotlin.String): FfiFactorCapability
     
     /**
      * Delete a key.
@@ -1706,39 +1708,60 @@ public interface FfiWscdManagerInterface {
      */
     fun `sign`(`kid`: kotlin.String, `data`: kotlin.ByteArray, `algorithm`: FfiAlgorithm, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiSignature
     
+    /**
+     * Sign data and report the TS12 authentication factors applied to this
+     * very sign. Additive: `sign` and `security_properties().amr` are
+     * unchanged. See [`FfiSignOptions`] for the fresh-authentication flag.
+     */
+    fun `signWithFactors`(`kid`: kotlin.String, `data`: kotlin.ByteArray, `algorithm`: FfiAlgorithm, `options`: FfiSignOptions, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiSignOutcome
+    
     companion object
 }
 
-open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
+open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface
+{
 
-    constructor(pointer: Pointer) {
-        this.pointer = pointer
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
     }
 
     /**
+     * @suppress
+     *
      * This constructor can be used to instantiate a fake object. Only used for tests. Any
      * attempt to actually use an object constructed this way will fail as there is no
      * connected Rust object.
      */
     @Suppress("UNUSED_PARAMETER")
-    constructor(noPointer: NoPointer) {
-        this.pointer = null
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(pointer))
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
     }
     constructor(`config`: FfiWscdConfig) :
-        this(
+        this(UniffiWithHandle, 
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_constructor_ffiwscdmanager_new(
+    UniffiLib.uniffi_siros_wscd_manager_fn_constructor_ffiwscdmanager_new(
+    
+        
         FfiConverterTypeFfiWscdConfig.lower(`config`),_status)
 }
     )
 
-    protected val pointer: Pointer?
-    protected val cleanable: UniffiCleaner.Cleanable
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
 
     private val wasDestroyed = AtomicBoolean(false)
     private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
 
     override fun destroy() {
         // Only allow a single call to this method.
@@ -1746,7 +1769,7 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -1756,7 +1779,7 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
         this.destroy()
     }
 
-    internal inline fun <R> callWithPointer(block: (ptr: Pointer) -> R): R {
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
         // Check and increment the call counter, to keep the object alive.
         // This needs a compare-and-set retry loop in case of concurrent updates.
         do {
@@ -1768,32 +1791,40 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
         } while (! this.callCounter.compareAndSet(c, c + 1L))
-        // Now we can safely do the method call without the pointer being freed concurrently.
+        // Now we can safely do the method call without the handle being freed concurrently.
         try {
-            return block(this.uniffiClonePointer())
+            return block(this.uniffiCloneHandle())
         } finally {
             // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(private val pointer: Pointer?) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
-            pointer?.let { ptr ->
-                uniffiRustCall { status ->
-                    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_free_ffiwscdmanager(ptr, status)
-                }
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_siros_wscd_manager_fn_free_ffiwscdmanager(handle, status)
             }
         }
     }
 
-    fun uniffiClonePointer(): Pointer {
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
         return uniffiRustCall() { status ->
-            UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_clone_ffiwscdmanager(pointer!!, status)
+            UniffiLib.uniffi_siros_wscd_manager_fn_clone_ffiwscdmanager(handle, status)
         }
     }
 
@@ -1803,10 +1834,14 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `activateLifecycle`(`request`: FfiActivateLifecycleRequest, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiActivationOutcome {
             return FfiConverterTypeFfiActivationOutcome.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_activate_lifecycle(
-        it, FfiConverterTypeFfiActivateLifecycleRequest.lower(`request`),FfiConverterTypeFfiAuthCallback.lower(`auth`),FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_activate_lifecycle(
+        it,
+        
+        FfiConverterTypeFfiActivateLifecycleRequest.lower(`request`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
 }
     }
     )
@@ -1823,10 +1858,31 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `attestationChain`(`kid`: kotlin.String): FfiAttestationChain? {
             return FfiConverterOptionalTypeFfiAttestationChain.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_attestation_chain(
-        it, FfiConverterString.lower(`kid`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_attestation_chain(
+        it,
+        
+        FfiConverterString.lower(`kid`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Whether a sign with this key could reach two TS12 categories. Never
+     * prompts; ask it before showing the user a transaction.
+     */
+    @Throws(FfiWscdException::class)override fun `authenticationCapability`(`kid`: kotlin.String): FfiFactorCapability {
+            return FfiConverterTypeFfiFactorCapability.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiWscdException) { _status ->
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_authentication_capability(
+        it,
+        
+        FfiConverterString.lower(`kid`),_status)
 }
     }
     )
@@ -1839,10 +1895,12 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `deleteKey`(`kid`: kotlin.String)
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(
-        it, FfiConverterString.lower(`kid`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(
+        it,
+        
+        FfiConverterString.lower(`kid`),_status)
 }
     }
     
@@ -1854,10 +1912,14 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `destroyLifecycle`(`request`: FfiDestroyLifecycleRequest, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiDestructionOutcome {
             return FfiConverterTypeFfiDestructionOutcome.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(
-        it, FfiConverterTypeFfiDestroyLifecycleRequest.lower(`request`),FfiConverterTypeFfiAuthCallback.lower(`auth`),FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(
+        it,
+        
+        FfiConverterTypeFfiDestroyLifecycleRequest.lower(`request`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
 }
     }
     )
@@ -1872,10 +1934,11 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `exportFido2State`(): kotlin.ByteArray {
             return FfiConverterByteArray.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(
-        it, _status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(
+        it,
+        _status)
 }
     }
     )
@@ -1894,10 +1957,12 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `exportPublicKey`(`kid`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_public_key(
-        it, FfiConverterString.lower(`kid`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_public_key(
+        it,
+        
+        FfiConverterString.lower(`kid`),_status)
 }
     }
     )
@@ -1913,10 +1978,11 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `exportSoftkeyContainer`(): kotlin.ByteArray {
             return FfiConverterByteArray.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_softkey_container(
-        it, _status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_softkey_container(
+        it,
+        _status)
 }
     }
     )
@@ -1929,10 +1995,14 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `generateKey`(`algorithm`: FfiAlgorithm, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiGeneratedKey {
             return FfiConverterTypeFfiGeneratedKey.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_generate_key(
-        it, FfiConverterTypeFfiAlgorithm.lower(`algorithm`),FfiConverterTypeFfiAuthCallback.lower(`auth`),FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_generate_key(
+        it,
+        
+        FfiConverterTypeFfiAlgorithm.lower(`algorithm`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
 }
     }
     )
@@ -1945,10 +2015,12 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `importSoftkeyContainer`(`container`: kotlin.ByteArray)
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_import_softkey_container(
-        it, FfiConverterByteArray.lower(`container`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_import_softkey_container(
+        it,
+        
+        FfiConverterByteArray.lower(`container`),_status)
 }
     }
     
@@ -1960,10 +2032,13 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `lifecycleStatus`(`pluginId`: kotlin.String, `contextId`: kotlin.String): FfiLifecycleStatus {
             return FfiConverterTypeFfiLifecycleStatus.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_lifecycle_status(
-        it, FfiConverterString.lower(`pluginId`),FfiConverterString.lower(`contextId`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_lifecycle_status(
+        it,
+        
+        FfiConverterString.lower(`pluginId`),
+        FfiConverterString.lower(`contextId`),_status)
 }
     }
     )
@@ -1976,10 +2051,11 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `listKeys`(): List<FfiKeyInfo> {
             return FfiConverterSequenceTypeFfiKeyInfo.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_list_keys(
-        it, _status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_list_keys(
+        it,
+        _status)
 }
     }
     )
@@ -1995,10 +2071,14 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `migrateKey`(`kid`: kotlin.String, `targetPluginId`: kotlin.String, `auth`: FfiAuthCallback): FfiMigrationResult {
             return FfiConverterTypeFfiMigrationResult.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_migrate_key(
-        it, FfiConverterString.lower(`kid`),FfiConverterString.lower(`targetPluginId`),FfiConverterTypeFfiAuthCallback.lower(`auth`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_migrate_key(
+        it,
+        
+        FfiConverterString.lower(`kid`),
+        FfiConverterString.lower(`targetPluginId`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),_status)
 }
     }
     )
@@ -2015,10 +2095,12 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `registerFido2Plugin`(`transport`: FfiCtap2Transport)
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin(
-        it, FfiConverterTypeFfiCtap2Transport.lower(`transport`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin(
+        it,
+        
+        FfiConverterTypeFfiCtap2Transport.lower(`transport`),_status)
 }
     }
     
@@ -2036,10 +2118,13 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `registerFido2PluginWithState`(`transport`: FfiCtap2Transport, `state`: kotlin.ByteArray)
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin_with_state(
-        it, FfiConverterTypeFfiCtap2Transport.lower(`transport`),FfiConverterByteArray.lower(`state`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_fido2_plugin_with_state(
+        it,
+        
+        FfiConverterTypeFfiCtap2Transport.lower(`transport`),
+        FfiConverterByteArray.lower(`state`),_status)
 }
     }
     
@@ -2051,10 +2136,14 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `registerLifecycle`(`request`: FfiRegisterLifecycleRequest, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiRegistrationOutcome {
             return FfiConverterTypeFfiRegistrationOutcome.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_lifecycle(
-        it, FfiConverterTypeFfiRegisterLifecycleRequest.lower(`request`),FfiConverterTypeFfiAuthCallback.lower(`auth`),FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_lifecycle(
+        it,
+        
+        FfiConverterTypeFfiRegisterLifecycleRequest.lower(`request`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
 }
     }
     )
@@ -2076,10 +2165,13 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `registerR2psPlugin`(`config`: FfiR2psConfig, `transport`: FfiHttpTransport)
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_r2ps_plugin(
-        it, FfiConverterTypeFfiR2psConfig.lower(`config`),FfiConverterTypeFfiHttpTransport.lower(`transport`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_r2ps_plugin(
+        it,
+        
+        FfiConverterTypeFfiR2psConfig.lower(`config`),
+        FfiConverterTypeFfiHttpTransport.lower(`transport`),_status)
 }
     }
     
@@ -2091,10 +2183,11 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `registerSoftkeyPlugin`()
         = 
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_softkey_plugin(
-        it, _status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_register_softkey_plugin(
+        it,
+        _status)
 }
     }
     
@@ -2106,10 +2199,14 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `rotateLifecycle`(`request`: FfiRotateLifecycleRequest, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiRotationOutcome {
             return FfiConverterTypeFfiRotationOutcome.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_rotate_lifecycle(
-        it, FfiConverterTypeFfiRotateLifecycleRequest.lower(`request`),FfiConverterTypeFfiAuthCallback.lower(`auth`),FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_rotate_lifecycle(
+        it,
+        
+        FfiConverterTypeFfiRotateLifecycleRequest.lower(`request`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
 }
     }
     )
@@ -2125,10 +2222,12 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `securityProperties`(`kid`: kotlin.String): FfiSecurityProperties {
             return FfiConverterTypeFfiSecurityProperties.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_security_properties(
-        it, FfiConverterString.lower(`kid`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_security_properties(
+        it,
+        
+        FfiConverterString.lower(`kid`),_status)
 }
     }
     )
@@ -2141,10 +2240,41 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
      */
     @Throws(FfiWscdException::class)override fun `sign`(`kid`: kotlin.String, `data`: kotlin.ByteArray, `algorithm`: FfiAlgorithm, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiSignature {
             return FfiConverterTypeFfiSignature.lift(
-    callWithPointer {
+    callWithHandle {
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign(
-        it, FfiConverterString.lower(`kid`),FfiConverterByteArray.lower(`data`),FfiConverterTypeFfiAlgorithm.lower(`algorithm`),FfiConverterTypeFfiAuthCallback.lower(`auth`),FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign(
+        it,
+        
+        FfiConverterString.lower(`kid`),
+        FfiConverterByteArray.lower(`data`),
+        FfiConverterTypeFfiAlgorithm.lower(`algorithm`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Sign data and report the TS12 authentication factors applied to this
+     * very sign. Additive: `sign` and `security_properties().amr` are
+     * unchanged. See [`FfiSignOptions`] for the fresh-authentication flag.
+     */
+    @Throws(FfiWscdException::class)override fun `signWithFactors`(`kid`: kotlin.String, `data`: kotlin.ByteArray, `algorithm`: FfiAlgorithm, `options`: FfiSignOptions, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiSignOutcome {
+            return FfiConverterTypeFfiSignOutcome.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiWscdException) { _status ->
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_sign_with_factors(
+        it,
+        
+        FfiConverterString.lower(`kid`),
+        FfiConverterByteArray.lower(`data`),
+        FfiConverterTypeFfiAlgorithm.lower(`algorithm`),
+        FfiConverterTypeFfiSignOptions.lower(`options`),
+        FfiConverterTypeFfiAuthCallback.lower(`auth`),
+        FfiConverterTypeFfiProgressCallback.lower(`progress`),_status)
 }
     }
     )
@@ -2154,45 +2284,53 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface {
     
 
     
+
+
     
+    
+    /**
+     * @suppress
+     */
     companion object
     
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeFfiWscdManager: FfiConverter<FfiWscdManager, Pointer> {
-
-    override fun lower(value: FfiWscdManager): Pointer {
-        return value.uniffiClonePointer()
+public object FfiConverterTypeFfiWscdManager: FfiConverter<FfiWscdManager, Long> {
+    override fun lower(value: FfiWscdManager): Long {
+        return value.uniffiCloneHandle()
     }
 
-    override fun lift(value: Pointer): FfiWscdManager {
-        return FfiWscdManager(value)
+    override fun lift(value: Long): FfiWscdManager {
+        return FfiWscdManager(UniffiWithHandle, value)
     }
 
     override fun read(buf: ByteBuffer): FfiWscdManager {
-        // The Rust code always writes pointers as 8 bytes, and will
-        // fail to compile if they don't fit.
-        return lift(Pointer(buf.getLong()))
+        return lift(buf.getLong())
     }
 
     override fun allocationSize(value: FfiWscdManager) = 8UL
 
     override fun write(value: FfiWscdManager, buf: ByteBuffer) {
-        // The Rust code always expects pointers written as 8 bytes,
-        // and will fail to compile if they don't fit.
-        buf.putLong(Pointer.nativeValue(lower(value)))
+        buf.putLong(lower(value))
     }
 }
 
 
 
 data class FfiActivateLifecycleRequest (
-    var `pluginId`: kotlin.String, 
+    var `pluginId`: kotlin.String
+    , 
     var `contextId`: kotlin.String
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2222,9 +2360,15 @@ public object FfiConverterTypeFfiActivateLifecycleRequest: FfiConverterRustBuffe
 
 
 data class FfiActivationOutcome (
-    var `contextId`: kotlin.String, 
+    var `contextId`: kotlin.String
+    , 
     var `state`: FfiLifecycleState
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2254,9 +2398,15 @@ public object FfiConverterTypeFfiActivationOutcome: FfiConverterRustBuffer<FfiAc
 
 
 data class FfiAttestationChain (
-    var `certificates`: List<kotlin.ByteArray>, 
+    var `certificates`: List<kotlin.ByteArray>
+    , 
     var `clientDataHash`: kotlin.ByteArray
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2285,12 +2435,109 @@ public object FfiConverterTypeFfiAttestationChain: FfiConverterRustBuffer<FfiAtt
 
 
 
+/**
+ * One `amr` entry: `{<category>: <method>}`. `method` is a TS12 vocabulary
+ * value such as `key_in_remote_wscd` or `pin_6_or_more_digits`.
+ */
+data class FfiAuthFactor (
+    var `category`: FfiFactorCategory
+    , 
+    var `method`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiAuthFactor: FfiConverterRustBuffer<FfiAuthFactor> {
+    override fun read(buf: ByteBuffer): FfiAuthFactor {
+        return FfiAuthFactor(
+            FfiConverterTypeFfiFactorCategory.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiAuthFactor) = (
+            FfiConverterTypeFfiFactorCategory.allocationSize(value.`category`) +
+            FfiConverterString.allocationSize(value.`method`)
+    )
+
+    override fun write(value: FfiAuthFactor, buf: ByteBuffer) {
+            FfiConverterTypeFfiFactorCategory.write(value.`category`, buf)
+            FfiConverterString.write(value.`method`, buf)
+    }
+}
+
+
+
+/**
+ * The factors applied to ONE sign. When `satisfies_two_categories` is false
+ * the SDK must refuse SCA; `shortfall` says why.
+ */
+data class FfiAuthFactors (
+    var `factors`: List<FfiAuthFactor>
+    , 
+    var `satisfiesTwoCategories`: kotlin.Boolean
+    , 
+    var `shortfall`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiAuthFactors: FfiConverterRustBuffer<FfiAuthFactors> {
+    override fun read(buf: ByteBuffer): FfiAuthFactors {
+        return FfiAuthFactors(
+            FfiConverterSequenceTypeFfiAuthFactor.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiAuthFactors) = (
+            FfiConverterSequenceTypeFfiAuthFactor.allocationSize(value.`factors`) +
+            FfiConverterBoolean.allocationSize(value.`satisfiesTwoCategories`) +
+            FfiConverterOptionalString.allocationSize(value.`shortfall`)
+    )
+
+    override fun write(value: FfiAuthFactors, buf: ByteBuffer) {
+            FfiConverterSequenceTypeFfiAuthFactor.write(value.`factors`, buf)
+            FfiConverterBoolean.write(value.`satisfiesTwoCategories`, buf)
+            FfiConverterOptionalString.write(value.`shortfall`, buf)
+    }
+}
+
+
+
 data class FfiDestroyLifecycleRequest (
-    var `pluginId`: kotlin.String, 
-    var `contextId`: kotlin.String, 
-    var `mode`: FfiDestroyMode, 
+    var `pluginId`: kotlin.String
+    , 
+    var `contextId`: kotlin.String
+    , 
+    var `mode`: FfiDestroyMode
+    , 
     var `reason`: kotlin.String?
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2326,10 +2573,17 @@ public object FfiConverterTypeFfiDestroyLifecycleRequest: FfiConverterRustBuffer
 
 
 data class FfiDestructionOutcome (
-    var `contextId`: kotlin.String, 
-    var `state`: FfiLifecycleState, 
+    var `contextId`: kotlin.String
+    , 
+    var `state`: FfiLifecycleState
+    , 
     var `remotePerformed`: kotlin.Boolean
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2362,9 +2616,15 @@ public object FfiConverterTypeFfiDestructionOutcome: FfiConverterRustBuffer<FfiD
 
 
 data class FfiEcPublicKey (
-    var `x`: kotlin.ByteArray, 
+    var `x`: kotlin.ByteArray
+    , 
     var `y`: kotlin.ByteArray
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2393,10 +2653,67 @@ public object FfiConverterTypeFfiEcPublicKey: FfiConverterRustBuffer<FfiEcPublic
 
 
 
+/**
+ * Side-effect-free pre-consent answer to "can this key's plugin reach two
+ * categories?".
+ */
+data class FfiFactorCapability (
+    var `canReachTwoCategories`: kotlin.Boolean
+    , 
+    /**
+     * True when only `FfiSignOptions.host_verified_factor` can supply the
+     * second category (then `can_reach_two_categories` is false).
+     */
+    var `requiresHostVerifiedFactor`: kotlin.Boolean
+    , 
+    var `reason`: kotlin.String?
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiFactorCapability: FfiConverterRustBuffer<FfiFactorCapability> {
+    override fun read(buf: ByteBuffer): FfiFactorCapability {
+        return FfiFactorCapability(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiFactorCapability) = (
+            FfiConverterBoolean.allocationSize(value.`canReachTwoCategories`) +
+            FfiConverterBoolean.allocationSize(value.`requiresHostVerifiedFactor`) +
+            FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+    override fun write(value: FfiFactorCapability, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`canReachTwoCategories`, buf)
+            FfiConverterBoolean.write(value.`requiresHostVerifiedFactor`, buf)
+            FfiConverterOptionalString.write(value.`reason`, buf)
+    }
+}
+
+
+
 data class FfiGeneratedKey (
-    var `kid`: kotlin.String, 
+    var `kid`: kotlin.String
+    , 
     var `publicKeyJwk`: kotlin.String
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2426,11 +2743,19 @@ public object FfiConverterTypeFfiGeneratedKey: FfiConverterRustBuffer<FfiGenerat
 
 
 data class FfiKeyInfo (
-    var `kid`: kotlin.String, 
-    var `algorithm`: FfiAlgorithm, 
-    var `pluginId`: kotlin.String, 
+    var `kid`: kotlin.String
+    , 
+    var `algorithm`: FfiAlgorithm
+    , 
+    var `pluginId`: kotlin.String
+    , 
     var `createdAt`: kotlin.Long
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2466,12 +2791,21 @@ public object FfiConverterTypeFfiKeyInfo: FfiConverterRustBuffer<FfiKeyInfo> {
 
 
 data class FfiLifecycleStatus (
-    var `contextId`: kotlin.String, 
-    var `pluginId`: kotlin.String, 
-    var `factorKind`: FfiFactorKind, 
-    var `state`: FfiLifecycleState, 
+    var `contextId`: kotlin.String
+    , 
+    var `pluginId`: kotlin.String
+    , 
+    var `factorKind`: FfiFactorKind
+    , 
+    var `state`: FfiLifecycleState
+    , 
     var `updatedAt`: kotlin.Long
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2516,36 +2850,48 @@ data class FfiR2psConfig (
     /**
      * R2PS server URL (e.g. "https://r2ps.example.com/r2ps").
      */
-    var `serverUrl`: kotlin.String, 
+    var `serverUrl`: kotlin.String
+    , 
     /**
      * Client ID registered with the R2PS server.
      */
-    var `clientId`: kotlin.String, 
+    var `clientId`: kotlin.String
+    , 
     /**
      * Context string for service requests.
      */
-    var `context`: kotlin.String, 
+    var `context`: kotlin.String
+    , 
     /**
      * Authentication mode: "opaque" or "webauthn".
      */
-    var `authMode`: kotlin.String, 
+    var `authMode`: kotlin.String
+    , 
     /**
      * Relying Party ID for WebAuthn ceremonies (required when auth_mode = "webauthn").
      */
-    var `rpId`: kotlin.String, 
+    var `rpId`: kotlin.String
+    , 
     /**
      * Allowed credential IDs for WebAuthn (base64url-encoded).
      */
-    var `allowedCredentialIds`: List<kotlin.String>, 
+    var `allowedCredentialIds`: List<kotlin.String>
+    , 
     /**
      * PEM-encoded P-256 client private key for JWS envelope signing.
      */
-    var `clientKeyPem`: kotlin.String, 
+    var `clientKeyPem`: kotlin.String
+    , 
     /**
      * PEM-encoded P-256 server public key for JWE envelope encryption.
      */
     var `serverPublicKeyPem`: kotlin.String
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2593,10 +2939,17 @@ public object FfiConverterTypeFfiR2psConfig: FfiConverterRustBuffer<FfiR2psConfi
 
 
 data class FfiRegisterLifecycleRequest (
-    var `pluginId`: kotlin.String, 
-    var `contextId`: kotlin.String, 
+    var `pluginId`: kotlin.String
+    , 
+    var `contextId`: kotlin.String
+    , 
     var `factorKind`: FfiFactorKind
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2629,9 +2982,15 @@ public object FfiConverterTypeFfiRegisterLifecycleRequest: FfiConverterRustBuffe
 
 
 data class FfiRegistrationOutcome (
-    var `contextId`: kotlin.String, 
+    var `contextId`: kotlin.String
+    , 
     var `state`: FfiLifecycleState
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2661,9 +3020,15 @@ public object FfiConverterTypeFfiRegistrationOutcome: FfiConverterRustBuffer<Ffi
 
 
 data class FfiRotateLifecycleRequest (
-    var `pluginId`: kotlin.String, 
+    var `pluginId`: kotlin.String
+    , 
     var `contextId`: kotlin.String
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2693,9 +3058,15 @@ public object FfiConverterTypeFfiRotateLifecycleRequest: FfiConverterRustBuffer<
 
 
 data class FfiRotationOutcome (
-    var `contextId`: kotlin.String, 
+    var `contextId`: kotlin.String
+    , 
     var `state`: FfiLifecycleState
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2725,11 +3096,19 @@ public object FfiConverterTypeFfiRotationOutcome: FfiConverterRustBuffer<FfiRota
 
 
 data class FfiSecurityProperties (
-    var `keyStorage`: FfiKeyStorageType, 
-    var `userAuthentication`: List<kotlin.String>, 
-    var `certification`: FfiCertificationLevel, 
+    var `keyStorage`: FfiKeyStorageType
+    , 
+    var `userAuthentication`: List<kotlin.String>
+    , 
+    var `certification`: FfiCertificationLevel
+    , 
     var `amr`: List<kotlin.String>
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2764,9 +3143,108 @@ public object FfiConverterTypeFfiSecurityProperties: FfiConverterRustBuffer<FfiS
 
 
 
+/**
+ * Per-sign options. All defaults reproduce a plain `sign`.
+ */
+data class FfiSignOptions (
+    /**
+     * Force a NEW user authentication for this sign (no cached session or
+     * token). Only paths that really perform a fresh PIN/UV in this call
+     * honour it (R2PS OPAQUE, FIDO2 on a raw transport). Any plugin that
+     * cannot guarantee it (softkey, R2PS WebAuthn, a transport that runs
+     * UV itself) fails with `Unsupported` BEFORE signing.
+     */
+    var `requireFreshUserAuthentication`: kotlin.Boolean = false 
+    , 
+    /**
+     * A knowledge/inherence factor the host performed for this sign. Used
+     * only when the plugin observed user verification without learning its
+     * method (R2PS WebAuthn, a UV-performing CTAP2 transport).
+     */
+    var `hostVerifiedFactor`: FfiAuthFactor? = null 
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiSignOptions: FfiConverterRustBuffer<FfiSignOptions> {
+    override fun read(buf: ByteBuffer): FfiSignOptions {
+        return FfiSignOptions(
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalTypeFfiAuthFactor.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiSignOptions) = (
+            FfiConverterBoolean.allocationSize(value.`requireFreshUserAuthentication`) +
+            FfiConverterOptionalTypeFfiAuthFactor.allocationSize(value.`hostVerifiedFactor`)
+    )
+
+    override fun write(value: FfiSignOptions, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`requireFreshUserAuthentication`, buf)
+            FfiConverterOptionalTypeFfiAuthFactor.write(value.`hostVerifiedFactor`, buf)
+    }
+}
+
+
+
+/**
+ * A signature and the factors applied to produce THIS signature.
+ */
+data class FfiSignOutcome (
+    var `signature`: FfiSignature
+    , 
+    var `factors`: FfiAuthFactors
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiSignOutcome: FfiConverterRustBuffer<FfiSignOutcome> {
+    override fun read(buf: ByteBuffer): FfiSignOutcome {
+        return FfiSignOutcome(
+            FfiConverterTypeFfiSignature.read(buf),
+            FfiConverterTypeFfiAuthFactors.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiSignOutcome) = (
+            FfiConverterTypeFfiSignature.allocationSize(value.`signature`) +
+            FfiConverterTypeFfiAuthFactors.allocationSize(value.`factors`)
+    )
+
+    override fun write(value: FfiSignOutcome, buf: ByteBuffer) {
+            FfiConverterTypeFfiSignature.write(value.`signature`, buf)
+            FfiConverterTypeFfiAuthFactors.write(value.`factors`, buf)
+    }
+}
+
+
+
 data class FfiSignature (
     var `data`: kotlin.ByteArray
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2794,7 +3272,12 @@ public object FfiConverterTypeFfiSignature: FfiConverterRustBuffer<FfiSignature>
 
 data class FfiWscdConfig (
     var `defaultPlugin`: kotlin.String
-) {
+    
+){
+    
+
+    
+
     
     companion object
 }
@@ -2831,6 +3314,10 @@ enum class FfiAlgorithm {
      * YubiKey 5.8 alpha firmware.
      */
     BLS12381_G1_SCHNORR;
+
+    
+
+
     companion object
 }
 
@@ -2862,6 +3349,10 @@ enum class FfiAuthMethod {
     NONE,
     OPAQUE,
     WEB_AUTHN;
+
+    
+
+
     companion object
 }
 
@@ -2894,6 +3385,10 @@ enum class FfiCertificationLevel {
     BASELINE,
     SUBSTANTIAL,
     HIGH;
+
+    
+
+
     companion object
 }
 
@@ -2925,6 +3420,10 @@ enum class FfiDestroyMode {
     LOCAL_ONLY,
     REMOTE_REVOKE_IF_SUPPORTED,
     STRICT;
+
+    
+
+
     companion object
 }
 
@@ -2950,12 +3449,54 @@ public object FfiConverterTypeFfiDestroyMode: FfiConverterRustBuffer<FfiDestroyM
 
 
 
+/**
+ * The `amr` entry's key.
+ */
+
+enum class FfiFactorCategory {
+    
+    KNOWLEDGE,
+    POSSESSION,
+    INHERENCE;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiFactorCategory: FfiConverterRustBuffer<FfiFactorCategory> {
+    override fun read(buf: ByteBuffer) = try {
+        FfiFactorCategory.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiFactorCategory) = 4UL
+
+    override fun write(value: FfiFactorCategory, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 
 enum class FfiFactorKind {
     
     OPAQUE,
     WEB_AUTHN,
     RAW_SIGN;
+
+    
+
+
     companion object
 }
 
@@ -2988,6 +3529,10 @@ enum class FfiKeyStorageType {
     HARDWARE,
     REMOTE_HSM,
     TRUSTED_EXECUTION;
+
+    
+
+
     companion object
 }
 
@@ -3021,6 +3566,10 @@ enum class FfiLifecycleState {
     ACTIVE,
     SUSPENDED,
     DESTROYED;
+
+    
+
+
     companion object
 }
 
@@ -3049,17 +3598,30 @@ public object FfiConverterTypeFfiLifecycleState: FfiConverterRustBuffer<FfiLifec
 sealed class FfiMigrationResult {
     
     data class Migrated(
-        val `newKid`: kotlin.String) : FfiMigrationResult() {
+        val `newKid`: kotlin.String) : FfiMigrationResult()
+        
+    {
+        
+
         companion object
     }
     
     data class ReEnrollmentRequired(
-        val `oldKid`: kotlin.String) : FfiMigrationResult() {
+        val `oldKid`: kotlin.String) : FfiMigrationResult()
+        
+    {
+        
+
         companion object
     }
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -3079,7 +3641,7 @@ public object FfiConverterTypeFfiMigrationResult : FfiConverterRustBuffer<FfiMig
         }
     }
 
-    override fun allocationSize(value: FfiMigrationResult) = when(value) {
+    override fun allocationSize(value: FfiMigrationResult): ULong = when(value) {
         is FfiMigrationResult.Migrated -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3119,13 +3681,21 @@ public object FfiConverterTypeFfiMigrationResult : FfiConverterRustBuffer<FfiMig
 sealed class FfiOperationProgress {
     
     data class Started(
-        val `operation`: kotlin.String) : FfiOperationProgress() {
+        val `operation`: kotlin.String) : FfiOperationProgress()
+        
+    {
+        
+
         companion object
     }
     
     data class NetworkRoundTrip(
         val `step`: kotlin.UInt, 
-        val `total`: kotlin.UInt) : FfiOperationProgress() {
+        val `total`: kotlin.UInt) : FfiOperationProgress()
+        
+    {
+        
+
         companion object
     }
     
@@ -3137,6 +3707,11 @@ sealed class FfiOperationProgress {
     
 
     
+
+    
+    
+
+
     companion object
 }
 
@@ -3159,7 +3734,7 @@ public object FfiConverterTypeFfiOperationProgress : FfiConverterRustBuffer<FfiO
         }
     }
 
-    override fun allocationSize(value: FfiOperationProgress) = when(value) {
+    override fun allocationSize(value: FfiOperationProgress): ULong = when(value) {
         is FfiOperationProgress.Started -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3302,6 +3877,9 @@ sealed class FfiWscdException: kotlin.Exception() {
             get() = "msg=${ `msg` }"
     }
     
+
+    
+
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<FfiWscdException> {
         override fun lift(error_buf: RustBuffer.ByValue): FfiWscdException = FfiConverterTypeFfiWscdError.lift(error_buf)
@@ -3477,38 +4055,7 @@ public interface FfiAuthCallback {
     companion object
 }
 
-// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-internal const val IDX_CALLBACK_FREE = 0
-// Callback return codes
-internal const val UNIFFI_CALLBACK_SUCCESS = 0
-internal const val UNIFFI_CALLBACK_ERROR = 1
-internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
 
-/**
- * @suppress
- */
-public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
-    internal val handleMap = UniffiHandleMap<CallbackInterface>()
-
-    internal fun drop(handle: Long) {
-        handleMap.remove(handle)
-    }
-
-    override fun lift(value: Long): CallbackInterface {
-        return handleMap.get(value)
-    }
-
-    override fun read(buf: ByteBuffer) = lift(buf.getLong())
-
-    override fun lower(value: CallbackInterface) = handleMap.insert(value)
-
-    override fun allocationSize(value: CallbackInterface) = 8UL
-
-    override fun write(value: CallbackInterface, buf: ByteBuffer) {
-        buf.putLong(lower(value))
-    }
-}
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceFfiAuthCallback {
@@ -3556,10 +4103,17 @@ internal object uniffiCallbackInterfaceFfiAuthCallback {
         }
     }
 
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeFfiAuthCallback.handleMap.clone(handle)
+        }
+    }
+
     internal var vtable = UniffiVTableCallbackInterfaceFfiAuthCallback.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
         `requestPin`,
         `requestWebauthnAssertion`,
-        uniffiFree,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -3631,9 +4185,16 @@ internal object uniffiCallbackInterfaceFfiCtap2Transport {
         }
     }
 
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeFfiCtap2Transport.handleMap.clone(handle)
+        }
+    }
+
     internal var vtable = UniffiVTableCallbackInterfaceFfiCtap2Transport.UniffiByValue(
-        `ctap2SendCommand`,
         uniffiFree,
+        uniffiClone,
+        `ctap2SendCommand`,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -3695,9 +4256,16 @@ internal object uniffiCallbackInterfaceFfiHttpTransport {
         }
     }
 
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeFfiHttpTransport.handleMap.clone(handle)
+        }
+    }
+
     internal var vtable = UniffiVTableCallbackInterfaceFfiHttpTransport.UniffiByValue(
-        `send`,
         uniffiFree,
+        uniffiClone,
+        `send`,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -3748,9 +4316,16 @@ internal object uniffiCallbackInterfaceFfiProgressCallback {
         }
     }
 
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeFfiProgressCallback.handleMap.clone(handle)
+        }
+    }
+
     internal var vtable = UniffiVTableCallbackInterfaceFfiProgressCallback.UniffiByValue(
-        `onProgress`,
         uniffiFree,
+        uniffiClone,
+        `onProgress`,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -3837,6 +4412,38 @@ public object FfiConverterOptionalTypeFfiAttestationChain: FfiConverterRustBuffe
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeFfiAuthFactor: FfiConverterRustBuffer<FfiAuthFactor?> {
+    override fun read(buf: ByteBuffer): FfiAuthFactor? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeFfiAuthFactor.read(buf)
+    }
+
+    override fun allocationSize(value: FfiAuthFactor?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeFfiAuthFactor.allocationSize(value)
+        }
+    }
+
+    override fun write(value: FfiAuthFactor?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeFfiAuthFactor.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -3893,6 +4500,34 @@ public object FfiConverterSequenceByteArray: FfiConverterRustBuffer<List<kotlin.
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeFfiAuthFactor: FfiConverterRustBuffer<List<FfiAuthFactor>> {
+    override fun read(buf: ByteBuffer): List<FfiAuthFactor> {
+        val len = buf.getInt()
+        return List<FfiAuthFactor>(len) {
+            FfiConverterTypeFfiAuthFactor.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<FfiAuthFactor>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeFfiAuthFactor.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<FfiAuthFactor>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeFfiAuthFactor.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer<List<FfiKeyInfo>> {
     override fun read(buf: ByteBuffer): List<FfiKeyInfo> {
         val len = buf.getInt()
@@ -3922,7 +4557,9 @@ public object FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer<List<Ff
     @Throws(FfiWscdException::class) fun `decodeCoseEc2PublicKey`(`coseBytes`: kotlin.ByteArray): FfiEcPublicKey {
             return FfiConverterTypeFfiEcPublicKey.lift(
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_func_decode_cose_ec2_public_key(
+    UniffiLib.uniffi_siros_wscd_manager_fn_func_decode_cose_ec2_public_key(
+    
+        
         FfiConverterByteArray.lower(`coseBytes`),_status)
 }
     )
@@ -3936,7 +4573,9 @@ public object FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer<List<Ff
     @Throws(FfiWscdException::class) fun `extractPreviewsignSignature`(`authenticatorData`: kotlin.ByteArray): kotlin.ByteArray {
             return FfiConverterByteArray.lift(
     uniffiRustCallWithError(FfiWscdException) { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_func_extract_previewsign_signature(
+    UniffiLib.uniffi_siros_wscd_manager_fn_func_extract_previewsign_signature(
+    
+        
         FfiConverterByteArray.lower(`authenticatorData`),_status)
 }
     )
@@ -3951,7 +4590,8 @@ public object FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer<List<Ff
          */ fun `wscdManagerVersion`(): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_siros_wscd_manager_fn_func_wscd_manager_version(
+    UniffiLib.uniffi_siros_wscd_manager_fn_func_wscd_manager_version(
+    
         _status)
 }
     )

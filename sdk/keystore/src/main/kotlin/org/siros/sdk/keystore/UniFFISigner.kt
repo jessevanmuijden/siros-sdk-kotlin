@@ -128,6 +128,47 @@ class UniFFISigner(
         result.data
     }
 
+    private val factorSigning: FactorSigning by lazy {
+        FactorSigning(
+            object : FactorSigningBackend {
+                override fun capability(kid: String) = ffi.authenticationCapability(kid)
+                override fun pluginIdOf(kid: String): String? =
+                    ffi.listKeys().firstOrNull { it.kid == kid }?.pluginId
+                override fun signWithFactors(
+                    kid: String,
+                    data: ByteArray,
+                    options: uniffi.siros_wscd_manager.FfiSignOptions,
+                    auth: FfiAuthCallback,
+                ) = ffi.signWithFactors(kid, data, FfiAlgorithm.ES256, options, auth, noOpProgress())
+            },
+            authCallbackBridge(),
+            canAskForPin = authProvider != null,
+        )
+    }
+
+    override suspend fun scaAuthenticationCapability(keyId: String): ScaAuthenticationCapability =
+        withContext(Dispatchers.IO) { factorSigning.capability(keyId) }
+
+    override suspend fun beginScaSign(keyId: String): ScaSignSession {
+        // The session may hold a PIN typed ahead of the sign. If the caller is cancelled
+        // after it was acquired on the IO dispatcher, withContext throws and the session
+        // never reaches the caller, so it is closed here rather than left holding the PIN.
+        var acquired: ScaSignSession? = null
+        var handedOver = false
+        try {
+            val session = withContext(Dispatchers.IO) {
+                factorSigning.begin(keyId).also { acquired = it }
+            }
+            handedOver = true
+            return object : ScaSignSession by session {
+                override suspend fun sign(data: ByteArray): ScaSignature =
+                    withContext(Dispatchers.IO) { session.sign(data) }
+            }
+        } finally {
+            if (!handedOver) acquired?.close()
+        }
+    }
+
     override suspend fun listKeys(): List<SignerKeyInfo> = withContext(Dispatchers.IO) {
         ffi.listKeys().map { keyInfo ->
             SignerKeyInfo(

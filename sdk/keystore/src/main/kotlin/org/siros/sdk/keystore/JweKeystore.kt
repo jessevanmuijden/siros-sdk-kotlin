@@ -833,9 +833,17 @@ class JweKeystore(
             .issueTime(Date())
             .claim("nonce", nonce)
             .claim("sd_hash", sdHash)
-        // null for every presentation without transaction_data, which is
-        // therefore unchanged: same claims as before this parameter existed.
-        transaction?.applyTo(kbClaims)
+        // Presentations without transaction_data are unchanged. An SCA one is refused:
+        // this keystore holds software keys in the wallet's own container and performs
+        // no user authentication of its own (the key is not in a WSCD, and nothing is
+        // verified for this sign), so it can establish neither possession of a
+        // hardware-bound key nor a second category (EC TS12 v1.0.1 3.6).
+        if (transaction != null) {
+            throw org.siros.sdk.credentials.TransactionDataError(
+                org.siros.sdk.credentials.TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS,
+                "The software keystore establishes no authentication factor for a signing operation",
+            )
+        }
 
         val kbJwt = SignedJWT(kbHeader, kbClaims.build())
         kbJwt.sign(ECDSASigner(key))

@@ -11,6 +11,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
+import org.siros.sdk.credentials.TransactionDataError
+import org.siros.sdk.credentials.TransactionDataReason
 
 class WscdKeystoreAdapterTest {
 
@@ -588,11 +590,20 @@ class WscdKeystoreAdapterTest {
         hashes = listOf("aGFzaDE"),
         hashAlg = "sha-512",
         responseMode = "dc_api",
-        authenticationFactors = listOf(
-            AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "other"),
-            AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd"),
-        ),
     )
+
+    private val pinFactor = AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "pin_6_or_more_digits")
+    private val keyFactor = AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd")
+
+    /** A session that claims [declared] and whose sign reports [applied]. */
+    private fun session(declared: List<AuthenticationFactor>, applied: List<AuthenticationFactor>, signature: ByteArray = ByteArray(64) { 1 }) =
+        object : ScaSignSession {
+            var closed = false
+            var signs = 0
+            override val declaredFactors = declared
+            override suspend fun sign(data: ByteArray): ScaSignature { signs++; return ScaSignature(signature, applied) }
+            override fun close() { closed = true }
+        }
 
     @Test
     fun signVpToken_nonSca_keepsTheSignersRfc8176Amr_andNothingElse() = runTest {
@@ -609,14 +620,21 @@ class WscdKeystoreAdapterTest {
         assertEquals(listOf("hwk", "pin"), claims["amr"])
     }
 
-    @Test
-    fun signVpToken_sca_carriesTheTs12Claims_andNotTheStaleRfc8176Amr() = runTest {
+    private suspend fun scaAdapter(session: ScaSignSession?): Pair<WscdKeystoreAdapter, Signer> {
         val signer = createMultiKeyMockSigner()
         coEvery { signer.securityProperties(any()) } returns SignerSecurityProperties(
             keyStorage = listOf("hardware"), amr = listOf("hwk", "pin"),
         )
+        if (session != null) coEvery { signer.beginScaSign(any()) } returns session
         val adapter = WscdKeystoreAdapter(signer)
         adapter.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0))
+        return adapter to signer
+    }
+
+    @Test
+    fun signVpToken_sca_claimsTheFactorsTheSignReported_notTheStaleRfc8176Amr() = runTest {
+        val s = session(listOf(keyFactor, pinFactor), listOf(pinFactor, keyFactor))
+        val (adapter, signer) = scaAdapter(s)
 
         val claims = kbClaims(adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding))
 
@@ -626,9 +644,97 @@ class WscdKeystoreAdapterTest {
         )
         assertEquals("sha-512", claims["transaction_data_hashes_alg"])
         assertEquals(
-            listOf(mapOf("knowledge" to "other"), mapOf("possession" to "key_in_remote_wscd")),
+            listOf(mapOf("possession" to "key_in_remote_wscd"), mapOf("knowledge" to "pin_6_or_more_digits")),
             claims["amr"],
         )
-        coVerify { signer.sign("key-b", any()) }
+        assertEquals(1, s.signs)
+        assertTrue("the session is closed so a PIN typed ahead is wiped", s.closed)
+        // The plain sign path is not used for an SCA sign.
+        coVerify(exactly = 0) { signer.sign(any(), any()) }
+    }
+
+    @Test
+    fun signVpToken_sca_isRefused_whenTheSignAppliedDifferentFactorsThanTheClaim() = runTest {
+        val s = session(listOf(keyFactor, pinFactor), listOf(keyFactor, AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "pin_less_than_6_digits")))
+        val (adapter, _) = scaAdapter(s)
+
+        val e = runCatching { adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding) }.exceptionOrNull()
+
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, (e as TransactionDataError).reason)
+        assertTrue(s.closed)
+    }
+
+    @Test
+    fun signVpToken_sca_comparesTheReportWithTheFactorsThatWereSerialised_notWithAGetterRead_afterSigning() = runTest {
+        // A session whose declared list changes once the sign has started: the JWT carries
+        // [key, pin6], and the report [key, face] is what the changed list would now match.
+        val face = AuthenticationFactor(AuthenticationCategory.INHERENCE, "face_device")
+        var current = listOf(keyFactor, pinFactor)
+        val s = object : ScaSignSession {
+            override val declaredFactors get() = current
+            override suspend fun sign(data: ByteArray): ScaSignature {
+                current = listOf(keyFactor, face)
+                return ScaSignature(ByteArray(64), listOf(keyFactor, face))
+            }
+        }
+        val (adapter, _) = scaAdapter(s)
+
+        val e = runCatching { adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding) }.exceptionOrNull()
+
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, (e as TransactionDataError).reason)
+    }
+
+    @Test
+    fun signVpToken_sca_isRefused_whenTheSignAppliedOnlyOneCategory() = runTest {
+        val s = session(listOf(keyFactor, pinFactor), listOf(keyFactor))
+        val (adapter, _) = scaAdapter(s)
+
+        val e = runCatching { adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding) }.exceptionOrNull()
+
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, (e as TransactionDataError).reason)
+    }
+
+    @Test
+    fun signVpToken_sca_isRefused_whenTheSignReportsExtraFactorsBeyondTheClaim() = runTest {
+        val s = session(listOf(keyFactor, pinFactor), listOf(keyFactor, pinFactor, AuthenticationFactor(AuthenticationCategory.INHERENCE, "other")))
+        val (adapter, _) = scaAdapter(s)
+
+        val e = runCatching { adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding) }.exceptionOrNull()
+
+        assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, (e as TransactionDataError).reason)
+    }
+
+    @Test
+    fun signVpToken_sca_withASignerThatReportsNoFactors_isRefused_andNeverSignsPlainly() = runTest {
+        val (adapter, signer) = scaAdapter(null)
+        coEvery { signer.beginScaSign(any()) } throws ScaSignSession.insufficient("no factors")
+
+        val e = runCatching { adapter.signVpToken(fakeSdJwtVc(), null, "n", "aud", "key-b", scaBinding) }.exceptionOrNull()
+
+        assertTrue(e.toString(), e is TransactionDataError)
+        coVerify(exactly = 0) { signer.sign(any(), any()) }
+    }
+
+    @Test
+    fun scaAuthenticationCapability_comesFromTheSignerForTheCredentialsKey() = runTest {
+        val (adapter, signer) = scaAdapter(null)
+        coEvery { signer.scaAuthenticationCapability("key-b") } returns ScaAuthenticationCapability(true)
+
+        assertTrue(adapter.scaAuthenticationCapability(fakeSdJwtVc(), "key-b").canReachTwoCategories)
+    }
+
+    @Test
+    fun scaAuthenticationCapability_failsClosed_whenTheSignerThrows() = runTest {
+        val (adapter, signer) = scaAdapter(null)
+        coEvery { signer.scaAuthenticationCapability(any()) } throws IllegalStateException("boom")
+
+        assertFalse(adapter.scaAuthenticationCapability(fakeSdJwtVc(), "key-b").isPossible)
+    }
+
+    @Test
+    fun scaAuthenticationCapability_failsClosed_forAnUnknownKey() = runTest {
+        val (adapter, _) = scaAdapter(null)
+
+        assertFalse(adapter.scaAuthenticationCapability(fakeSdJwtVc(), "no-such-key").isPossible)
     }
 }

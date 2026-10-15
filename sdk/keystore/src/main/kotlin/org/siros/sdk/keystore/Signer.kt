@@ -23,6 +23,25 @@ interface Signer {
      */
     suspend fun sign(keyId: String, data: ByteArray): ByteArray
 
+    /**
+     * Whether an SCA sign (EC TS12 v1.0.1) with [keyId] could reach two
+     * authentication categories. Never prompts. The default says it cannot: a
+     * signer that does not report authentication factors must not be offered
+     * for SCA.
+     */
+    suspend fun scaAuthenticationCapability(keyId: String): ScaAuthenticationCapability =
+        ScaAuthenticationCapability.cannot("This signer does not report the authentication it applies")
+
+    /**
+     * Starts one SCA sign with [keyId]: a fresh user authentication whose factors
+     * are reported by the signature itself (see [ScaSignSession]). The default refuses.
+     *
+     * @throws org.siros.sdk.credentials.TransactionDataError with
+     *   `INSUFFICIENT_AUTHENTICATION_FACTORS` when two categories cannot be established.
+     */
+    suspend fun beginScaSign(keyId: String): ScaSignSession =
+        throw ScaSignSession.insufficient("This signer does not report the authentication it applies")
+
     /** List all keys managed by this signer. */
     suspend fun listKeys(): List<SignerKeyInfo>
 

@@ -16,11 +16,10 @@ class TransactionBindingTest {
     private val key = AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd")
     private val face = AuthenticationFactor(AuthenticationCategory.INHERENCE, "face_device")
 
-    private fun binding(factors: List<AuthenticationFactor> = listOf(pin, key)) =
-        TransactionBinding(listOf("h1", "h2"), "sha-384", "direct_post.jwt", factors)
+    private fun binding() = TransactionBinding(listOf("h1", "h2"), "sha-384", "direct_post.jwt")
 
-    private fun claims(b: TransactionBinding): Map<String, Any?> =
-        JWTClaimsSet.Builder().also { b.applyTo(it) }.build().claims
+    private fun claims(b: TransactionBinding, factors: List<AuthenticationFactor> = listOf(pin, key)): Map<String, Any?> =
+        JWTClaimsSet.Builder().also { b.applyTo(it, factors) }.build().claims
 
     @Test
     fun `adds exactly the TS12 claims, with a string algorithm and single-key amr objects`() {
@@ -46,11 +45,11 @@ class TransactionBindingTest {
     @Test
     fun `at least two different categories are required`() {
         for (factors in listOf(emptyList(), listOf(pin), listOf(pin, pin), listOf(pin, AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, "pattern")))) {
-            val e = assertThrows(TransactionDataError::class.java) { binding(factors) }
+            val e = assertThrows(TransactionDataError::class.java) { claims(binding(), factors) }
             assertEquals(TransactionDataReason.INSUFFICIENT_AUTHENTICATION_FACTORS, e.reason)
         }
-        binding(listOf(pin, face))
-        binding(listOf(key, face, pin))
+        claims(binding(), listOf(pin, face))
+        claims(binding(), listOf(key, face, pin))
     }
 
     @Test
@@ -75,11 +74,11 @@ class TransactionBindingTest {
 
     @Test
     fun `hashes, algorithm and response mode are required`() {
-        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(emptyList(), "sha-256", "m", listOf(pin, key)) }
-        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf(""), "sha-256", "m", listOf(pin, key)) }
-        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf("h"), "md5", "m", listOf(pin, key)) }
-        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf("h"), "SHA-256", "m", listOf(pin, key)) }
-        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf("h"), "sha-256", " ", listOf(pin, key)) }
+        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(emptyList(), "sha-256", "m") }
+        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf(""), "sha-256", "m") }
+        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf("h"), "md5", "m") }
+        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf("h"), "SHA-256", "m") }
+        assertThrows(IllegalArgumentException::class.java) { TransactionBinding(listOf("h"), "sha-256", " ") }
     }
 
     @Test
@@ -111,16 +110,13 @@ class TransactionBindingTest {
     }
 
     @Test
-    fun `the binding copies its lists, so the caller cannot change what is signed afterwards`() {
+    fun `the binding copies its hashes, so the caller cannot change what is signed afterwards`() {
         val hashes = mutableListOf("h1")
-        val factors = mutableListOf(pin, key)
-        val b = TransactionBinding(hashes, "sha-256", "m", factors)
+        val b = TransactionBinding(hashes, "sha-256", "m")
 
         hashes += "h2"
-        factors.clear()
 
         assertEquals(listOf("h1"), b.hashes)
-        assertEquals(2, b.authenticationFactors.size)
         assertEquals(listOf("h1"), claims(b)["transaction_data_hashes"])
     }
 }
