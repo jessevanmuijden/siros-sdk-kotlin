@@ -2,6 +2,16 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Luodaan nollatietotodistetta…</string>
     <string name="siros_dcapi_zk_proof_detail">Henkilötietoja ei jaeta - vain kryptografinen todiste siitä, että täytät pyynnön vaatimukset.</string>
+    <string name="siros_dcapi_refused_title">Pyyntöä ei suoritettu loppuun</string>
+    <string name="siros_dcapi_refused_ok">OK</string>
+    <string name="siros_dcapi_refused_not_trusted">Lompakkosi ei luota tähän sivustoon, joten mitään ei jaettu.</string>
+    <string name="siros_dcapi_refused_trust_unavailable">Lompakkosi ei voinut juuri nyt tarkistaa, onko sivustoon luottaminen turvallista, joten mitään ei jaettu. Tarkista yhteys ja yritä uudelleen.</string>
+    <string name="siros_dcapi_refused_no_matching_credential">Sinulla ei ole pyyntöä vastaavaa todistetta, joten mitään ei jaettu.</string>
+    <string name="siros_dcapi_refused_selected_unavailable">Valitsemaasi todistetta ei voi käyttää tähän pyyntöön tai sillä ei ole käyttökertoja jäljellä, joten mitään ei jaettu.</string>
+    <string name="siros_dcapi_refused_unsupported_request">Lompakkosi ei voi vastata tämäntyyppiseen pyyntöön, joten mitään ei jaettu.</string>
+    <string name="siros_dcapi_refused_request_not_verified">Pyyntöä ei voitu varmistaa tulevaksi sivustolta, jolla olet, joten mitään ei jaettu.</string>
+    <string name="siros_dcapi_refused_verifier_id_unavailable">Lompakkosi ei voinut selvittää, kuka pyytää, joten mitään ei jaettu.</string>
+    <string name="siros_dcapi_refused_proof_failed">Lompakkosi ei voinut luoda todistetta, joten mitään ei jaettu. Yritä uudelleen.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">Myöntäjää ei voitu todentaa luotetuksi, joten tunnistetietoa ei lisätty.</string>
 </resources>

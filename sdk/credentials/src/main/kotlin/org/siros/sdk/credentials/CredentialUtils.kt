@@ -108,10 +108,12 @@ object CredentialUtils {
         // nests everything under credentialSubject) - each claim must be
         // resolved by walking its own full path, not just matched by its first
         // segment against a top-level key.
+        // Each display claim travels with its ORIGINAL path segments: the dotted display key
+        // cannot be split back into them (a segment may itself contain a dot).
         val vctmResolved = vctmClaims.mapNotNull { claim ->
             if (claim.path.isEmpty()) return@mapNotNull null
             val value = resolveClaimPath(payload, claim.path) ?: return@mapNotNull null
-            DisplayClaim(
+            claim.path to DisplayClaim(
                 key = claim.path.joinToString("."),
                 label = claim.label ?: formatClaimKey(claim.path.last()),
                 value = formatClaimValue(value),
@@ -128,14 +130,19 @@ object CredentialUtils {
         val uncovered = payload.entries
             .filter { it.key !in JWT_SKIP_KEYS && it.key !in coveredTopLevelKeys }
             .map { (key, value) ->
-                DisplayClaim(
+                listOf(key) to DisplayClaim(
                     key = key,
                     label = formatClaimKey(key),
                     value = formatClaimValue(value),
                 )
             }
 
-        return vctmResolved + uncovered
+        // Protected claims (see [CredentialDisclosureGuard]) are never displayed, registered or matched on.
+        val vct = vctOf(credential)
+        return (vctmResolved + uncovered)
+            // Ancestor-aware: an object holding a protected descendant is not displayed either.
+            .filterNot { (path, _) -> CredentialDisclosureGuard.requestsProtected(vct, listOf(path)) }
+            .map { it.second }
     }
 
     /**
@@ -172,7 +179,8 @@ object CredentialUtils {
         if (credential.format.equals("mso_mdoc", ignoreCase = true)) return emptyList()
         val rawPayload = parseJwtPayload(credential.raw) ?: return emptyList()
         val payload = mergeSdJwtDisclosures(credential.raw, rawPayload)
-        return flattenJsonObject(payload, emptyList())
+        val vct = vctOf(credential)
+        return flattenJsonObject(payload, emptyList()).filterNot { (path, _) -> CredentialDisclosureGuard.requestsProtected(vct, listOf(path)) }
     }
 
     private fun flattenJsonObject(obj: JsonObject, prefix: List<String>): List<Pair<List<String>, JsonElement>> {
@@ -217,7 +225,7 @@ object CredentialUtils {
             .associateBy { it.path.joinToString("/") }
 
         return document.issuerSigned.nameSpaces.flatMap { (namespace, items) ->
-            items.map { entry ->
+            items.filterNot { CredentialDisclosureGuard.requestsProtected(document.docType, listOf(listOf(namespace, it.item.elementIdentifier))) }.map { entry ->
                 val elementId = entry.item.elementIdentifier
                 val meta = claimMetaByPath["$namespace/$elementId"]
                 val cborValue = entry.item.elementValue
@@ -783,6 +791,25 @@ object CredentialUtils {
      * reason above - never returns true).
      */
     private fun isZkpFormat(format: String): Boolean = format.equals("mso_mdoc_zk", ignoreCase = true)
+
+    /**
+     * True for the `circuit_zk` DCQL format. Deliberately separate from
+     * [isZkpFormat]: a `circuit_zk` request must never take the legacy
+     * `mso_mdoc_zk` presentation path, which would produce the wrong
+     * presentation.
+     */
+    fun isCircuitZkFormat(format: String?): Boolean = format.equals("zkp_req", ignoreCase = true)
+
+    /**
+     * Whether [cred] is an mdoc of one of [docTypes] - the types served
+     * through `circuit_zk`, which are answered with a proof and so register
+     * no claims in the OS picker blob.
+     */
+    fun isOfDocTypes(cred: StoredCredential, docTypes: Set<String>): Boolean {
+        if (docTypes.isEmpty() || !cred.format.equals("mso_mdoc", ignoreCase = true)) return false
+        val docType = parseMdocDocument(cred)?.docType ?: cred.metadata?.doctype
+        return docType != null && docType in docTypes
+    }
 
     /**
      * Instances from [instances] (all copies of one batch - see

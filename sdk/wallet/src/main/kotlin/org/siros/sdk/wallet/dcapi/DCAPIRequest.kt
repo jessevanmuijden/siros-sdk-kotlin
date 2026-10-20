@@ -68,6 +68,18 @@ data class DCAPIRequest(
     val hasTransactionData: Boolean = false,
     /** The value of the `transaction_data` member when present (not validated here); `null` when absent. */
     val transactionData: kotlinx.serialization.json.JsonElement? = null,
+    /**
+     * `expected_origins` from the verified payload of a signed request
+     * (OpenID4VP 1.0 Appendix A): the non-empty array of origins the
+     * verifier says may call it. `null` when absent or not a non-empty array
+     * of strings; [hasExpectedOrigins] tells those apart. Always `null` for an
+     * unsigned request, whose body is untrusted.
+     */
+    val expectedOrigins: List<String>? = null,
+    /** Whether the signed payload has an `expected_origins` member, whatever its value. */
+    val hasExpectedOrigins: Boolean = false,
+    /** `verifier_info` from the verified payload of a signed request; `null` when absent or unsigned. */
+    val verifierInfo: kotlinx.serialization.json.JsonElement? = null,
 )
 
 /**
@@ -87,7 +99,18 @@ data class DCAPIRequest(
 object DCAPIRequestParser {
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun parse(rawRequestJson: String): DCAPIRequest {
+    fun parse(rawRequestJson: String): DCAPIRequest = parse(rawRequestJson, DCAPIEntryPolicy.FIRST_ENTRY)
+
+    /**
+     * As [parse], but evaluates `requests[]` in order and returns the first
+     * entry [policy] accepts, so a verifier that lists an unsigned entry
+     * before a signed one is still answered with the signed one when the
+     * policy requires it. An entry that is malformed fails the whole request,
+     * as it always has; only a policy rejection moves on to the next entry.
+     *
+     * @throws DCAPIRequestRefused if the entries parse but none is accepted.
+     */
+    fun parse(rawRequestJson: String, policy: DCAPIEntryPolicy): DCAPIRequest {
         val outer = try {
             json.parseToJsonElement(rawRequestJson).jsonObject
         } catch (e: Exception) {
@@ -97,18 +120,29 @@ object DCAPIRequestParser {
         // [GetDigitalCredentialOption.requestJson] is the FULL request handed
         // to navigator.credentials.get({digital: {requests: [{protocol,
         // data}]}}) - {"requests": [{"protocol": ..., "data": {...}}, ...]} -
-        // not a single request's `data` object on its own. The platform
-        // picker only surfaces an entry after matching it against one of our
-        // registered protocols, so the first (and in practice only, since
-        // the caller picks one best protocol before invoking the API) entry
-        // is the one that was selected; its `data` is what the rest of this
-        // parser (signed vs. unsigned) actually operates on.
+        // not a single request's `data` object on its own. The entries are
+        // evaluated in order against [policy]; the default policy accepts the
+        // first one, which is what this parser has always answered (the
+        // platform picker only surfaces an entry it matched against one of
+        // our registered protocols). A wallet that needs a signed request
+        // supplies a policy that skips an unsigned entry listed before one.
         val requestEntries = (outer["requests"] as? JsonArray)
             ?: throw DCAPIRequestException("DC API request missing 'requests' array")
-        val requestEntry = requestEntries.firstOrNull()?.jsonObject
-            ?: throw DCAPIRequestException("DC API request's 'requests' array is empty")
+        if (requestEntries.isEmpty()) throw DCAPIRequestException("DC API request's 'requests' array is empty")
+        var firstRefusedProtocol: String? = null
+        for ((index, entry) in requestEntries.withIndex()) {
+            val request = parseEntry(entry.jsonObject, first = index == 0)
+            if (policy.accepts(request)) return request
+            if (firstRefusedProtocol == null) firstRefusedProtocol = request.protocol
+        }
+        throw DCAPIRequestRefused(firstRefusedProtocol ?: "unknown")
+    }
+
+    private fun parseEntry(requestEntry: JsonObject, first: Boolean): DCAPIRequest {
         val data = requestEntry["data"]?.jsonObject
-            ?: throw DCAPIRequestException("DC API request's first entry is missing 'data'")
+            ?: throw DCAPIRequestException(
+                if (first) "DC API request's first entry is missing 'data'" else "DC API request entry is missing 'data'"
+            )
 
         val requestJwt = data["request"]?.jsonPrimitive?.contentOrNull
         // The platform's own reference wallet echoes this protocol identifier
@@ -186,7 +220,19 @@ object DCAPIRequestParser {
             state = payload["state"]?.jsonPrimitive?.contentOrNull,
             hasTransactionData = payload.containsKey("transaction_data"),
             transactionData = payload["transaction_data"],
+            expectedOrigins = parseExpectedOrigins(payload["expected_origins"]),
+            hasExpectedOrigins = payload.containsKey("expected_origins"),
+            verifierInfo = payload["verifier_info"],
         )
+    }
+
+    /** A non-empty array of strings, else null (absent or malformed). */
+    private fun parseExpectedOrigins(element: kotlinx.serialization.json.JsonElement?): List<String>? {
+        val array = (element as? JsonArray)?.takeIf { it.isNotEmpty() } ?: return null
+        val origins = array.map { item ->
+            (item as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+        }
+        return origins
     }
 
     private fun buildVerifier(publicKey: java.security.PublicKey): JWSVerifier = when (publicKey) {

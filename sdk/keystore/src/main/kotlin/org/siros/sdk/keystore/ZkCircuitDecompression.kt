@@ -13,12 +13,10 @@ import java.nio.ByteBuffer
  * [LongfellowZkProofSystem], whose prover/verifier keys and circuits are
  * both multi-hundred-MB.
  *
- * Sizes the destination to the exact value recorded in the zstd frame's own
- * header (`Zstd.getFrameContentSize`) when present - these artifacts
- * compress at roughly 300-400x, so any fixed multiplier guess is fragile -
- * falling back to [ZkCircuitDescriptor.artifact]'s `uncompressed.size`
- * catalog metadata, and only as a last resort to a generous fixed
- * multiplier.
+ * Sizes the destination to the catalog's published `uncompressed.size`, and
+ * refuses unless the zstd frame header states exactly that size (the header is
+ * attacker-influenced, so it never sizes an allocation on its own) and it is within
+ * [MAX_DECOMPRESSED_BYTES]. There is no guessed fallback.
  *
  * zstd-jni's `Zstd.decompress(ByteBuffer, Int)` requires BOTH its source
  * and destination buffers to already be direct (confirmed via
@@ -34,19 +32,30 @@ import java.nio.ByteBuffer
  * key.
  */
 internal fun decompressZkCircuitArtifact(compressedBytes: ByteArray, descriptor: ZkCircuitDescriptor): ByteBuffer {
-    val frameSize = Zstd.getFrameContentSize(compressedBytes)
-    val outputSize = if (frameSize > 0) {
-        frameSize
-    } else {
-        val uncompressedSize = descriptor.artifact?.uncompressed?.size
-        if (uncompressedSize != null && uncompressedSize > 0) {
-            Timber.w("Circuit '${descriptor.id}' zstd frame has no embedded content size; using catalog metadata")
-            uncompressedSize
-        } else {
-            Timber.w("Circuit '${descriptor.id}' has no known uncompressed size; guessing buffer size")
-            compressedBytes.size.toLong() * 400
-        }
-    }
+    // Everything that sizes the allocation is checked first, and the zstd frame header is untrusted: it must
+    // state a content size, and that size must be the one the catalog published (uncompressed.size) and within
+    // the ceiling. No guessed size, no truncation to Int.
+    val published = checkedDecompressedSize(Zstd.getFrameContentSize(compressedBytes), descriptor)
     val directCompressed = ByteBuffer.allocateDirect(compressedBytes.size).put(compressedBytes).apply { flip() }
-    return Zstd.decompress(directCompressed, outputSize.toInt())
+    val out = Zstd.decompress(directCompressed, published)
+    check(out.remaining() == published) { "Circuit '${descriptor.id}' decompressed to an unexpected length" }
+    return out
 }
+
+/**
+ * The size to allocate for [descriptor]'s artifact given the zstd frame's own claim [frameSize]: the catalog's
+ * published `uncompressed.size`, which must be positive, within [MAX_DECOMPRESSED_BYTES] and equal to [frameSize].
+ */
+internal fun checkedDecompressedSize(frameSize: Long, descriptor: ZkCircuitDescriptor): Int {
+    val published = descriptor.artifact?.uncompressed?.size ?: 0L
+    require(published in 1..MAX_DECOMPRESSED_BYTES) {
+        "Circuit '${descriptor.id}' has no acceptable published uncompressed size ($published)"
+    }
+    require(frameSize == published) {
+        "Circuit '${descriptor.id}' zstd frame states $frameSize bytes, the catalog says $published"
+    }
+    return published.toInt()
+}
+
+/** The most a decompressed circuit artifact may be (about 1.5 times the largest real one, a 136 MB Vega key). */
+internal const val MAX_DECOMPRESSED_BYTES: Long = 200L * 1024 * 1024

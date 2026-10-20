@@ -105,6 +105,27 @@ class ZkProverResidency {
         }
     }
 
+    /**
+     * Drops the resident prover if it belongs to the circuit [circuitId] (a retired one): the key holds the circuit
+     * id as one of its `:`-separated segments (`longfellow-libzk-v1:<id>:<n>`, `vega-mc-p256-v1:<id>`,
+     * `<system>:<id>:<hash>`). Like [release]: at once when idle, else when the proof using it ends.
+     */
+    fun releaseCircuit(circuitId: String) {
+        if (mutex.tryLock()) {
+            try {
+                resident?.takeIf { circuitId in it.key.split(':') }?.let {
+                    Timber.i("Releasing resident ZK prover '${it.key}': its circuit was retired")
+                    destroyQuietly(it)
+                    resident = null
+                }
+            } finally {
+                mutex.unlock()
+            }
+        } else if (resident?.key?.split(':')?.contains(circuitId) == true) {
+            releaseWhenIdle = true
+        }
+    }
+
     private fun destroyQuietly(r: Resident) {
         try {
             r.prover.close()

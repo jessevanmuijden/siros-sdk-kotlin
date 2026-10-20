@@ -7,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
+import okio.buffer
 import org.junit.Test
 import java.security.MessageDigest
 
@@ -27,7 +28,7 @@ class ZkCircuitClientTest {
         }
     """.trimIndent()
 
-    private fun circuitJson(id: String, hash: String = "deadbeef", url: String = "/v1/artifacts/sha256/deadbeef"): String = """
+    private fun circuitJson(id: String, hash: String = "deadbeef", url: String = "/v1/artifacts/sha256/deadbeef", size: Int = 4): String = """
         {
           "id": "$id",
           "system": "longfellow",
@@ -38,7 +39,7 @@ class ZkCircuitClientTest {
           "artifact": {
             "url": "$url",
             "hash": "$hash",
-            "size": 4,
+            "size": $size,
             "compression": "none",
             "mediaType": "application/octet-stream"
           },
@@ -198,7 +199,7 @@ class ZkCircuitClientTest {
                 if (url == "https://zk-circuits.fly.dev/v1/artifacts/sha256/$hash") bytes else null
             },
         )
-        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash"))
+        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash", size = bytes.size))
 
         val downloaded = client.downloadArtifact(circuit)
 
@@ -222,7 +223,7 @@ class ZkCircuitClientTest {
         )
         val circuit = json.decodeFromString(
             ZkCircuitDescriptor.serializer(),
-            circuitJson("longfellow-mdl-v1", hash = "sha256:$hash", url = "/v1/artifacts/sha256/$hash"),
+            circuitJson("longfellow-mdl-v1", hash = "sha256:$hash", url = "/v1/artifacts/sha256/$hash", size = bytes.size),
         )
 
         val downloaded = client.downloadArtifact(circuit)
@@ -243,7 +244,7 @@ class ZkCircuitClientTest {
                 }
             },
         )
-        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash"))
+        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash", size = bytes.size))
 
         val downloaded = client.downloadArtifact(circuit)
 
@@ -303,7 +304,7 @@ class ZkCircuitClientTest {
         )
         val circuit = json.decodeFromString(
                 ZkCircuitDescriptor.serializer(),
-                circuitJson("longfellow-mdl-v1", hash = hash, url = "https://cdn.example.org/blobs/$hash"),
+                circuitJson("longfellow-mdl-v1", hash = hash, url = "https://cdn.example.org/blobs/$hash", size = bytes.size),
             )
 
         val downloaded = client.downloadArtifact(circuit)
@@ -323,7 +324,7 @@ class ZkCircuitClientTest {
                 if (url == "https://zk-circuits.fly.dev/v1/artifacts/sha256/$hash") bytes else null
             },
         )
-        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = ""))
+        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "", size = bytes.size))
 
         val downloaded = client.downloadArtifact(circuit)
 
@@ -332,6 +333,35 @@ class ZkCircuitClientTest {
     }
 
     // ── on-device cache ──────────────────────────────────────────────
+
+    @Test
+    fun `a stale alias copy that cannot be removed is logged, not ignored and not fatal`() {
+        val dir = tempCacheDir()
+        val descriptor = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1")).copy(aliases = listOf("old-alias"))
+        // A non-empty directory where the alias copy should be: File.delete() fails on it.
+        val stuck = java.io.File(java.io.File(dir, "descriptors"), "old-alias.json")
+        java.io.File(stuck, "child").apply { parentFile.mkdirs(); writeText("x") }
+        val lines = mutableListOf<String>()
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) { lines += message }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            ZkCircuitClient(cacheDir = dir).cacheDescriptor(descriptor)
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+        assertTrue(lines.toString(), lines.any { it.contains("could not remove old-alias.json") })
+        // An alias copy that is simply absent logs nothing.
+        lines.clear()
+        timber.log.Timber.plant(tree)
+        try {
+            ZkCircuitClient(cacheDir = tempCacheDir()).cacheDescriptor(descriptor)
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+        assertTrue(lines.toString(), lines.none { it.contains("could not remove") })
+    }
 
     private fun tempCacheDir(): java.io.File =
         java.nio.file.Files.createTempDirectory("zk-circuit-cache").toFile().also { it.deleteOnExit() }
@@ -346,7 +376,7 @@ class ZkCircuitClientTest {
             httpGetBytes = { url -> fetches++; if (url.endsWith("/$hash")) bytes else null },
             cacheDir = dir,
         )
-        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = "sha256:$hash", url = "/v1/artifacts/sha256/$hash"))
+        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = "sha256:$hash", url = "/v1/artifacts/sha256/$hash", size = bytes.size))
         assertTrue(!client.isArtifactCached(circuit))
 
         assertTrue(bytes.contentEquals(client.downloadArtifact(circuit)))
@@ -368,7 +398,7 @@ class ZkCircuitClientTest {
         java.io.File(java.io.File(dir, "artifacts"), hash).apply { parentFile.mkdirs(); writeBytes("tampered".toByteArray()) }
         var fetches = 0
         val client = ZkCircuitClient(httpGetBytes = { fetches++; bytes }, cacheDir = dir)
-        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash"))
+        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash", size = bytes.size))
 
         assertTrue(bytes.contentEquals(client.downloadArtifact(circuit)))
         assertEquals(1, fetches)
@@ -396,7 +426,8 @@ class ZkCircuitClientTest {
             cacheDir = dir,
         )
         assertEquals("deprecated", updated.fetchCircuit("longfellow-mdl-v1")?.status)
-        assertEquals("deprecated", offline.fetchCircuit("longfellow-mdl-v1")?.status)
+        // A circuit seen retired is not kept: an offline wallet no longer finds it to prove with.
+        assertNull(offline.fetchCircuit("longfellow-mdl-v1"))
     }
 
     @Test
@@ -405,10 +436,140 @@ class ZkCircuitClientTest {
         val hash = sha256Hex(bytes)
         var fetches = 0
         val client = ZkCircuitClient(httpGetBytes = { fetches++; bytes })
-        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash"))
+        val circuit = json.decodeFromString(ZkCircuitDescriptor.serializer(), circuitJson("longfellow-mdl-v1", hash = hash, url = "/v1/artifacts/sha256/$hash", size = bytes.size))
         client.downloadArtifact(circuit)
         client.downloadArtifact(circuit)
         assertEquals(2, fetches)
         assertTrue(!client.isArtifactCached(circuit))
+    }
+
+    // ── CIRCUIT-3: sizes are bounded and enforced ─────────────────────
+
+    private fun descriptorFor(bytes: ByteArray, declared: Int) = json.decodeFromString(
+        ZkCircuitDescriptor.serializer(),
+        sha256Hex(bytes).let { circuitJson("longfellow-mdl-v1", hash = it, url = "/v1/artifacts/sha256/$it", size = declared) },
+    )
+
+    private suspend fun assertArtifactRefused(client: ZkCircuitClient, d: ZkCircuitDescriptor) {
+        try {
+            client.downloadArtifact(d)
+            fail("expected the artifact to be refused")
+        } catch (e: ZkArtifactException) {
+            // expected
+        }
+    }
+
+    @Test
+    fun `an artifact whose declared size is missing, over the ceiling or not the served length is refused`() = runTest {
+        val bytes = "circuit-bytes".toByteArray()
+        var fetches = 0
+        val client = ZkCircuitClient(httpGetBytes = { fetches++; bytes }, maxArtifactBytes = 1000)
+        assertArtifactRefused(client, descriptorFor(bytes, declared = 0))
+        assertArtifactRefused(client, descriptorFor(bytes, declared = 1001))
+        assertEquals("refused before any fetch", 0, fetches)
+        // The hash matches, but the catalog's size claim is wrong.
+        assertArtifactRefused(client, descriptorFor(bytes, declared = bytes.size + 1))
+        assertArtifactRefused(client, descriptorFor(bytes, declared = bytes.size - 1))
+        assertTrue(bytes.contentEquals(client.downloadArtifact(descriptorFor(bytes, declared = bytes.size))))
+    }
+
+    @Test
+    fun `a cached artifact of the wrong length is not trusted`() = runTest {
+        val bytes = "circuit-bytes".toByteArray()
+        val dir = tempCacheDir()
+        val d = descriptorFor(bytes, declared = bytes.size)
+        val client = ZkCircuitClient(httpGetBytes = { bytes }, cacheDir = dir)
+        client.downloadArtifact(d)
+        val offline = ZkCircuitClient(httpGetBytes = { null }, cacheDir = dir)
+        assertTrue(bytes.contentEquals(offline.downloadArtifact(descriptorFor(bytes, declared = bytes.size))))
+        assertArtifactRefused(offline, descriptorFor(bytes, declared = bytes.size + 1))
+    }
+
+    @Test
+    fun `an oversized or crashing catalog body is a failed fetch, not an exception or an allocation`() = runTest {
+        val big = circuitJson("longfellow-mdl-v1") + " ".repeat(200)
+        val capped = ZkCircuitClient(httpGet = { big }, maxDescriptorBytes = 100)
+        assertNull(capped.fetchCircuit("longfellow-mdl-v1"))
+        assertNull(capped.fetchManifest())
+        val ok = ZkCircuitClient(httpGet = { big }, maxDescriptorBytes = 100000)
+        assertEquals("longfellow-mdl-v1", ok.fetchCircuit("longfellow-mdl-v1")?.id)
+        // An OutOfMemoryError (or any Throwable) from a fetch is contained.
+        assertNull(ZkCircuitClient(httpGet = { throw OutOfMemoryError("hostile body") }).fetchCircuit("x"))
+        val bytes = "circuit-bytes".toByteArray()
+        assertArtifactRefused(ZkCircuitClient(httpGetBytes = { throw OutOfMemoryError("hostile body") }), descriptorFor(bytes, bytes.size))
+    }
+
+    private fun clientServing(body: ByteArray, contentLength: Long = -1, limitDescriptor: Int = 1000, limitArtifact: Long = 1000): ZkCircuitClient {
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val source = okio.Buffer().write(body)
+            val responseBody = object : okhttp3.ResponseBody() {
+                override fun contentType() = null
+                override fun contentLength() = contentLength
+                override fun source(): okio.BufferedSource = source
+            }
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1)
+                .code(200).message("OK").body(responseBody).build()
+        }.build()
+        return ZkCircuitClient(httpClient = http, maxDescriptorBytes = limitDescriptor, maxArtifactBytes = limitArtifact)
+    }
+
+    @Test
+    fun `the real http path never reads past the limit, whether or not the server says how long the body is`() = runTest {
+        val descriptorBody = circuitJson("longfellow-mdl-v1").toByteArray()
+        val tight = descriptorBody.size - 1
+        assertNull(clientServing(descriptorBody, limitDescriptor = tight).fetchCircuit("longfellow-mdl-v1"))
+        assertNull(clientServing(descriptorBody, contentLength = descriptorBody.size.toLong(), limitDescriptor = tight).fetchCircuit("longfellow-mdl-v1"))
+        assertEquals("longfellow-mdl-v1", clientServing(descriptorBody, limitDescriptor = descriptorBody.size).fetchCircuit("longfellow-mdl-v1")?.id)
+
+        // An artifact longer than the size the catalog declared is cut off at that size and refused.
+        val artifact = ByteArray(500) { it.toByte() }
+        val d = descriptorFor(artifact, declared = 100)
+        assertArtifactRefused(clientServing(artifact), d)
+        assertTrue(artifact.contentEquals(clientServing(artifact).downloadArtifact(descriptorFor(artifact, declared = artifact.size))))
+    }
+
+    /** A body of [total] zero bytes that counts what is actually pulled from it. */
+    private class CountingBody(val total: Long, val declared: Long) {
+        var pulled = 0L
+        val source: okio.BufferedSource = run {
+            object : okio.Source {
+                override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                    if (pulled >= total) return -1
+                    val n = minOf(byteCount, total - pulled, 8192)
+                    sink.write(ByteArray(n.toInt()))
+                    pulled += n
+                    return n
+                }
+                override fun timeout() = okio.Timeout.NONE
+                override fun close() {}
+            }.buffer()
+        }
+    }
+
+    private fun clientOver(body: CountingBody, limitDescriptor: Int = 1000, limitArtifact: Long = 1000): ZkCircuitClient {
+        val http = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            val rb = object : okhttp3.ResponseBody() {
+                override fun contentType() = null
+                override fun contentLength() = body.declared
+                override fun source() = body.source
+            }
+            okhttp3.Response.Builder().request(chain.request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK").body(rb).build()
+        }.build()
+        return ZkCircuitClient(httpClient = http, maxDescriptorBytes = limitDescriptor, maxArtifactBytes = limitArtifact)
+    }
+
+    @Test
+    fun `an enormous body is never pulled past the limit, with or without a declared length`() = runTest {
+        val unknown = CountingBody(total = 500_000_000L, declared = -1)
+        assertNull(clientOver(unknown).fetchCircuit("x"))
+        assertTrue("pulled ${unknown.pulled}", unknown.pulled <= 1000 + 2 * 8192)
+
+        val declared = CountingBody(total = 500_000_000L, declared = 500_000_000L)
+        assertNull(clientOver(declared).fetchCircuit("x"))
+        assertEquals("a declared length over the limit reads nothing", 0L, declared.pulled)
+
+        val artifact = CountingBody(total = 500_000_000L, declared = -1)
+        assertArtifactRefused(clientOver(artifact), descriptorFor(ByteArray(10), declared = 10))
+        assertTrue("pulled ${artifact.pulled}", artifact.pulled <= 10 + 2 * 8192)
     }
 }

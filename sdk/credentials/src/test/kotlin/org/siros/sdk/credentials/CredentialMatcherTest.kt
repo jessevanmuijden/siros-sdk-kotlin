@@ -2,6 +2,7 @@ package org.siros.sdk.credentials
 
 import com.upokecenter.cbor.CBORObject
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -763,7 +764,7 @@ class CredentialMatcherTest {
         val query = json.parseToJsonElement(
             """{"credentials":[
                  {"id":"pid","format":"dc+sd-jwt","meta":{"vct_values":["urn:eu.europa.ec.eudi:pid:1"]}},
-                 {"id":"mdl","format":"mso_mdoc","meta":{"doctype_value":"org.iso.18013.5.1.mDL"}}
+                 {"id":"mdl","format":"mso_mdoc","meta":{"source_format":"mso_mdoc","doctype_value":"org.iso.18013.5.1.mDL"}}
                ]}"""
         ).jsonObject
 
@@ -812,5 +813,39 @@ class CredentialMatcherTest {
                 json.parseToJsonElement("""{"nonsense":true}""").jsonObject
             ).isEmpty()
         )
+    }
+
+    private fun pid() = listOf(
+        StoredCredential(id = 1L, format = "dc+sd-jwt", raw = "raw-1", metadata = CredentialMetadata(vct = "urn:eu:pid:1"), batchId = 1L, instanceId = 0),
+    )
+
+    private fun candidates(query: String) =
+        CredentialMatcher.match(json.parseToJsonElement(query).jsonObject, pid()).flatMap { it.candidates }.map { it.id }
+
+    /**
+     * Matcher 0.7.0 rejects a request repeating a credential query id or a claim id. The engine's
+     * rejection must not fall back to the built-in matcher, which answers it: a reference to the
+     * repeated id would resolve to whichever came first.
+     */
+    @Test
+    fun a_repeated_credential_query_id_offers_nothing() {
+        val ok = """{"credentials":[{"id":"a","format":"dc+sd-jwt","meta":{"vct_values":["urn:eu:pid:1"]}}]}"""
+        assertEquals(listOf(1L), candidates(ok))
+        val repeated = """{"credentials":[
+            {"id":"a","format":"dc+sd-jwt","meta":{"vct_values":["urn:eu:pid:1"]}},
+            {"id":"a","format":"dc+sd-jwt","meta":{"vct_values":["urn:eu:pid:1"]}}]}"""
+        assertTrue(candidates(repeated).isEmpty())
+    }
+
+    @Test
+    fun a_repeated_claim_id_offers_nothing() {
+        val repeated = """{"credentials":[{"id":"a","format":"dc+sd-jwt","meta":{"vct_values":["urn:eu:pid:1"]},
+            "claims":[{"id":"c","path":["x"]},{"id":"c","path":["y"]}]}]}"""
+        assertTrue(candidates(repeated).isEmpty())
+        // Claim ids repeated across DIFFERENT queries are not a repeat.
+        val acrossQueries = """{"credentials":[
+            {"id":"a","claims":[{"id":"c","path":["x"]}]},
+            {"id":"b","claims":[{"id":"c","path":["x"]}]}]}"""
+        assertTrue(!CredentialMatcher.hasDuplicateDcqlIds(json.parseToJsonElement(acrossQueries).jsonObject["credentials"]!!.jsonArray))
     }
 }

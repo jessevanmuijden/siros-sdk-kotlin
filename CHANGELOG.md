@@ -8,6 +8,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`CatalogCircuitZkProver`: the real `circuit_zk` prover, and the wallet's
+  default.** `WalletConfig.circuitZkProver = null` now means the catalog prover
+  (it was "refuse every request"); `FakeCircuitZkProver` stays an explicit
+  opt-in (`WalletPolicyOptions.fakeProver`) for tests and development. The
+  prover fetches the chosen circuit's catalog descriptor (it must be published,
+  `active` and not deprecated) and dispatches to the `CircuitZkSystemAdapter`
+  registered for its (`system`, `systemVersion`) in a `CircuitZkSystemRegistry`;
+  a system or version nobody claims is refused, never routed to a default or to
+  the fake. Two adapters ship. `NymAuthCircuitZkAdapter`: the `nymauth-*` mdoc
+  circuits (`pseudonym-v1-sha256` with `known-offender-matching-ssc`, `age_check`);
+  everything that can be done in Kotlin is real (descriptor checks, hash-verified
+  and decompressed-hash-verified artifact, residency, device-key signing of the
+  challenge through `ZkWitnessSigner`, issuer key, T/E/C, verifier input,
+  pseudonym cross-check against `NymPseudonym`), and the witness construction
+  and proof run behind one seam, `NymAuthNativeProver`
+  (`WalletConfig.circuitZkNativeProver`): until a native binding implements it
+  this adapter refuses. `LegacyZkCircuitZkAdapter`: Longfellow (`longfellow`
+  6-8) and Vega-mc (`vega-mc` 12) through the existing `ZkMdocPresentation`, so
+  the real proof systems, their shared `ZkProverResidency` and `VegaProofCache`.
+- **Catalog refresh: a retired circuit is expunged as soon as the SDK sees it.**
+  `ZkCircuitCatalogRefresher` (started by the wallet while `circuit_zk` is on: at
+  start, every six hours and when a network becomes available; background,
+  fail-soft, no UI) fetches the manifest and makes the cache match it. A circuit
+  the manifest does not list as published, `active` and not deprecated, or no
+  longer lists at all (a complete manifest, `next` absent), loses its cached
+  descriptor and its cached artifact (unless an active circuit uses the same
+  artifact hash) and its resident prover memory (`ZkProverResidency.releaseCircuit`,
+  Vega's proof cache). A partial page (`next` set) retires only what it lists as
+  not active. A cached descriptor of an active circuit is replaced by the
+  manifest's. A proving-path fetch that sees a retired descriptor expunges it
+  too. Offline (no manifest) nothing changes: cached circuits stay usable until a
+  refresh reaches the catalog, with no age limit. Also: artifacts are fetched
+  against the catalog's declared size (absent or over the ceiling is refused),
+  catalog bodies and artifacts are read with a hard limit, the zstd frame's size
+  must equal the catalog's `uncompressed.size`, and an `OutOfMemoryError` or a
+  missing native library in a prover is a refusal, not a crash. The proof time is
+  the device clock and is not bounded by the wallet (the verifier enforces its
+  tolerance on `proof_time`); a sanity window or trusted time is deferred. An empty
+  `verifier_id` is refused, and the derived `private_seed` is zeroed after a
+  presentation.
+- **The nymauth native seam's errors are typed.** `NymAuthNativeException`
+  (`NymAuthNativeErrorKind`, a coarse `NymAuthRefusal`, no message of the binding) is a
+  superset of the Vega (`InvalidInput`, `InvalidShapes`, `UnknownCircuit`, `Refused{code}`,
+  `ProverFailed`, `ProofInvalid`, `Mismatch`, `Internal`) and Longfellow (`InvalidInput`,
+  `Circuit`, `UnsupportedCircuit`, `Credential`, `Unsatisfied`, `Prover`, `Verification`)
+  error types (`NymAuthNativeException.vega(..)` / `.longfellow(..)`). The adapter refuses on
+  each, with an internal reason and a log line that names only the kind and the circuit id; the
+  verifier still gets the bare `access_denied`. `UnknownCircuit` / `UnsupportedCircuit` mean "this
+  app version does not support this circuit build": a distinct reason
+  (`CIRCUIT_UNSUPPORTED_BY_APP`), the resident circuit is dropped, and
+  `NymAuthCircuitZkAdapter.onUnsupportedCircuit` / `unsupportedCircuits` let a wallet say "update the app".
+- **The nymauth native prover is real: `UniffiNymAuthNativeProver`.** It drives the UniFFI bindings of `zk-cred-vega`
+  (`nymauthVegaLoadKeys` then `nymauthVegaProve`; system `vega-nymauth`) and `zk-cred-longfellow`
+  (`nymauthInitializeProver` then `nymauthProve`; system `longfellow-nymauth`, params `block_enc_hash`, `block_enc_sig`,
+  `hash_circuit_id`, `sig_circuit_id` from the catalog descriptor), keeps ONE built circuit resident (keyed by system,
+  circuit id and artifact hash; dropped on memory pressure, on a retired circuit, or when another circuit is loaded), and
+  cross-checks the binding's own challenge-digest derivation against the digest the device key signed. It is the default
+  for `WalletConfig.circuitZkNativeProver = null`; a build whose libraries lack the nymauth entry points refuses instead of
+  crashing. A `CatalogCircuitZkCircuitSource` keeps the `circuit_zk` circuit table in step with the catalog, and the sample
+  app uses it (and the real prover) unless the request policy's fake-prover switch is on. The libraries are PR builds until
+  released: pins, versions (`zk-cred-vega` 0.0.6, `zk-cred-longfellow` 0.1.2), the vendored bindings and the local
+  override (`-PsirosNativeRepo=<dir>`, `tools/build-native-aars.sh`) are in docs/NATIVE_DEV.md.
+- **`sign_client_auth`: a DPoP proof that was asked for and could not be made is no longer answered with a bare key id.**
+  `buildClientAuth` named the key first and then logged and swallowed any exception from `generateDPoPProof`, so the engine
+  saw a key id with no proof and failed the token exchange with the misleading "client returned no DPoP proof". Now, when
+  `htm`/`htu` are set and no proof results, the reply carries no key id (the engine then falls back to its own key or
+  reports a real reason) and a warn line names the reason (`keystore_locked`, or the exception class and a short message):
+  `sign_client_auth for flow <id>: a DPoP proof was asked for ... (reason=...); answering WITHOUT a key id`. The DPoP key
+  is, and stays, the instance key of the default keystore (the WIA's `cnf` key), not the keystore resolved for
+  credential key proofs.
+- **New permission: `android.permission.ACCESS_NETWORK_STATE`** (normal, install-time), declared in `sdk/wallet`'s manifest and merged
+  into the host: the circuit catalog refresh also runs when a network becomes available.
+- **The nymauth adapter runs the validator's rule set (CIRCUIT-6).** The adapter refuses every plan the wallet's
+  `RulebookCircuitZkValidator` refuses (restricted to `known-offender-matching-ssc`: an age span under 365 days, `le`
+  before `ge`, a `verifier_context`, the reserved meta members, ...) on top of its own shape checks; a vector-driven
+  test over `spec/circuit-zk-validator-vectors.json` asserts both directions for every plan the circuit could prove.
+  The validator and its vectors are unchanged.
+- **`private_seed` is per issuer (privatedata-spec 2.7, label `org.siros.private_seed/v2`).**
+  `private_seed = HKDF-SHA256(mainKey, salt = "", info = label || lp(credentialType) || lp(issuer))[:16]`,
+  `psc = SHA-256(private_seed)`, `lp(x)` = 2-byte big-endian length then the UTF-8 bytes; an empty field or one over
+  65535 bytes is refused (no seed). The issuer is the Credential Issuer Identifier exactly as the credential stores
+  it (`credentialIssuerIdentifier`, no normalisation: a trailing slash is another psc), so different issuers see
+  different psc values for one person. `HolderWitnessSource.privateSeedCommitment(credentialType, issuer)`,
+  `CircuitZkWitnessProvider.witness/privateSeedMatches` and `CircuitZkFunctionHandler.commitmentCheck` take the
+  issuer, `CircuitZkPresenter.Request.issuer` carries it (null refuses a function that needs the device seed) and
+  `handleCircuitZkDcApi` passes the stored identifier. The spec's `derived-secrets.json` is vendored verbatim
+  (privatedata-spec `1b796d2`): all 11 vectors, the 4 refused inputs and the 5 must-differ pairs reproduce. The
+  v1 label was never released; `spec/private-seed-vectors.*` and its generator are removed.
+- **PROPOSAL: `zk-claim-disclosure-v1`, a `circuit_zk` function for the legacy
+  proof systems** (`CircuitZkLegacyDisclosure`; the id is one constant, the
+  rulebook owners decide the name). Params `claims`, `systems` (the verifier's
+  `zk_system_type` specs), optional `pseudonym` (+ `verifier_context`). Result:
+  `true`, or the proof system's legacy 32-byte pseudonym (not the rulebook's;
+  a system that returns none is refused). `proof` is the ZK `DeviceResponse`
+  the `mso_mdoc_zk` path builds. `age_check` and `pseudonym-v1-sha256` stay
+  nymauth-only. The default validator accepts it
+  (`CircuitZkRuleSet.withFunction`); `SirosWallet.circuitZkCircuitsOf(manifest)`
+  builds a circuit table in which legacy catalog entries are offered for it.
 - **Issuance start is visible at once.** `startIssuance` and
   `startIssuanceByOffer` now publish `WalletState.FlowActive` synchronously,
   before any network work, with `flowType = "issuance"`, a placeholder
@@ -27,6 +125,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-cancelled start is no longer reported as an error.
 
 ### Fixed
+- **SD-JWT `ssc` reader (`SecretSeedCommitment.sscOfSdJwt`) fails closed on a non-`sha-256` `_sd_alg`
+  and ignores a nested same-named claim.** Only an `ssc` disclosure whose digest is in the payload's
+  top-level `_sd` counts; a disclosure of a same-named claim of a nested object no longer makes the
+  top-level one ambiguous.
 - **mdoc issuer trust evaluation no longer 502s and silently downgrades to
   local VICAL validation.** The `mdoc-issuer-auth` AuthZEN request named the
   issuer URL as `subject.id` but the certificate hash as `resource.id`; go-trust
@@ -41,6 +143,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downgrading.
 
 ### Changed
+- **BREAKING (unreleased): rulebook v0.4, `circuit_zk` is `zkp_req`.** Names (the matcher's, siros-dc-matcher pull request 50,
+  head `69e6be1`, `spec/zkp-req-vectors`): format `zkp_req`, `req` is `_req`, item `id` is `fn_id`, `pseudonym-v1-sha256` is
+  `pseudonym` with `config`, `ver` (1) and `prf` (`sha-256`; `hashdh-bls12381g1` for the held `bbs_cd`), `circuit_id` is
+  `system_id`, `circuit_id_values` / `circuit_proof_system_values` are `system_id_values` / `proof_system_values`
+  (`proof_system_values` is optional, `system_id_values` is not: a request that offered no `system_id` cannot be answered and
+  is refused before anything is proved), the plan's `circuit_filter` is `system_filter`, `meta.source_format` is required
+  (`mso_mdoc`; a request for another source format is not answered with an mdoc), `verifier_id_type` is gone. The planner is
+  `zkp_req_plan`, the registration `addZkpReqSystem` with the circuit's `system_id`; a blob built by an older matcher declines
+  `zkp_req`, so the bundled matcher and the registered blob move together (`org.siros:siros-dc-matcher:0.11.0`). The wallet's satisfiability
+  rules (`CircuitZkRuleSet.rulebookV04`) use the matcher's codes as rule ids and pass all 43 `zkp_req_unsat` vectors.
+- **BREAKING (unreleased): the response is the rulebook's base64url CBOR `ZkpPresentation`.** `vp_token[queryId]` is an array of
+  strings, each the unpadded base64url of `{system_id, proof, issuer_key_set, ? proof_time, results}`
+  (`CircuitZkResponsePresentation`; `CircuitZkPresenter.Result.presentation` / `.json`; `base64Url` is gone, and the earlier
+  CBOR/JSON presentation classes with `circuit_id`/`x5chain` are removed). `issuer_key_set` is the credential's own
+  `issuerAuth` `x5chain` (DER, leaf first, at most 8 certificates of at most 4096 bytes each, checked before any proof is
+  made; the verifier validates them through go-trust and takes the issuer key from the leaf). `proof_time` (tag 0) is the
+  EXACT 20-byte form `YYYY-MM-DDThh:mm:ssZ` and required for `mso_mdoc`: the prover's own time input when it has one, else the
+  device clock, rendered by the one function `ProofTime.render`. A pseudonym is 32 bytes for `sha-256`, a predicate result is
+  `true`; no item type is skipped. `CircuitZkResponseValidator` (strict CBOR: definite lengths, no duplicate keys, no trailing
+  bytes, depth 16) mirrors the matcher's `validate_response` and checks every response before it is sent; the 143 response
+  vectors, the `proof_time` vectors and the 54 planner vectors (device test) are vendored verbatim with their set digest checked.
+  A legacy `zk-claim-disclosure-v1` plan has no result shape and cannot be answered over this shape.
+- **Prefixed `verifier_id`:** `verifier_input = SHA-256(verifier_id)` with the PREFIXED string (`x509_san_dns:<dns name>`,
+  `semantic_id:...`). The bare DNS name is not a `verifier_id`. The pseudonym vectors now carry the prefixed forms and the
+  circuit developers' reference pseudonyms (`155f4337...aad1` for `x509_san_dns:verifier.example`).
+- **`birth_date` of a nym_auth attestation is never disclosed:** the default non-disclosure policy protects `ssc`, `psc`,
+  `secret_seed` and `birth_date` of `eu.europa.ec.eudi.nym_auth.1` and `.bbs.1`; a query with no `claims` (the whole
+  attestation) does not match them. `birth_date` of any other credential is an ordinary claim. `age_check` still reads it locally.
+- **Redirect (OpenID4VP QR) handover for `zkp_req`:** `MdocDeviceResponseBuilder.buildCircuitZkRedirectSessionTranscript`
+  (OpenID4VPHandover over `[prefixed client_id, nonce, JWK thumbprint (32 bytes, required), response_uri]`; the response
+  is always encrypted, so a null thumbprint is not representable). Pinned by the spec's own example from the shared
+  nymauth challenge vectors. The DC API path keeps `OpenID4VPDCAPIHandover`.
+- **A `circuit_zk` circuit that declares no `functions` and no `capabilities`
+  now fits no plan** (`CircuitZkCircuit.supports`; it used to fit every plan).
+  `CircuitZkCircuitSource.fromManifest` takes an optional `declare` for entries a
+  registered prover adapter claims, and `CircuitZkCircuit` gains `systemVersion`.
+  `CircuitZkProver` gains `admits(circuit, plan)`, which the presenter applies
+  when picking the circuit. The validator's `function-not-declared` rule (shared
+  test vectors) is unchanged.
 - **BEHAVIOUR-BREAKING for hosts relying on storing untrusted credentials:
   issuance is fail-closed on issuer trust.** A credential is stored only if its
   issuer's trust is established: an mdoc needs a verifiable `issuerAuth` and a
@@ -101,6 +242,484 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   factor hook. Cancelling the PIN prompt (or a prompt that fails) declines the
   transaction (`declined`, `access_denied`) rather than reporting insufficient
   factors.
+- **The wallet, not the request, picks the pseudonym's `verifier_id_type`
+  (ordered list; AuthZEN is the default source).** The type is agreed in the
+  trust framework, so `WalletConfig.circuitZkVerifierIdTypes` /
+  `WalletPolicyOptions.verifierIdTypes` is an ORDERED list of supported types
+  (default `["semantic", "x509_san_dns"]`, helpers in `VerifierIdTypeOrder`:
+  entries non-blank, trimmed, comma-free, unique; invalid lists throw at
+  construction). `VerifierIdRegistry.resolve` walks it in order and uses the
+  first type for which the policy decision point's `context.verifier_ids` holds
+  an identifier (AuthZEN first for every supported type, then any optional
+  `circuitZkVerifierIdSources` for hosts that want their own; the default
+  is empty and the PDP is the single default source). Conflicting DISTINCT values for a type decline that type and the
+  next is tried; empty ids are ignored; `basis` is ignored. An EMPTY list means no
+  type is supported and a pseudonym request is refused (fail closed); so is a
+  request where no type resolves (bare `access_denied`, reason
+  `VERIFIER_ID_UNAVAILABLE`). The `verifier_id_type` a request names is still
+  accepted structurally by the planner but is IGNORED for selection and is
+  not refused on mismatch (the default validator accepts any named type).
+  The trust request no longer carries `context.verifier_id_type`, so the PDP
+  returns everything and the wallet picks. Sample app: an ordered, editable
+  list (add, remove, up/down, reset), stored as the comma-separated
+  `verifier_id_types` (unparseable falls back to the default; the empty string
+  is the deliberate empty list); applies at next wallet creation.
+  VALUE FORMS are defined by the rulebook / trust framework (nym_auth rulebook
+  "Verifier identity") and produced by the PDP (go-trust `pkg/authzen`):
+  `x509_san_dns` = the dNSName SAN, ASCII lower case, no trailing dot, NO
+  `x509_san_dns:` prefix; `x509_san_uri` = the URI SAN as bound;
+  `decentralized_identifier` = the DID without fragment; `openid_federation` =
+  the entity id as in the chain; `semantic` = `semantic_id:` + the ETSI id. The
+  wallet hashes the value byte-for-byte: it never lower-cases, trims or strips
+  anything (pinned by a test with a mixed-case value). The request no longer
+  carries `verifier_id_type`, so the rulebook validator's
+  `verifier-id-type-required` rule is removed (absent is satisfiable;
+  `-forbidden` and `-unregistered` were later removed too, see the validator
+  cleanup entry below).
+  The shared vectors `spec/nym-pseudonym-vectors.json` (generated by the
+  independent `tools/gen_nym_pseudonym_vectors.py`; for reuse by the Swift
+  port) and `spec/circuit-zk-validator-vectors.json` were regenerated to
+  match; the matcher's `circuit_zk` planner vectors were re-copied from
+  siros-dc-matcher tag `v0.10.0` (`ba1323c`; byte-identical to the earlier
+  `9237638` and `v0.9.1` copies; no
+  `verifier_id_type` in the requests, a new vector shows a legacy one is still
+  accepted and passed through opaquely). The planner behaviour is unchanged. The sample app's nym demo drops the request parameter and uses the
+  bare DNS form.
+  Type strings are opaque: the names in the wallet's list must match what the
+  PDP returns; go-trust is aligning to the trust framework (the `x509_san_dns`
+  value is the bare DNS name, derived by the PDP), and nothing is mapped or
+  aliased here. The local `X509SanDnsSource` (which parsed the request's
+  client id and `x5c` leaf) is DROPPED: the PDP is the single source of
+  verifier ids and the SDK no longer parses the request for this. It was new
+  in this PR, so removing it is not a binary-compatibility break against any
+  release; the pluggable `VerifierIdSource` interface and
+  `circuitZkVerifierIdSources` remain. Replaces `VerifierIdSourceKind` / `WalletPolicyOptions.verifierIdSources`
+  (stored key `verifier_id_sources` is no longer read) and the type-keyed
+  `VerifierIdRegistry`/`VerifierIdTypes` role (all new in this PR). The Swift
+  port needs the same change; not done here.
+- **Ordinary queries beside a `circuit_zk` query are validated by the engine
+  too.** `matchDcql` used to skip engine validation for the whole request when
+  any `circuit_zk` query was present (the engine did not know the format when
+  that was written), so a credential missing a claim an ordinary query asked for
+  became a candidate again. The ordinary queries are now given to the shared
+  engine as a request of their own (circuit queries and `credential_sets`
+  removed) and only its per-query candidates are used; the planner still decides
+  the `circuit_zk` queries. If the engine cannot answer, the ordinary queries
+  offer nothing (the built-in fallback never checked claims). (#266)
+- **The raw credential view redacts protected claims.** The sample app's Raw tab
+  decoded the SD-JWT payload and disclosures unchanged, so a protected claim
+  stayed readable and copyable. `CredentialDisclosureGuard.rawViewOf` (SDK) now
+  decides what a debug view may show: protected, descendant and ancestor claims
+  are dropped from the cleartext payload and the disclosures (nested ones placed
+  by digest); a protected mdoc shows no raw text. (#266)
+- **The public ZK response builder refuses a protected element.**
+  `MdocDeviceResponseBuilder.buildZkDeviceResponse` (and so
+  `ZkMdocPresentation.buildDeviceResponse`) serialised `disclosedClaims`
+  verbatim, so a host using the custom-prover/replay API could emit `ssc`/`psc`
+  under the default policy. It now throws `DisclosureRefusedException`. (#266)
+- **An absent or unreadable DC API picker selection is refused.** The activity
+  returned an empty selection, which the wallet reads as "present the first
+  eligible credential". The decision is now `DCAPISelection.resolve` (JVM
+  testable), which yields an id no credential has; the no-selection fallback
+  remains only for callers that pass no `selectedCredentialIds`. A selection with ANY
+  unreadable id resolves to that id alone (a readable subset never authorises a
+  response), and `handleCircuitZkDcApi` refuses a selection in which any id is
+  unknown or a candidate of none of the queries, or that lists an id twice. (#266)
+- **The SD-JWT non-disclosure guard also covers the issuer payload.**
+  `CredentialDisclosureGuard.requireNoneProtectedSdJwt` checked only the
+  selected disclosures, but every presentation carries the issuer JWT
+  unchanged, so a protected claim stored there in cleartext (or any presentation
+  with no disclosure) was transmitted by `JweKeystore` and `WscdKeystoreAdapter`.
+  It now refuses a protected cleartext claim, by original path segments and
+  ancestor-aware. Display and matching already hid such claims. (#266)
+- **A `circuit_zk` query the matcher cannot read still makes the request a
+  `circuit_zk` request, and the whole request is refused.** `DcqlMatchOutput`
+  gains `hasCircuitZkQuery` (from the original queries, whether or not
+  `WalletConfig.circuitZk` is on) and `unparsedQueryCount`. A `circuit_zk` query
+  with a missing or non-string `id` was dropped from the results, so with the
+  flag off, or with the native matcher unavailable, an ordinary sibling query
+  could be answered alone. `handleDCAPIRequest`, the circuit branch and the
+  engine-relayed match path now refuse on the flag, not on returned results.
+  (#266)
+- **The `circuit_zk` circuit list is kept as the verifier's two lists, never
+  expanded into their product.** `CircuitZkPlan.circuitFilter` is now a
+  `CircuitZkCircuitFilter(proofSystems, circuitIds)` (it replaces
+  `List<CircuitZkCircuitRef>`; `CircuitZkCircuitRef` is removed). Planning runs
+  before the trust decision, and 10,000 proof systems x 10,000 circuit ids
+  expanded to 100 million pairs, a heap exhaustion from an untrusted signed
+  request. Admission is the same (system in the first list and id or alias in
+  the second); the planner, matcher and rulebook validator all use `admits`.
+  (#266)
+- **`circuit_zk` / `nym_auth` fails closed unless the credential's only
+  namespace is its doctype namespace.** `CircuitZkPresenter` now refuses
+  (step `NAMESPACE`, the verifier still gets a bare `access_denied`) a credential
+  whose `nameSpaces` is not exactly `{docType}`: a decoy namespace listed first,
+  an extra namespace, or a missing doctype namespace. The nym_auth circuits read
+  `birth_date` and `ssc` from the doctype-named namespace and do not check that
+  no other namespace holds an attribute of the same name, so the wallet checks
+  it. This changes behaviour: credentials with extra namespaces were previously
+  proved. The legacy `mso_mdoc_zk` path (`ZkMdocPresentation`,
+  `LongfellowZkProofSystem`) is unchanged and still takes any namespace. (#266)
+- **The wallet's DC API trust path no longer logs the verifier id or a
+  throwable.** `handleDCAPIRequest` and the trust call it shares with the
+  `circuit_zk` branch (`evaluateTrustDirect`) logged the verifier's subject id
+  and passed the exception to Timber, whose message can carry the verifier id
+  or the backend's refusal text. They now log the exception class only. This
+  changes existing log output; a test scans the wallet's DC API path so it
+  cannot return. (#266)
+
+### Added
+- **siros-dc-matcher 0.10.0: capabilities use `credential.issuance_profile`.**
+  The pinned matcher AAR moves from 0.9.0 to 0.10.0 (no FFI or plan-JSON
+  change: the vendored `uniffi.siros_dc_matcher_ffi` bindings are
+  byte-identical to the matcher tag's, nothing regenerated). The matcher's
+  capabilities parser follows the circuit catalog's rename of
+  `credential.profile` to `credential.issuance_profile` (an optional, non-empty
+  opaque string constraining the input credential; validated, never a filter).
+  The old `profile` key is now an unknown member, so such capabilities are
+  rejected and the circuit is not offered (fail closed); nothing here set it,
+  the SDK passes `capabilities` through verbatim. `spec/circuit-capabilities-vectors`
+  is re-copied from the `v0.10.0` tag (`match.json` changed: `profile-*` cases
+  use `issuance_profile`, three cases added, two carry `expectRejected`);
+  `spec/circuit-zk-planner-vectors` is unchanged (byte-identical). The host and
+  device capability-vector harnesses treat `expectRejected` cases as "nothing
+  served" and check registering them does not throw.
+- **`SharedCircuitZkPlanner`: the default `circuit_zk` planner, backed by
+  siros-dc-matcher 0.8.0.** Used when `WalletConfig.circuitZk` is on and no
+  `circuitZkPlanner` is given. The wallet's circuits are registered with the
+  matcher (`SirosCredentialRegistry.refresh(circuitZkCircuits = wallet.circuitZkCircuits)`,
+  one `add_circuit_zk_system` per circuit id and alias, `functions` only when
+  the catalog declares them), so the OS picker offers `circuit_zk` rows. The
+  matcher's planner conformance vectors are in `spec/circuit-zk-planner-vectors`.
+  Behaviour changes: `CircuitZkPlan.circuitFilter` is a `CircuitZkCircuitFilter` of the
+  verifier's two lists, and an empty list in it admits no circuit (null still means "any");
+  a request repeating a DCQL credential-query or claim `id` offers nothing.
+  The matcher AAR is 0.9.0 (0.7.0: `zk_required` absent means optional,
+  duplicate ids rejected, holder binding and `multiple` honoured). (#271)
+- **siros-dc-matcher 0.9.0: the planner is read directly, and circuits can
+  declare a credential type or `capabilities`.** `SharedCircuitZkPlanner` calls
+  the matcher's new `circuit_zk_plan` export instead of matching a throwaway
+  probe blob, so the limits that existed only because of the probe are gone:
+  a request whose circuit lists are present but empty, with `vct_values: []`,
+  or without an `id` is planned as the matcher plans it (the plan JSON is
+  unchanged, and a rejected request is still `InvalidRequest`). The planner's
+  conformance vectors are now checked to the error code.
+  `CircuitZkCircuit` gains two optional opaque strings, `credentialType` and
+  `capabilities`, which `SirosCredentialRegistry` registers as the matcher's
+  `credential_type` and `capabilities` params, verbatim (the SDK never reads
+  them). `credentialType` restricts the circuit to a request naming that
+  doctype or vct; `capabilities` (the catalog's capabilities object as JSON)
+  makes the matcher apply its capability rule and replaces `functions` and
+  `credentialType`; a value it cannot parse leaves the circuit not offered.
+  `ZkCircuitDescriptor.capabilities` carries the catalog's object and
+  `CircuitZkCircuitSource.fromManifest` passes it through. The matcher's
+  capability vectors are in `spec/circuit-capabilities-vectors`. API note:
+  `CircuitZkCircuit` and `ZkCircuitDescriptor` gain a trailing constructor
+  parameter (source compatible, not binary compatible). The sample app's demo
+  circuit declares its credential type. (#271)
+- **`NymPseudonym.derive`: the nym_auth rulebook pseudonym function
+  (`pseudonym-v1-sha256`), pure and driven by one config table.** Computes
+  `SHA256(DST || seed || prover_input || verifier_input)` for the four
+  rulebook v0.3 configs; `verifier_id` is an opaque caller-supplied string.
+  Misuse (unknown config, missing or unused input, wrong seed length) throws
+  `NymPseudonymError`. Shared vectors in `spec/nym-pseudonym-vectors.json`
+  (self-generated, not yet cross-checked with the circuit developers). Unrelated
+  to the legacy `DefaultZkPseudonymDeriver`. (#261)
+- **`CircuitZkPresentationCodec`: encoder and strict decoder for the generic
+  `circuit_zk` presentation (`CircuitZkPresentation`).** Follows the rulebook
+  CDDL; `circuit_id` is opaque (the caller validates it against the catalog).
+  Fails closed with `CircuitZkPresentationError`, preserves unknown top-level
+  keys (optional strict mode), has a pluggable `issuer_key_set` decoder hook
+  and an opt-in `requireResultHandles` check. Shared vectors in
+  `spec/circuit-zk-presentation-vectors.json`. (#262)
+- **`PrivateSeed`: a stable per-credential-type holder `private_seed`, derived
+  from the container `mainKey`.** `HKDF-SHA256(mainKey, info =
+  "org.siros.private_seed/v1" || credentialType)[:16]`, with `psc` and a
+  fail-closed `matchesCommitment`. `PrivateSeed` and the generic `RootSecret`
+  derivation are internal: `JweKeystore` and `WscdKeystoreAdapter` implement
+  only the purpose-bound `HolderWitnessSource` (the issuer commitment, and a
+  `CircuitZkPresenter` that feeds the seed to its prover), so no public member
+  of a keystore derives a secret. The key is never exported and a locked
+  keystore throws `KeystoreException`. `mainKey` must never be rotated. The seed
+  still reaches the prover the host configures, by design: the host app is
+  inside the wallet's trust boundary. `FixedRootHolderWitnessSource` serves
+  demos and tests over a caller-supplied key. Vectors in
+  `spec/private-seed-vectors.json`. (#263)
+- **DC API: `expected_origins` and wallet-chosen request entry.** The parser
+  reads `expected_origins` from a signed payload and, given a policy, answers
+  the first `requests[]` entry the policy accepts (the default still takes the
+  first). A `circuit_zk` request must use `openid4vp-v1-signed` and name the
+  calling origin in `expected_origins` (exact match); otherwise it is refused
+  with `access_denied` and no description, before trust evaluation.
+  `WalletConfig.dcApiExpectedOrigins` (`OFF` default, `IF_PRESENT`,
+  `REQUIRED`) gates the other formats. (#264)
+- **`circuit_zk` matching and format plumbing, behind `WalletConfig.circuitZk`
+  (default off).** `CircuitZkPlanner`, `CircuitZkRequestValidator` (permissive
+  by default) and `CircuitZkCircuitSource` (from the catalog manifest) decide a
+  `circuit_zk` query, failing closed (no candidates, no fallback). One
+  `CredentialUtils.isCircuitZkFormat`; a `circuit_zk` query never enters the
+  legacy `mso_mdoc_zk` path, and a matched request is answered with
+  access-denied until the presentation branch exists. Credential types served
+  through `circuit_zk` register no claims in the OS picker blob
+  (`SirosCredentialRegistry.refresh(claimlessDoctypes = wallet.circuitZkDocTypes)`).
+  With the flag off nothing changes. (#265)
+- **`RulebookCircuitZkValidator`: the wallet-side rulebook satisfiability rules
+  for a planned `circuit_zk` request**, as a named data-driven `CircuitZkRuleSet`
+  (function rules registered per function id) behind `CircuitZkRequestValidator`.
+  Returns `Ok` or `AccessDenied(ruleId)`; the rule id is for local logs only.
+  (The `VerifierIdTypes` registry that was part of it is gone again, see below.)
+  Shared vectors in `spec/circuit-zk-validator-vectors.json`. A `circuit_zk`
+  request that matches nothing is now answered with `access_denied` and no
+  description, never the "no credential matches" text. (#267)
+- **`CircuitZkPresenter`: assembles and encodes a `circuit_zk` presentation
+  from a validated request.** Fail-closed steps (validator re-run,
+  doctype, witness, `psc` check, data-dependent predicates, circuit selection,
+  prover, assembly; the `ssc` check for the issuer-delivered `secret_seed` was
+  added later, see the secret-seed entry below) with function handlers registered per function id
+  (`pseudonym-v1-sha256`, `age_check`), a `CircuitZkProver` interface and the
+  same `ZkWitnessSigner` / residency handling as `ZkMdocPresentation`. Refusals
+  are `CircuitZkError` with no description. `FakeCircuitZkProver.optIn()` is a
+  fake that reports itself as such and is never registered by default. (#268)
+- **`handleDCAPIRequest` answers a `circuit_zk` request (behind
+  `WalletConfig.circuitZk`, default off).** Request hardening, then trust from
+  the policy decision point alone (no local certificate check, no trust cache:
+  an outage is a refusal), plan and validate, resolve the verifier id through
+  the new `VerifierIdSource` registry (`WalletConfig.circuitZkVerifierIdSources`;
+  shipped: `AuthZENSource`), present, and return the token
+  in `vp_token`. `TrustResult` gains an optional read-only `context`. Every
+  failure is `access_denied` with no description; the history record has
+  `zkProof = true` and no claim names. `WalletConfig.circuitZkValidator` now
+  defaults to the rulebook validator. (#269)
+- **A non-disclosure guard: `ssc` and `psc` are never matched, registered,
+  presented or displayed.** `NonDisclosurePolicy` is a data table of protected
+  claim paths by credential type (default: the nym_auth doctype's `ssc` and
+  `psc`; override with `WalletConfig.nonDisclosurePolicy`); one
+  `CredentialDisclosureGuard` serves the matcher, the OS picker claims, the
+  display claims and every presentation builder, which refuses (never strips)
+  a presentation that would disclose a protected claim
+  (`DisclosureRefusedException`). A type with no entry is unaffected.
+  `circuitZkConsentSummary` gives hosts a summary with no credential values. (#270)
+- **The wallet now holds the issuer-delivered `secret_seed`; the ssc pseudonym
+  configs are provable when a seed is available (presenter side only).**
+  Earlier entries (#263, #268, #270) and the `holderPrivateSeed` /
+  `NOT_HELD_BY_WALLET` KDocs said the wallet never holds the `secret_seed` and
+  refuses `known-offender-matching-ssc`, `account-recovery-ssc` and
+  `user-managed-pseudonym-xsite-ssc` by design; that is superseded. The issuer
+  delivers the seed (16 bytes, lowercase hex of 32 chars on the wire) in the
+  OID4VCI credential response `credential_metadata`, to be stored per credential
+  in privatedata. `CircuitZkPresenter.Request.secretSeed` carries it; the
+  presenter never trusts it: the seed must be exactly 16 bytes (else refused at
+  the witness step), and `SHA256(seed)` must equal the credential's `ssc` (one
+  32-byte bstr in the doctype namespace; absent, non-bstr, wrong length or
+  duplicated refuses), compared in constant time in a new step before the
+  predicates and the prover. Any failure is `access_denied` with no description
+  and the prover is never called. The presenter works on its own copy of the
+  seed and zeroes it on every exit path; the seed is in no log, exception
+  message, history record or response. `CircuitZkWitnessKind.SECRET_SEED` and
+  `CircuitZkFunctionWitness.secretSeed` (redacted `toString`, identity
+  `equals`) are new; witness providers are never asked for the seed (it is not
+  derivable from `mainKey`, so the keystore providers return null for it).
+  `NymConfigInfo.seedKind` (`NymSeedKind.PRIVATE` / `SECRET`, now public)
+  replaces `holderPrivateSeed`. `FakeCircuitZkProver` derives the ssc configs
+  from the witness's `secretSeed`. `NOT_HELD_BY_WALLET` remains only for configs
+  this SDK does not know. Receipt, storage and the wallet-side lookup are
+  implemented, see the next entry.
+  Shared vectors `spec/secret-seed-commitment-vectors.json` (generator
+  `tools/gen_secret_seed_commitment_vectors.py`, hashlib only) cover
+  `ssc = SHA256(secret_seed)` and the rejections. The nym demo issuer now issues
+  `ssc = SHA256(random 16-byte seed)` and the sample has an ssc scenario plus a
+  "wrong seed must refuse" button.
+
+- **The issuer-delivered `secret_seed` arrives in the response-level
+  `credential_metadata` (OpenID4VCI 1.1, openid/OpenID4VCI#721; privatedata-spec
+  2.6 section 5A, vectors vendored verbatim from privatedata-spec `8c4c865`); the ssc
+  pseudonym configs are provable from the stored seed.**
+  Wire: ONE object per Credential (and Deferred) Response, applying to every
+  credential in it: `"credential_metadata": {"org.siros.secret_seed":
+  {"<namespace>": "<32 lowercase hex>"}}` (`SecretSeedDelivery.MEMBER`, one constant).
+  Transport: `FlowCompleteMessage` (engine) and the WMP `FlowCompleteResult` carry
+  `credentialMetadata` (`ResponseCredentialMetadata`: every member verbatim and in
+  order, unknown members preserved; a value that is not an object decodes as a
+  `malformed` placeholder so the frame and each `notification_id` stay readable) and
+  `credentialMetadataEncryptedResponse` (default false; set by the engine only for a
+  JWE-decrypted response; a non-boolean reads as false). The credential DTOs print
+  no credential and the response object prints no member.
+  Receipt (`flow_complete`), once for the whole response and before anything is
+  stored or a renewed batch replaced: the `org.siros.secret_seed` member must come
+  from an encrypted response, the response must carry a `notification_id`, the
+  member must be well formed (1-8 namespaces of at most 64 UTF-8 bytes, none the
+  reserved `namespaces`, each seed exactly 32 lowercase hex characters), and the seed
+  of `WalletConfig.secretSeedNamespace` (default `org.siros.nym_auth`) must open the
+  `ssc` of EVERY credential (`SHA256(seed) == ssc`, constant time; mdoc: the one 32-byte
+  bstr of the doctype namespace, SD-JWT VC: the one top-level `ssc` disclosure bound
+  to the signed `_sd`). Any refusal fails the whole issuance: nothing is stored, the old
+  batch of a renewal stays, `credential_failure` is sent once per `notification_id`, and
+  the error names no value. Storage is unchanged: every credential of the response
+  gets one `S.credentials[].metadata` entry per response member,
+  `{type: <member>, value: <member verbatim>}`, in order (a keystore side map, never
+  part of the stored credential JSON). `WalletConfig.secretSeedMetadataType` is replaced
+  by `secretSeedNamespace`.
+  Safeguards: the seed is STRIPPED from the response object before any merge into
+  display metadata (`SecretSeedDelivery.stripped` / `mergeDisplay`: the issuer's
+  public advertisement stays, the seed cannot enter), and a static test keeps every
+  other reader of the object out. Issuer metadata advertises a seed by namespace names
+  only (`credential_metadata["org.siros.secret_seed"] = {"namespaces": [...]}`,
+  `CredentialDisplayMetadata.secretSeed`, `SecretSeedDelivery.classifyAdvertisement`):
+  a configuration whose public metadata carries anything else there (a seed value, say)
+  is malformed and not offered, and a completion for an advertising configuration that
+  was not encrypted is refused. The wallet cannot itself ask for response encryption:
+  the engine decides `credential_response_encryption` from the issuer's
+  `credential_response_encryption` metadata; for an advertising configuration the engine
+  must treat encryption as required (see the engine note in the PR).
+  Replays and the WMP client: a REPLAYED `wmp.flow.complete` lists what it withheld in
+  `redacted_members` (from `credential_metadata`, `credential_metadata_encrypted_response`,
+  `refresh_token`, `dpop_jwk`, `dpop_key_id`; the credentials are kept, a live completion has no
+  marker; both flow-complete DTOs decode it, an unreadable marker reads as everything withheld).
+  A listed member is not recoverable: nothing is invented, reused from an earlier flow or
+  substituted. A credential that needs a seed (it carries an `ssc`, or its configuration advertised
+  one) in a completion whose metadata was withheld, or an advertised seed that did not arrive, fails the
+  issuance with nothing stored; credentials of a replay that needs no seed are stored normally;
+  renewal material is captured only when none of it is withheld, so a replayed batch is not
+  renewable (re-issue). A seed over a deferred response is refused
+  (`DeliveredResponseMetadata.deferredResponse`, false until the engine relays one). The SSE
+  transport (`WmpHttpSseTransport`) now returns from `connect()` only once the stream is open (so it is
+  connected before `wmp.flow.start` is sent), drops a replayed event id, sends `Last-Event-ID` on a
+  reconnect, and no event data or decode error is ever logged (`WmpSession`, `WmpPeer` log the
+  exception class only).
+  Use: the internal `CredentialSecretSeedSource` seam is suspend and keystore-backed
+  (`KeystoreSecretSeedSource`, reads the `org.siros.secret_seed` entry's
+  designated-namespace seed); `handleCircuitZkDcApi` fetches the picked credential's
+  seed for the ssc configs, the presenter re-verifies the commitment, and the wallet
+  zeroes its copy. Guard tests keep the metadata out of logs, history, presentations
+  and stored credentials. The keystores preserve every member of a credential entry
+  they do not own, every unknown `S` and `settings` member and unknown container
+  members.
+- **Validator cleanup: a legacy `verifier_id_type` is accepted and ignored.**
+  Rulebook v0.3 removed it from the request and implementations must not reject
+  it. `verifier-id-type-forbidden` and `verifier-id-type-unregistered`, the
+  `VerifierIdTypes` registry, the `RulebookCircuitZkValidator` constructor
+  parameter and the vectors' `default_registered_verifier_id_types` /
+  `options.registered_verifier_id_types` are removed (all new in this PR); the
+  vectors now expect `ok`, with one proving a legacy parameter passes. The
+  Swift port shares `spec/circuit-zk-validator-vectors.json` and needs the same
+  change.
+
+### Binary compatibility (this PR, against 0.x main)
+The SDK is 0.x and `apiCheck` tracks every signature (`api/*.api` are dumped in
+this PR); as with earlier 0.x releases (see the `ZkCircuitDescriptor` note
+above), appended defaulted constructor and function parameters are source
+compatible but change the JVM descriptors, so an already compiled consumer
+must be rebuilt. Not binary compatible, by type (all source compatible unless
+noted):
+- `WalletConfig`: new trailing properties (circuit_zk, DC API, policy
+  options, ordered `circuitZkVerifierIdTypes`, `secretSeedMetadataType`); `VerifierIdRegistry`,
+  `VerifierIdSourceKind` and `WalletPolicyOptions.verifierIdSources` are new in
+  this PR and were reworked (no released descriptor changes); the constructor, `copy` and `copy$default` descriptors change.
+- `engine.CredentialResult` and `wmp.openid4x.CredentialResult` (released):
+  trailing `credentialMetadata` and `credentialMetadataEncryptedResponse`, and
+  they now implement `CredentialResultMetadata`; the constructor, `copy` and
+  `copy$default` descriptors change (source compatible).
+- Binary compatible, additive: `JweKeystore` / `WscdKeystoreAdapter`
+  `getCredentialMetadata` and `setCredentialMetadata`;
+  `CredentialResponseMetadataEntry`, `CredentialResultMetadata`,
+  `FlowCompleteResult`, `SecretSeedCommitment` and
+  `WalletConfig.DEFAULT_SECRET_SEED_METADATA_TYPE`.
+- `RulebookCircuitZkValidator` / `CircuitZkRuleEnv` lose their `VerifierIdTypes`
+  parameter: new in this PR, so no released descriptor changes.
+- `TrustResult`: trailing `context`; constructor and `copy` change.
+- `DCAPIRequest`: trailing `extensions` and related fields; constructor and
+  `copy` change.
+- `CredentialMatcher.MatchResult`: trailing `circuitZkPlan`; constructor and
+  `copy` change. `CredentialMatcher.matchDcql` gains a trailing `circuitZk`
+  (and client metadata) parameter; the old descriptor and `$default` go.
+- `SirosWallet.handleDCAPIRequest` (both overloads): trailing
+  `selectedCredentialIds`; the two-argument and consent-handler descriptors go.
+- `SirosCredentialRegistry.refresh`: trailing `claimlessDoctypes` and
+  `circuitZkCircuits`.
+- `ZkCircuitDescriptor`: trailing `capabilities`.
+- `CircuitZkCircuit`, `CircuitZkSupport`, `CircuitZkPresenter` (including
+  `Request.secretSeed`, `CircuitZkFunctionWitness.secretSeed`,
+  `CircuitZkWitnessKind.SECRET_SEED` and `NymConfigInfo.seedKind` /
+  `NymSeedKind`, which replace `holderPrivateSeed`) and
+  `HolderWitnessSource.circuitZkPresenter`: new in this PR, so no released
+  descriptor changes.
+- The generated matcher bindings (`uniffi.siros_dc_matcher_ffi.FfiCombination`,
+  `FfiMatchOutcome`, `FfiMatchedCredential`) follow the 0.9.0 matcher AAR;
+  they are not SDK API to build against.
+- Binary compatible: `WalletException` is now `open`; `JweKeystore` and
+  `WscdKeystoreAdapter` additionally implement `HolderWitnessSource`;
+  `CredentialDisclosureGuard.register/unregister/requestsProtected(type, ...)`
+  are additions.
+No type was reworked to preserve the old descriptors; consumers rebuild against
+this version.
+
+### Changed (review follow-up)
+- **`CredentialDisclosureGuard` is no longer last-writer-wins.** `SirosWallet`
+  registers its `nonDisclosurePolicy` with the new `register(owner, policy)`
+  (dropped by `unregister`, called from `destroy()`); the policy in force is the
+  union of every live registration, so a second wallet with
+  `NonDisclosurePolicy.NONE` cannot weaken a running one. `policy` still reads
+  the policy in force; assigning it replaces all registrations (apps/tests).
+  Binary compatibility: additive (`register`, `unregister`,
+  `NonDisclosurePolicy.union`).
+- **`WalletException` is now `open`** (binary compatible) so the DC API can
+  raise `DCAPIPresentationDeclined(message, reason)`, a `WalletException`
+  carrying a coarse `DCAPIRefusalReason`. The existing-format decline paths
+  (untrusted verifier, no matching credential, no eligible copy, missing
+  encryption key, no ZK proof system) now show the user the refusal dialog. The
+  verifier response is unchanged (`access_denied` with the same description).
+- `DCAPIRequestRules`: the `requiresSignedRequest` hook can only ADD
+  requirements; a `circuit_zk` query is always signed and origin-bound.
+- `circuit_zk` with a picker selection: a query the user's pick is not a
+  candidate of is refused; the first-eligible fallback applies only when no
+  selection was supplied.
+- `AuthZENSource` reads go-trust #203's `context.verifier_ids` list of
+  `{verifier_id_type, verifier_id, basis?}`. One distinct value of the type
+  is used; several distinct values decline (the trust request carries no
+  `verifier_id_type` hint; the wallet's ordered type list picks).
+  (Trust is now evaluated after matching; the verifier still only sees
+  `access_denied`.)
+
+### Fixed (review follow-up 5)
+- **`circuit_zk` over the DC API refuses a request carrying `transaction_data`.**
+  The circuit branch has no transaction pipeline (validation, consent, hash
+  binding), so it used to answer such a request with a proof the user never
+  saw the transaction for. It is now refused before trust evaluation or any
+  credential access (reason `UNSUPPORTED_REQUEST`; the verifier gets the bare
+  `access_denied`). Known limitation until the circuit path implements the
+  transaction pipeline.
+- A copy used for a `circuit_zk` proof is no longer treated as consumed under
+  `CredentialConsumptionPolicy.CONSUME_NON_ZKP` (the circuit path now passes
+  the per-presentation ZK resolver to `eligibleInstances`).
+- `WalletPolicyOptions.fromStored`: a stored verifier-ID source list with an
+  unrecognised name (a source renamed or removed by an upgrade) falls back to
+  the default instead of disabling every source; an empty string still means
+  none.
+- Finnish settings label: `KAMALA` (terrible) corrected to `VÄÄRÄ` (fake).
+
+### Fixed (review follow-up)
+- **The non-disclosure policy is ancestor-aware.** A policy protecting a nested
+  path such as `address.secret` now also hides the `address` object from display
+  and matching (`extractClaims`, `flattenClaimPaths`, `extractMdocClaims`), and
+  a presentation refuses a disclosure whose claim path is protected, below a
+  protected path, or an ancestor of one (the SD-JWT path is resolved from where
+  the disclosure's digest sits in the credential; an unplaceable disclosure is
+  refused if any protected path mentions its name). The mdoc element check is
+  ancestor-aware too.
+- **`circuit_zk` circuit selection no longer treats a circuit with
+  `capabilities` or a `credential_type` as unrestricted.** Such a circuit is
+  selected only when the shared matcher serves it (`CircuitZkServing`,
+  `SharedCircuitZkServing`: the circuit and a claimless credential of the
+  doctype are registered in a throwaway blob and the request matched; no
+  capability rule is reimplemented), in `CredentialMatcher`, in
+  `handleDCAPIRequest` and in `CircuitZkPresenter`. Without a matcher answer
+  the circuit is not selected. Circuits without either keep the legacy
+  `functions` filter.
+- The DC API activity no longer logs request, response or error payloads
+  (only sizes and status).
+- Coroutine cancellation is no longer converted to a refusal or swallowed in
+  `CircuitZkPresenter.present`, the circuit_zk trust call and
+  `VerifierIdRegistry.resolve`.
 
 ## [0.20.5] - 2026-10-12
 

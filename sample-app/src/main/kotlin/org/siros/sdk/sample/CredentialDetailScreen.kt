@@ -56,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import org.siros.sdk.credentials.StoredCredential
+import org.siros.sdk.credentials.CredentialDisclosureGuard
 import org.siros.sdk.credentials.CredentialUtils
 import org.siros.sdk.credentials.DisplayClaim
 import org.siros.sdk.credentials.interop.CredentialStatus
@@ -371,7 +372,9 @@ private fun RawTab(credential: StoredCredential) {
     // credential.raw is "<jwt>~<disclosure>~<disclosure>~..." per the SD-JWT
     // spec, not one JSON blob - decode it into its actual parts so each is
     // individually readable and copyable, instead of one opaque string.
-    val parts = remember(credential.raw) { CredentialUtils.parseSdJwtParts(credential.raw) }
+    // The SDK decides what may be shown: a credential with protected claims is redacted there.
+    val view = remember(credential.raw) { CredentialDisclosureGuard.rawViewOf(credential) }
+    val parts = view.parts
 
     Column(
         modifier = Modifier
@@ -407,9 +410,16 @@ private fun RawTab(credential: StoredCredential) {
                 disclosure.toString(),
             )
         }
-        if (parts.header == null && parts.payload == null && parts.disclosures.isEmpty()) {
+        if (view.redacted) {
+            Text(
+                text = stringResource(R.string.credential_detail_raw_redacted),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        view.rawText?.let { text ->
             // Unparseable - still show the raw string rather than nothing.
-            CopyableTextBlock(text = credential.raw, modifier = Modifier.fillMaxWidth())
+            CopyableTextBlock(text = text, modifier = Modifier.fillMaxWidth())
         }
     }
 }

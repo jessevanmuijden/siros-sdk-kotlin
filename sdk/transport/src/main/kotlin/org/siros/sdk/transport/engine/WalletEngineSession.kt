@@ -740,7 +740,11 @@ class WalletEngineSession(
      * gap, rather than trusting the existing connection is still good.
      */
     suspend fun forceReconnect() {
-        if (lastAppToken == null) return
+        if (lastAppToken == null) {
+            Timber.w("Engine WebSocket: forced reconnect skipped (no session to reconnect)")
+            return
+        }
+        Timber.i("Engine WebSocket: forced reconnect (was ${_state.value}); the old socket is dropped, it may be a zombie after the browser gap")
         val request = reconnectRequests.incrementAndGet()
         val token = refreshTokenOrSignalReauth(request)
         // A newer forceReconnect began while this one was refreshing its token
@@ -759,6 +763,7 @@ class WalletEngineSession(
         _state.value = State.CONNECTING
         reconnectAttempts = 0
         doConnect(token)
+        Timber.i("Engine WebSocket: new connection requested")
     }
 
     /**

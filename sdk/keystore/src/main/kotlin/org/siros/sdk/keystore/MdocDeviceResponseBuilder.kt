@@ -129,17 +129,34 @@ class MdocDeviceResponseBuilder(
         sessionTranscriptBytes: ByteArray,
         disclosedClaims: List<String>?,
         signer: suspend (ByteArray) -> ByteArray,
+    ): ByteArray = buildForProximity(sessionTranscriptBytes, disclosedClaims, signer, guarded = true)
+
+    /**
+     * The fully-signed DeviceResponse a ZK prover takes as its PRIVATE witness
+     * (see [LongfellowZkProofSystem]): it never leaves the wallet and is not a
+     * disclosure, so the non-disclosure guard does not apply to it.
+     */
+    internal suspend fun buildPrivateWitnessResponse(
+        sessionTranscriptBytes: ByteArray,
+        signer: suspend (ByteArray) -> ByteArray,
+    ): ByteArray = buildForProximity(sessionTranscriptBytes, null, signer, guarded = false)
+
+    private suspend fun buildForProximity(
+        sessionTranscriptBytes: ByteArray,
+        disclosedClaims: List<String>?,
+        signer: suspend (ByteArray) -> ByteArray,
+        guarded: Boolean,
     ): ByteArray {
-        val disclosedDocument = parseAndFilter(disclosedClaims)
+        val disclosedDocument = parseAndFilter(disclosedClaims, guarded)
         val deviceAuthBytes = buildDeviceAuthentication(disclosedDocument.docType, sessionTranscriptBytes)
         val coseSign1 = MdocCose.sign1Detached(algorithm, deviceAuthBytes, signer)
 
         return assembleFinalResponse(disclosedDocument, coseSign1)
     }
 
-    private fun parseAndFilter(disclosedClaims: List<String>?): org.siros.sdk.credentials.mdoc.DocumentMdoc {
+    private fun parseAndFilter(disclosedClaims: List<String>?, guarded: Boolean = true): org.siros.sdk.credentials.mdoc.DocumentMdoc {
         val document = MdocCbor.parseStoredCredential(credentialBytes)
-        return if (disclosedClaims == null) {
+        val selected = if (disclosedClaims == null) {
             document
         } else {
             document.copy(
@@ -148,6 +165,12 @@ class MdocDeviceResponseBuilder(
                 )
             )
         }
+        // Fail closed: a presentation that would disclose a protected element is refused, never stripped.
+        if (guarded) org.siros.sdk.credentials.CredentialDisclosureGuard.requireNoneProtected(
+            selected.docType,
+            selected.issuerSigned.nameSpaces.mapValues { (_, items) -> items.map { it.item.elementIdentifier } },
+        )
+        return selected
     }
 
     /**
@@ -211,42 +234,6 @@ class MdocDeviceResponseBuilder(
      */
 
     /**
-     * DeviceAuthentication = ["DeviceAuthentication", SessionTranscript,
-     * DocType, DeviceNameSpacesBytes], the whole 4-element array itself
-     * tag-24-wrapped (an "encoded CBOR data item"), per ISO 18013-5 §9.1.3.4
-     * and matching Google's reference wallet's `generateDeviceResponse()`
-     * (https://github.com/digitalcredentialsdev/CMWallet). This was
-     * previously a bare, untagged 3-element array (missing the namespaces
-     * element entirely and never tag-24-wrapped) - since deviceAuth's
-     * signature is computed over these exact bytes, a verifier
-     * reconstructing the correct 4-element tag-24 form (as Google's own
-     * https://digital-credentials.dev/ demo does) would always disagree with
-     * a signature computed over the old, different bytes.
-     */
-    private fun buildDeviceAuthentication(docType: String, sessionTranscript: ByteArray): ByteArray {
-        // sessionTranscript is already CBOR-encoded; decode it back to embed
-        // as a nested CBOR item rather than a byte string.
-        val deviceAuth = CBORObject.NewArray()
-        deviceAuth.Add(CBORObject.FromObject("DeviceAuthentication"))
-        deviceAuth.Add(CBORObject.DecodeFromBytes(sessionTranscript))
-        deviceAuth.Add(CBORObject.FromObject(docType))
-        deviceAuth.Add(emptyDeviceNameSpacesTag())
-        val tagged = CBORObject.FromObjectAndTag(deviceAuth.EncodeToBytes(), 24)
-        return tagged.EncodeToBytes()
-    }
-
-    /**
-     * Tag-24-wrapped empty map: this SDK never discloses claims via
-     * `deviceSigned.nameSpaces` (everything comes from `issuerSigned`
-     * instead), so this is always empty - but it must be the SAME bytes
-     * both here (embedded in the signed DeviceAuthentication) and in
-     * [assembleFinalResponse]'s actual `deviceSigned.nameSpaces` field,
-     * since a verifier reconstructs DeviceAuthentication from the latter.
-     */
-    private fun emptyDeviceNameSpacesTag(): CBORObject =
-        CBORObject.FromObjectAndTag(CBORObject.NewMap().EncodeToBytes(), 24)
-
-    /**
      * Assemble the final DeviceResponse CBOR structure.
      *
      * DeviceResponse = { "version": "1.0", "documents": [Document], "status": 0 }
@@ -275,6 +262,42 @@ class MdocDeviceResponseBuilder(
     private fun sha256(data: ByteArray): ByteArray = Companion.sha256(data)
 
     companion object {
+        /**
+         * DeviceAuthentication = ["DeviceAuthentication", SessionTranscript,
+         * DocType, DeviceNameSpacesBytes], the whole 4-element array itself
+         * tag-24-wrapped (an "encoded CBOR data item"), per ISO 18013-5 §9.1.3.4
+         * and matching Google's reference wallet's `generateDeviceResponse()`
+         * (https://github.com/digitalcredentialsdev/CMWallet). This was
+         * previously a bare, untagged 3-element array (missing the namespaces
+         * element entirely and never tag-24-wrapped) - since deviceAuth's
+         * signature is computed over these exact bytes, a verifier
+         * reconstructing the correct 4-element tag-24 form (as Google's own
+         * https://digital-credentials.dev/ demo does) would always disagree with
+         * a signature computed over the old, different bytes.
+         */
+        internal fun buildDeviceAuthentication(docType: String, sessionTranscript: ByteArray): ByteArray {
+            // sessionTranscript is already CBOR-encoded; decode it back to embed
+            // as a nested CBOR item rather than a byte string.
+            val deviceAuth = CBORObject.NewArray()
+            deviceAuth.Add(CBORObject.FromObject("DeviceAuthentication"))
+            deviceAuth.Add(CBORObject.DecodeFromBytes(sessionTranscript))
+            deviceAuth.Add(CBORObject.FromObject(docType))
+            deviceAuth.Add(emptyDeviceNameSpacesTag())
+            val tagged = CBORObject.FromObjectAndTag(deviceAuth.EncodeToBytes(), 24)
+            return tagged.EncodeToBytes()
+        }
+
+        /**
+         * Tag-24-wrapped empty map: this SDK never discloses claims via
+         * `deviceSigned.nameSpaces` (everything comes from `issuerSigned`
+         * instead), so this is always empty - but it must be the SAME bytes
+         * both here (embedded in the signed DeviceAuthentication) and in
+         * [assembleFinalResponse]'s actual `deviceSigned.nameSpaces` field,
+         * since a verifier reconstructs DeviceAuthentication from the latter.
+         */
+        internal fun emptyDeviceNameSpacesTag(): CBORObject =
+            CBORObject.FromObjectAndTag(CBORObject.NewMap().EncodeToBytes(), 24)
+
         /**
          * Builds the `OpenID4VPDCAPIHandover` session transcript (OpenID4VP
          * 1.0 Appendix B.2.6) from just the DC API request parameters - a
@@ -399,6 +422,32 @@ class MdocDeviceResponseBuilder(
             return sessionTranscript.EncodeToBytes()
         }
 
+        /**
+         * The `OpenID4VPHandover` session transcript a `circuit_zk` presentation over a REDIRECT (OpenID4VP QR) request is bound to:
+         * [buildOpenID4VPSessionTranscript] with the JWK thumbprint REQUIRED, because over redirects the response is always
+         * encrypted (`direct_post.jwt`): [verifierJwkThumbprint] is the base64url RFC 7638 thumbprint of the verifier's
+         * response-encryption key and must decode to exactly 32 bytes. `clientId` is the prefixed client id
+         * (`x509_san_dns:...`). A null thumbprint (valid only in the DC API handover, for an unencrypted response) is not
+         * representable here. The DC API path keeps [buildDCAPISessionTranscript].
+         *
+         * @throws IllegalArgumentException if the thumbprint is not unpadded base64url of 32 bytes.
+         */
+        fun buildCircuitZkRedirectSessionTranscript(
+            clientId: String,
+            nonce: String,
+            responseUri: String,
+            verifierJwkThumbprint: String,
+        ): ByteArray {
+            require(verifierJwkThumbprint.none { it == '=' || it == '+' || it == '/' }) { "the JWK thumbprint is unpadded base64url" }
+            val thumbprint = try {
+                java.util.Base64.getUrlDecoder().decode(verifierJwkThumbprint)
+            } catch (e: IllegalArgumentException) {
+                throw IllegalArgumentException("the JWK thumbprint is not base64url")
+            }
+            require(thumbprint.size == 32) { "the JWK thumbprint is 32 bytes" }
+            return buildOpenID4VPSessionTranscript(clientId, nonce, responseUri, verifierJwkThumbprint)
+        }
+
         fun sha256(data: ByteArray): ByteArray =
             MessageDigest.getInstance("SHA-256").digest(data)
 
@@ -482,6 +531,12 @@ class MdocDeviceResponseBuilder(
             issuerSignedItemBytes: Map<String, ByteArray> = emptyMap(),
             claimSlotDigestIds: List<UInt>? = null,
         ): ByteArray {
+            // Fail closed at the final ZK response builder too: it is public, so a host running its
+            // own prover or replaying a proof reaches it without going through present().
+            org.siros.sdk.credentials.CredentialDisclosureGuard.requireNoneProtected(
+                docType,
+                mapOf(namespace to disclosedClaims.keys),
+            )
             val documentData = CBORObject.NewMap()
             documentData["zkSystemId"] = CBORObject.FromObject(zkSystemId)
             documentData["docType"] = CBORObject.FromObject(docType)

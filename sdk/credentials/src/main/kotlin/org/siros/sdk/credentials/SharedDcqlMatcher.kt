@@ -24,14 +24,13 @@ import uniffi.siros_dc_matcher_ffi.matchDcql as ffiMatchDcql
  * This exists to retire all three implementations in favour of one that is
  * tested against the specification's own examples.
  *
- * ## Not yet trusted
+ * ## Status
  *
- * [CredentialMatcher] still decides the result. This runs alongside it and
- * reports where the two disagree, because the change it brings is not
- * cosmetic: enforcing §6.4.1 *narrows* what a wallet offers, correctly, and a
- * user whose credential stops appearing deserves that to be one deliberate
- * change rather than a side effect of another. Switching over is a separate
- * step, once the disagreements on real requests are understood.
+ * [CredentialMatcher] asks this engine which credentials qualify and keeps the
+ * built-in matcher's answer only when the engine cannot run (`null` from
+ * [evaluate]): enforcing §6.4.1 *narrows* what a wallet offers, correctly, and
+ * the disagreements are logged by [reportDifference]. A `circuit_zk` query is
+ * not decided here at all - the engine does not know that format yet.
  */
 internal object SharedDcqlMatcher {
 
@@ -77,13 +76,14 @@ internal object SharedDcqlMatcher {
         // entirely until now (found via a real-device Vega presentation
         // failure: correct credential, correct claims, declined anyway).
         zkSystemIds: List<String> = emptyList(),
+        claimlessDoctypes: Set<String> = emptySet(),
     ): Outcome? {
         return try {
             // `use`: the builder holds a native handle, and matching runs on every
             // presentation.
             val blob = SirosBlobBuilder().use { builder ->
                 zkSystemIds.forEach { builder.addZkSystem(FfiCapability(it, emptyMap())) }
-                credentials.forEach { builder.addCredential(toFfi(it)) }
+                credentials.forEach { builder.addCredential(toFfi(it, claimlessDoctypes)) }
                 builder.build()
             }
             val outcome = ffiMatchDcql(blob, dcqlQuery.toString())
@@ -154,7 +154,7 @@ internal object SharedDcqlMatcher {
         )
     }
 
-    private fun toFfi(cred: StoredCredential) = FfiCredential(
+    private fun toFfi(cred: StoredCredential, claimlessDoctypes: Set<String> = emptySet()) = FfiCredential(
         id = cred.id.toString(),
         format = cred.format,
         // The real docType, from the credential's own MSO - not issuer
@@ -168,7 +168,7 @@ internal object SharedDcqlMatcher {
         title = cred.metadata?.name ?: cred.format,
         subtitle = cred.metadata?.issuer?.name ?: "",
         iconId = null,
-        claims = buildFfiClaims(cred),
+        claims = buildFfiClaims(cred, claimlessDoctypes),
     )
 
     /**
@@ -203,7 +203,10 @@ internal object SharedDcqlMatcher {
      *    `flattenClaimPaths` returns real path arrays throughout, with no
      *    join/resplit step to lose that boundary at all.
      */
-    internal fun buildFfiClaims(cred: StoredCredential): List<FfiClaim> {
+    internal fun buildFfiClaims(cred: StoredCredential, claimlessDoctypes: Set<String> = emptySet()): List<FfiClaim> {
+        // A credential type served through circuit_zk is answered with a
+        // proof, never with claims, so it registers none.
+        if (CredentialUtils.isOfDocTypes(cred, claimlessDoctypes)) return emptyList()
         if (cred.format.equals("mso_mdoc", ignoreCase = true)) {
             return CredentialUtils.extractClaims(cred).map { claim ->
                 FfiClaim(

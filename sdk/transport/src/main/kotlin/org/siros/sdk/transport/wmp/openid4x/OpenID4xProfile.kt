@@ -146,7 +146,41 @@ data class CredentialResult(
     val vct: String? = null,
     @SerialName("c_nonce") val cNonce: String? = null,
     @SerialName("notification_id") val notificationId: String? = null,
-)
+) {
+    // The credential itself is never printed.
+    override fun toString() = "CredentialResult(format=$format, credential=<redacted>, notificationId=$notificationId)"
+}
+
+/**
+ * The typed view of a `wmp.flow.complete` `result`, which is the whole
+ * engine `FlowCompleteMessage` object. [FlowCompleteParams.result] arrives as
+ * a raw [JsonObject]; [decode] is the one place it is read into typed
+ * [CredentialResult]s.
+ */
+@Serializable
+data class FlowCompleteResult(
+    val credentials: List<CredentialResult>? = null,
+    @SerialName("credential_issuer") val credentialIssuer: String? = null,
+    @SerialName("redirect_uri") val redirectUri: String? = null,
+    /** The response-level `credential_metadata`; see [org.siros.sdk.transport.engine.FlowCompleteMessage.credentialMetadata]. */
+    @SerialName("credential_metadata") override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
+    /** See [org.siros.sdk.transport.engine.FlowCompleteMessage.credentialMetadataEncryptedResponse]. */
+    @SerialName("credential_metadata_encrypted_response")
+    @Serializable(with = org.siros.sdk.transport.EncryptedResponseFlagSerializer::class)
+    override val credentialMetadataEncryptedResponse: Boolean = false,
+    /** `redacted_members`: what a replayed completion withheld; see [org.siros.sdk.transport.DeliveredResponseMetadata.redactedMembers]. */
+    @SerialName("redacted_members")
+    @Serializable(with = org.siros.sdk.transport.RedactedMembersSerializer::class)
+    override val redactedMembers: Set<String> = emptySet(),
+) : org.siros.sdk.transport.DeliveredResponseMetadata {
+    companion object {
+        private val lenient = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
+        /** Decode [result]; null when absent. Throws on a malformed member (fail closed). */
+        fun decode(result: JsonObject?): FlowCompleteResult? =
+            result?.let { lenient.decodeFromJsonElement(serializer(), it) }
+    }
+}
 
 @Serializable
 data class VPTokenResult(

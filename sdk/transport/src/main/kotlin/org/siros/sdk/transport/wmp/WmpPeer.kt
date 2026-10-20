@@ -176,7 +176,7 @@ class WmpPeer(
                 try {
                     dispatch(msg)
                 } catch (e: Exception) {
-                    Timber.e(e, "WmpPeer dispatch error for ${msg.method}")
+                    Timber.e("WmpPeer dispatch error for ${msg.method} (${e.javaClass.simpleName})")
                 }
             }
         }

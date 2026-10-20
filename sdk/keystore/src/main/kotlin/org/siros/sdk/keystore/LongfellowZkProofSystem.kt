@@ -171,9 +171,8 @@ class LongfellowZkProofSystem(
             // what's needed here regardless of which real transport the caller
             // is presenting over.
             val witnessDeviceResponse = MdocDeviceResponseBuilder(credentialBytes)
-                .buildForProximity(
+                .buildPrivateWitnessResponse(
                     sessionTranscript,
-                    disclosedClaims = null,
                     signer = { data -> signer.sign(COSE_ALG_ES256, data) },
                 )
 

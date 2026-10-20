@@ -683,6 +683,18 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_zk_cred_vega_checksum_func_verify(
     ): Int
+    external fun uniffi_zk_cred_vega_checksum_func_nymauth_challenge_digest(
+    ): Int
+    external fun uniffi_zk_cred_vega_checksum_func_nymauth_derive_challenge(
+    ): Int
+    external fun uniffi_zk_cred_vega_checksum_func_nymauth_vega_load_keys(
+    ): Int
+    external fun uniffi_zk_cred_vega_checksum_func_nymauth_vega_prove(
+    ): Int
+    external fun uniffi_zk_cred_vega_checksum_func_nymauth_vega_verify(
+    ): Int
+    external fun uniffi_zk_cred_vega_checksum_func_nymauth_verifier_input(
+    ): Int
     external fun ffi_zk_cred_vega_uniffi_contract_version(
     ): Int
 
@@ -717,6 +729,10 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_zk_cred_vega_fn_free_vegaverifierkey(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_zk_cred_vega_fn_clone_nymauthvegakeys(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_zk_cred_vega_fn_free_nymauthvegakeys(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_zk_cred_vega_fn_func_deserialize_prover_key(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_zk_cred_vega_fn_func_deserialize_verifier_key(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -726,6 +742,18 @@ internal object UniffiLib {
     external fun uniffi_zk_cred_vega_fn_func_prove(`pk`: Long,`claims`: RustBuffer.ByValue,`ecdsaWitness`: RustBuffer.ByValue,`msoBody`: RustBuffer.ByValue,`priorState`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_zk_cred_vega_fn_func_verify(`vk`: Long,`proofBytes`: RustBuffer.ByValue,`disclosedBytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_vega_fn_func_nymauth_challenge_digest(`sessionTranscript`: RustBuffer.ByValue,`docType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_vega_fn_func_nymauth_derive_challenge(`origin`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`docType`: RustBuffer.ByValue,`jwkThumbprint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_vega_fn_func_nymauth_vega_load_keys(`shapes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_zk_cred_vega_fn_func_nymauth_vega_prove(`keys`: Long,`statement`: RustBuffer.ByValue,`holder`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_vega_fn_func_nymauth_vega_verify(`keys`: Long,`statement`: RustBuffer.ByValue,`proof`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_vega_fn_func_nymauth_verifier_input(`clientId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun ffi_zk_cred_vega_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -859,6 +887,24 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_zk_cred_vega_checksum_func_verify() != 2233) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_vega_checksum_func_nymauth_challenge_digest() != 3201) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_vega_checksum_func_nymauth_derive_challenge() != 39087) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_vega_checksum_func_nymauth_vega_load_keys() != 63243) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_vega_checksum_func_nymauth_vega_prove() != 64654) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_vega_checksum_func_nymauth_vega_verify() != 27828) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_vega_checksum_func_nymauth_verifier_input() != 11326) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1137,6 +1183,254 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
     override fun write(value: ByteArray, buf: ByteBuffer) {
         buf.putInt(value.size)
         buf.put(value)
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * The keys of the nymauth mdoc circuits, built from their shapes. Holds the prover and verifier
+ * key: tens of MB of resident memory, built once.
+ */
+public interface NymAuthVegaKeysInterface {
+    
+    companion object
+}
+
+/**
+ * The keys of the nymauth mdoc circuits, built from their shapes. Holds the prover and verifier
+ * key: tens of MB of resident memory, built once.
+ */
+open class NymAuthVegaKeys: Disposable, AutoCloseable, NymAuthVegaKeysInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_zk_cred_vega_fn_free_nymauthvegakeys(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_zk_cred_vega_fn_clone_nymauthvegakeys(handle, status)
+        }
+    }
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVegaKeys: FfiConverter<NymAuthVegaKeys, Long> {
+    override fun lower(value: NymAuthVegaKeys): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NymAuthVegaKeys {
+        return NymAuthVegaKeys(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NymAuthVegaKeys {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NymAuthVegaKeys) = 8UL
+
+    override fun write(value: NymAuthVegaKeys, buf: ByteBuffer) {
+        buf.putLong(lower(value))
     }
 }
 
@@ -2234,6 +2528,506 @@ public object FfiConverterTypeFfiVerifyResult: FfiConverterRustBuffer<FfiVerifyR
 
 
 
+/**
+ * e2 and the transcript seed of one presentation request (`SPEC.md` section 3).
+ */
+data class NymAuthChallenge (
+    /**
+     * The SessionTranscript bytes: the transcript seed (Longfellow's Fiat-Shamir seed).
+     */
+    var `sessionTranscript`: kotlin.ByteArray
+    , 
+    /**
+     * e2: SHA-256 of the COSE `Signature1` message the device key signs, 32 bytes. This is the
+     * `challenge_digest` of [`NymAuthVegaStatement`].
+     */
+    var `challengeDigest`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthChallenge: FfiConverterRustBuffer<NymAuthChallenge> {
+    override fun read(buf: ByteBuffer): NymAuthChallenge {
+        return NymAuthChallenge(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthChallenge) = (
+            FfiConverterByteArray.allocationSize(value.`sessionTranscript`) +
+            FfiConverterByteArray.allocationSize(value.`challengeDigest`)
+    )
+
+    override fun write(value: NymAuthChallenge, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`sessionTranscript`, buf)
+            FfiConverterByteArray.write(value.`challengeDigest`, buf)
+    }
+}
+
+
+
+/**
+ * What only the holder has.
+ */
+data class NymAuthVegaHolder (
+    /**
+     * The credential's `IssuerSigned` as CBOR, items in their original encoding.
+     */
+    var `issuerSigned`: kotlin.ByteArray
+    , 
+    /**
+     * The 16-byte `secret_seed`. Zeroed by [`nymauth_vega_prove`].
+     */
+    var `secretSeed`: kotlin.ByteArray
+    , 
+    /**
+     * The device key's ES256 signature on the challenge message, `r || s`, 64 bytes.
+     */
+    var `deviceSignature`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVegaHolder: FfiConverterRustBuffer<NymAuthVegaHolder> {
+    override fun read(buf: ByteBuffer): NymAuthVegaHolder {
+        return NymAuthVegaHolder(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthVegaHolder) = (
+            FfiConverterByteArray.allocationSize(value.`issuerSigned`) +
+            FfiConverterByteArray.allocationSize(value.`secretSeed`) +
+            FfiConverterByteArray.allocationSize(value.`deviceSignature`)
+    )
+
+    override fun write(value: NymAuthVegaHolder, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`issuerSigned`, buf)
+            FfiConverterByteArray.write(value.`secretSeed`, buf)
+            FfiConverterByteArray.write(value.`deviceSignature`, buf)
+    }
+}
+
+
+
+/**
+ * The proof, as `nymauth_vega_verify` reads it, and the pseudonym it reveals (32 bytes).
+ */
+data class NymAuthVegaProof (
+    var `proof`: kotlin.ByteArray
+    , 
+    var `pseudonym`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVegaProof: FfiConverterRustBuffer<NymAuthVegaProof> {
+    override fun read(buf: ByteBuffer): NymAuthVegaProof {
+        return NymAuthVegaProof(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthVegaProof) = (
+            FfiConverterByteArray.allocationSize(value.`proof`) +
+            FfiConverterByteArray.allocationSize(value.`pseudonym`)
+    )
+
+    override fun write(value: NymAuthVegaProof, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`proof`, buf)
+            FfiConverterByteArray.write(value.`pseudonym`, buf)
+    }
+}
+
+
+
+/**
+ * The values the verifier names. Both sides need them.
+ */
+data class NymAuthVegaStatement (
+    /**
+     * Issuer key Q, big-endian x, 32 bytes.
+     */
+    var `issuerKeyX`: kotlin.ByteArray
+    , 
+    /**
+     * Issuer key Q, big-endian y, 32 bytes.
+     */
+    var `issuerKeyY`: kotlin.ByteArray
+    , 
+    /**
+     * T: `YYYY-MM-DDThh:mm:ssZ`.
+     */
+    var `time`: kotlin.String
+    , 
+    /**
+     * E: `YYYY-MM-DD`, `0000-00-00` for no lower bound.
+     */
+    var `earliest`: kotlin.String
+    , 
+    /**
+     * C: `YYYY-MM-DD`, `9999-12-31` for no upper bound.
+     */
+    var `cutoff`: kotlin.String
+    , 
+    /**
+     * e2: SHA-256 of the COSE `Signature1` message the device key signed, 32 bytes.
+     */
+    var `challengeDigest`: kotlin.ByteArray
+    , 
+    /**
+     * SHA-256(verifier_id), 32 bytes.
+     */
+    var `verifierInput`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVegaStatement: FfiConverterRustBuffer<NymAuthVegaStatement> {
+    override fun read(buf: ByteBuffer): NymAuthVegaStatement {
+        return NymAuthVegaStatement(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthVegaStatement) = (
+            FfiConverterByteArray.allocationSize(value.`issuerKeyX`) +
+            FfiConverterByteArray.allocationSize(value.`issuerKeyY`) +
+            FfiConverterString.allocationSize(value.`time`) +
+            FfiConverterString.allocationSize(value.`earliest`) +
+            FfiConverterString.allocationSize(value.`cutoff`) +
+            FfiConverterByteArray.allocationSize(value.`challengeDigest`) +
+            FfiConverterByteArray.allocationSize(value.`verifierInput`)
+    )
+
+    override fun write(value: NymAuthVegaStatement, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`issuerKeyX`, buf)
+            FfiConverterByteArray.write(value.`issuerKeyY`, buf)
+            FfiConverterString.write(value.`time`, buf)
+            FfiConverterString.write(value.`earliest`, buf)
+            FfiConverterString.write(value.`cutoff`, buf)
+            FfiConverterByteArray.write(value.`challengeDigest`, buf)
+            FfiConverterByteArray.write(value.`verifierInput`, buf)
+    }
+}
+
+
+
+
+
+/**
+ * Why a proof could not be made or was not accepted.
+ */
+sealed class NymAuthVegaException: kotlin.Exception() {
+    
+    /**
+     * An input has the wrong length, format or structure.
+     */
+    class InvalidInput(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * The shapes are unreadable or past the circuit budget.
+     */
+    class InvalidShapes(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * The shapes are well formed but are not an approved circuit; `message` is their SHA-256.
+     */
+    class UnknownCircuit(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * The inputs break a rule of the circuit. `message` is a coarse code (`SeedMismatch`,
+     * `IssuerSignature`, `DeviceSignature` or `Credential`), never the rule. No proof was made.
+     */
+    class Refused(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * The prover failed.
+     */
+    class ProverFailed(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * The proof does not verify.
+     */
+    class ProofInvalid(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * The proof verifies but not for the values the verifier named.
+     */
+    class Mismatch(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+    /**
+     * A bug: a panic was caught.
+     */
+    class Internal(
+        
+        val `detail`: kotlin.String
+        ) : NymAuthVegaException() {
+        override val message
+            get() = "message=${ `detail` }"
+    }
+    
+
+    
+
+
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<NymAuthVegaException> {
+        override fun lift(error_buf: RustBuffer.ByValue): NymAuthVegaException = FfiConverterTypeNymAuthVegaError.lift(error_buf)
+    }
+
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVegaError : FfiConverterRustBuffer<NymAuthVegaException> {
+    override fun read(buf: ByteBuffer): NymAuthVegaException {
+        
+
+        return when(buf.getInt()) {
+            1 -> NymAuthVegaException.InvalidInput(
+                FfiConverterString.read(buf),
+                )
+            2 -> NymAuthVegaException.InvalidShapes(
+                FfiConverterString.read(buf),
+                )
+            3 -> NymAuthVegaException.UnknownCircuit(
+                FfiConverterString.read(buf),
+                )
+            4 -> NymAuthVegaException.Refused(
+                FfiConverterString.read(buf),
+                )
+            5 -> NymAuthVegaException.ProverFailed(
+                FfiConverterString.read(buf),
+                )
+            6 -> NymAuthVegaException.ProofInvalid(
+                FfiConverterString.read(buf),
+                )
+            7 -> NymAuthVegaException.Mismatch(
+                FfiConverterString.read(buf),
+                )
+            8 -> NymAuthVegaException.Internal(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: NymAuthVegaException): ULong {
+        return when(value) {
+            is NymAuthVegaException.InvalidInput -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.InvalidShapes -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.UnknownCircuit -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.Refused -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.ProverFailed -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.ProofInvalid -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.Mismatch -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is NymAuthVegaException.Internal -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+        }
+    }
+
+    override fun write(value: NymAuthVegaException, buf: ByteBuffer) {
+        when(value) {
+            is NymAuthVegaException.InvalidInput -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.InvalidShapes -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.UnknownCircuit -> {
+                buf.putInt(3)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.Refused -> {
+                buf.putInt(4)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.ProverFailed -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.ProofInvalid -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.Mismatch -> {
+                buf.putInt(7)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+            is NymAuthVegaException.Internal -> {
+                buf.putInt(8)
+                FfiConverterString.write(value.`detail`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
+
+
+
 
 /**
  * @suppress
@@ -2402,6 +3196,116 @@ public object FfiConverterSequenceTypeFfiDisclosedClaim: FfiConverterRustBuffer<
         FfiConverterTypeVegaVerifierKey.lower(`vk`),
         FfiConverterByteArray.lower(`proofBytes`),
         FfiConverterSequenceByteArray.lower(`disclosedBytes`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * e2 for a SessionTranscript already in hand (a definite CBOR array of three items, nothing
+         * after it) and the credential's docType; refuses an empty or malformed transcript.
+         */
+    @Throws(NymAuthVegaException::class) fun `nymauthChallengeDigest`(`sessionTranscript`: kotlin.ByteArray, `docType`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(NymAuthVegaException) { _status ->
+    UniffiLib.uniffi_zk_cred_vega_fn_func_nymauth_challenge_digest(
+    
+        
+        FfiConverterByteArray.lower(`sessionTranscript`),
+        FfiConverterString.lower(`docType`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Derives e2 and the transcript seed for an mdoc presentation over the Digital Credentials API:
+         * the way a verifier computes `NymAuthVegaStatement::challenge_digest` from its own request
+         * (`origin`, `nonce`, the credential's `doc_type` and, for an encrypted response, the 32-byte
+         * JWK thumbprint of the response key; `None` for CBOR null). Refuses an empty origin or docType,
+         * a nonce shorter than 16 characters and a thumbprint that is not 32 bytes.
+         */
+    @Throws(NymAuthVegaException::class) fun `nymauthDeriveChallenge`(`origin`: kotlin.String, `nonce`: kotlin.String, `docType`: kotlin.String, `jwkThumbprint`: kotlin.ByteArray?): NymAuthChallenge {
+            return FfiConverterTypeNymAuthChallenge.lift(
+    uniffiRustCallWithError(NymAuthVegaException) { _status ->
+    UniffiLib.uniffi_zk_cred_vega_fn_func_nymauth_derive_challenge(
+    
+        
+        FfiConverterString.lower(`origin`),
+        FfiConverterString.lower(`nonce`),
+        FfiConverterString.lower(`docType`),
+        FfiConverterOptionalByteArray.lower(`jwkThumbprint`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Builds the keys from the circuit's decompressed shapes (the bincode `(step, core)` of the
+         * catalog's `vega-nymauth` mdoc artifact).
+         */
+    @Throws(NymAuthVegaException::class) fun `nymauthVegaLoadKeys`(`shapes`: kotlin.ByteArray): NymAuthVegaKeys {
+            return FfiConverterTypeNymAuthVegaKeys.lift(
+    uniffiRustCallWithError(NymAuthVegaException) { _status ->
+    UniffiLib.uniffi_zk_cred_vega_fn_func_nymauth_vega_load_keys(
+    
+        
+        FfiConverterByteArray.lower(`shapes`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Proves the statement for the verifier's values (`statement.challenge_digest` comes from
+         * [`nymauth_derive_challenge`]). `holder.secret_seed` is zeroed before this
+         * returns, on every path. Refuses (`Refused`, naming the first broken rule) rather than make a
+         * proof no verifier would accept.
+         */
+    @Throws(NymAuthVegaException::class) fun `nymauthVegaProve`(`keys`: NymAuthVegaKeys, `statement`: NymAuthVegaStatement, `holder`: NymAuthVegaHolder): NymAuthVegaProof {
+            return FfiConverterTypeNymAuthVegaProof.lift(
+    uniffiRustCallWithError(NymAuthVegaException) { _status ->
+    UniffiLib.uniffi_zk_cred_vega_fn_func_nymauth_vega_prove(
+    
+        
+        FfiConverterTypeNymAuthVegaKeys.lower(`keys`),
+        FfiConverterTypeNymAuthVegaStatement.lower(`statement`),
+        FfiConverterTypeNymAuthVegaHolder.lower(`holder`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Accepts a proof for the values the verifier named, which the verifier derives itself:
+         * `challenge_digest` with [`nymauth_derive_challenge`], `verifier_input` as
+         * SHA-256(its client_id), `time` from its clock. Returns the pseudonym it reveals (32 bytes).
+         */
+    @Throws(NymAuthVegaException::class) fun `nymauthVegaVerify`(`keys`: NymAuthVegaKeys, `statement`: NymAuthVegaStatement, `proof`: kotlin.ByteArray): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(NymAuthVegaException) { _status ->
+    UniffiLib.uniffi_zk_cred_vega_fn_func_nymauth_vega_verify(
+    
+        
+        FfiConverterTypeNymAuthVegaKeys.lower(`keys`),
+        FfiConverterTypeNymAuthVegaStatement.lower(`statement`),
+        FfiConverterByteArray.lower(`proof`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * `verifier_input = SHA-256(client_id)`, the value a verifier names in its statement
+         * (`NymAuthVegaStatement::verifier_input`); refuses an empty or over-long client_id.
+         */
+    @Throws(NymAuthVegaException::class) fun `nymauthVerifierInput`(`clientId`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(NymAuthVegaException) { _status ->
+    UniffiLib.uniffi_zk_cred_vega_fn_func_nymauth_verifier_input(
+    
+        
+        FfiConverterString.lower(`clientId`),_status)
 }
     )
     }

@@ -685,6 +685,20 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_zk_cred_longfellow_checksum_func_verify_with_ppid(
     ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_challenge_digest(
+    ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_derive_challenge(
+    ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_initialize_prover(
+    ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_initialize_verifier(
+    ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_prove(
+    ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_verifier_input(
+    ): Int
+    external fun uniffi_zk_cred_longfellow_checksum_func_nymauth_verify(
+    ): Int
     external fun ffi_zk_cred_longfellow_uniffi_contract_version(
     ): Int
 
@@ -719,6 +733,14 @@ internal object UniffiLib {
     ): Long
     external fun uniffi_zk_cred_longfellow_fn_free_mdoczkverifier(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_zk_cred_longfellow_fn_clone_nymauthprover(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_zk_cred_longfellow_fn_free_nymauthprover(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_zk_cred_longfellow_fn_clone_nymauthverifier(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_zk_cred_longfellow_fn_free_nymauthverifier(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
     external fun uniffi_zk_cred_longfellow_fn_func_initialize_prover(`circuit`: ForeignBytes.ByValue,`circuitVersion`: RustBuffer.ByValue,`numAttributes`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
     external fun uniffi_zk_cred_longfellow_fn_func_initialize_verifier(`circuit`: ForeignBytes.ByValue,`circuitVersion`: RustBuffer.ByValue,`numAttributes`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -730,6 +752,20 @@ internal object UniffiLib {
     external fun uniffi_zk_cred_longfellow_fn_func_verify(`verifier`: Long,`issuerPublicKeySec1`: ForeignBytes.ByValue,`attributes`: RustBuffer.ByValue,`docType`: RustBuffer.ByValue,`deviceNameSpacesBytes`: ForeignBytes.ByValue,`sessionTranscript`: ForeignBytes.ByValue,`time`: RustBuffer.ByValue,`proof`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_zk_cred_longfellow_fn_func_verify_with_ppid(`verifier`: Long,`issuerPublicKeySec1`: ForeignBytes.ByValue,`attributes`: RustBuffer.ByValue,`docType`: RustBuffer.ByValue,`deviceNameSpacesBytes`: ForeignBytes.ByValue,`sessionTranscript`: ForeignBytes.ByValue,`time`: RustBuffer.ByValue,`verifierContext`: ForeignBytes.ByValue,`proof`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_challenge_digest(`sessionTranscript`: RustBuffer.ByValue,`docType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_derive_challenge(`origin`: RustBuffer.ByValue,`nonce`: RustBuffer.ByValue,`docType`: RustBuffer.ByValue,`jwkThumbprint`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_initialize_prover(`circuit`: ForeignBytes.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_initialize_verifier(`circuit`: ForeignBytes.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_prove(`prover`: Long,`request`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_verifier_input(`clientId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_zk_cred_longfellow_fn_func_nymauth_verify(`verifier`: Long,`request`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun ffi_zk_cred_longfellow_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -866,6 +902,27 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_zk_cred_longfellow_checksum_func_verify_with_ppid() != 33635) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_challenge_digest() != 61981) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_derive_challenge() != 58984) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_initialize_prover() != 59955) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_initialize_verifier() != 60702) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_prove() != 56585) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_verifier_input() != 18936) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_zk_cred_longfellow_checksum_func_nymauth_verify() != 397) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1049,6 +1106,29 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
 
     override fun write(value: UByte, buf: ByteBuffer) {
         buf.put(value.toByte())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
     }
 }
 
@@ -1880,6 +1960,498 @@ public object FfiConverterTypeMdocZkVerifier: FfiConverter<MdocZkVerifier, Long>
 }
 
 
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * The nym_auth prover for one circuit pair.
+ */
+public interface NymAuthProverInterface {
+    
+    companion object
+}
+
+/**
+ * The nym_auth prover for one circuit pair.
+ */
+open class NymAuthProver: Disposable, AutoCloseable, NymAuthProverInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_zk_cred_longfellow_fn_free_nymauthprover(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_zk_cred_longfellow_fn_clone_nymauthprover(handle, status)
+        }
+    }
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthProver: FfiConverter<NymAuthProver, Long> {
+    override fun lower(value: NymAuthProver): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NymAuthProver {
+        return NymAuthProver(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NymAuthProver {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NymAuthProver) = 8UL
+
+    override fun write(value: NymAuthProver, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
+ * The nym_auth verifier for one circuit pair.
+ */
+public interface NymAuthVerifierInterface {
+    
+    companion object
+}
+
+/**
+ * The nym_auth verifier for one circuit pair.
+ */
+open class NymAuthVerifier: Disposable, AutoCloseable, NymAuthVerifierInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_zk_cred_longfellow_fn_free_nymauthverifier(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_zk_cred_longfellow_fn_clone_nymauthverifier(handle, status)
+        }
+    }
+
+    
+
+    
+
+
+    
+    
+    /**
+     * @suppress
+     */
+    companion object
+    
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVerifier: FfiConverter<NymAuthVerifier, Long> {
+    override fun lower(value: NymAuthVerifier): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): NymAuthVerifier {
+        return NymAuthVerifier(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): NymAuthVerifier {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: NymAuthVerifier) = 8UL
+
+    override fun write(value: NymAuthVerifier, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
 
 /**
  * Identifier and value of an attribute.
@@ -1932,6 +2504,321 @@ public object FfiConverterTypeAttribute: FfiConverterRustBuffer<Attribute> {
 
 
 /**
+ * A derived challenge.
+ */
+data class NymAuthChallenge (
+    /**
+     * The SessionTranscript, CBOR: the Fiat-Shamir seed (`transcript_seed`).
+     */
+    var `sessionTranscript`: kotlin.ByteArray
+    , 
+    /**
+     * `e2`, 32 bytes (`challenge_digest`).
+     */
+    var `challengeDigest`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthChallenge: FfiConverterRustBuffer<NymAuthChallenge> {
+    override fun read(buf: ByteBuffer): NymAuthChallenge {
+        return NymAuthChallenge(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthChallenge) = (
+            FfiConverterByteArray.allocationSize(value.`sessionTranscript`) +
+            FfiConverterByteArray.allocationSize(value.`challengeDigest`)
+    )
+
+    override fun write(value: NymAuthChallenge, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`sessionTranscript`, buf)
+            FfiConverterByteArray.write(value.`challengeDigest`, buf)
+    }
+}
+
+
+
+/**
+ * The catalog descriptor's `params` of a `longfellow-nymauth` circuit.
+ */
+data class NymAuthCircuitParams (
+    var `blockEncHash`: kotlin.UInt
+    , 
+    var `blockEncSig`: kotlin.UInt
+    , 
+    var `hashCircuitId`: kotlin.String
+    , 
+    var `sigCircuitId`: kotlin.String
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthCircuitParams: FfiConverterRustBuffer<NymAuthCircuitParams> {
+    override fun read(buf: ByteBuffer): NymAuthCircuitParams {
+        return NymAuthCircuitParams(
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthCircuitParams) = (
+            FfiConverterUInt.allocationSize(value.`blockEncHash`) +
+            FfiConverterUInt.allocationSize(value.`blockEncSig`) +
+            FfiConverterString.allocationSize(value.`hashCircuitId`) +
+            FfiConverterString.allocationSize(value.`sigCircuitId`)
+    )
+
+    override fun write(value: NymAuthCircuitParams, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`blockEncHash`, buf)
+            FfiConverterUInt.write(value.`blockEncSig`, buf)
+            FfiConverterString.write(value.`hashCircuitId`, buf)
+            FfiConverterString.write(value.`sigCircuitId`, buf)
+    }
+}
+
+
+
+/**
+ * What the prover receives; see `NymAuthProveRequest` in the Kotlin SDK.
+ */
+data class NymAuthProveRequest (
+    /**
+     * The credential's IssuerSigned structure as CBOR.
+     */
+    var `issuerSigned`: kotlin.ByteArray
+    , 
+    /**
+     * The 16-byte secret seed. Zeroed by `nymauth_prove` before it returns.
+     */
+    var `secretSeed`: kotlin.ByteArray
+    , 
+    var `issuerKeyX`: kotlin.ByteArray
+    , 
+    var `issuerKeyY`: kotlin.ByteArray
+    , 
+    var `time`: kotlin.String
+    , 
+    var `earliest`: kotlin.String
+    , 
+    var `cutoff`: kotlin.String
+    , 
+    var `challengeDigest`: kotlin.ByteArray
+    , 
+    /**
+     * `r || s`, 64 bytes.
+     */
+    var `deviceSignature`: kotlin.ByteArray
+    , 
+    var `verifierInput`: kotlin.ByteArray
+    , 
+    var `transcriptSeed`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthProveRequest: FfiConverterRustBuffer<NymAuthProveRequest> {
+    override fun read(buf: ByteBuffer): NymAuthProveRequest {
+        return NymAuthProveRequest(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthProveRequest) = (
+            FfiConverterByteArray.allocationSize(value.`issuerSigned`) +
+            FfiConverterByteArray.allocationSize(value.`secretSeed`) +
+            FfiConverterByteArray.allocationSize(value.`issuerKeyX`) +
+            FfiConverterByteArray.allocationSize(value.`issuerKeyY`) +
+            FfiConverterString.allocationSize(value.`time`) +
+            FfiConverterString.allocationSize(value.`earliest`) +
+            FfiConverterString.allocationSize(value.`cutoff`) +
+            FfiConverterByteArray.allocationSize(value.`challengeDigest`) +
+            FfiConverterByteArray.allocationSize(value.`deviceSignature`) +
+            FfiConverterByteArray.allocationSize(value.`verifierInput`) +
+            FfiConverterByteArray.allocationSize(value.`transcriptSeed`)
+    )
+
+    override fun write(value: NymAuthProveRequest, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`issuerSigned`, buf)
+            FfiConverterByteArray.write(value.`secretSeed`, buf)
+            FfiConverterByteArray.write(value.`issuerKeyX`, buf)
+            FfiConverterByteArray.write(value.`issuerKeyY`, buf)
+            FfiConverterString.write(value.`time`, buf)
+            FfiConverterString.write(value.`earliest`, buf)
+            FfiConverterString.write(value.`cutoff`, buf)
+            FfiConverterByteArray.write(value.`challengeDigest`, buf)
+            FfiConverterByteArray.write(value.`deviceSignature`, buf)
+            FfiConverterByteArray.write(value.`verifierInput`, buf)
+            FfiConverterByteArray.write(value.`transcriptSeed`, buf)
+    }
+}
+
+
+
+/**
+ * The proof and the pseudonym it reports.
+ */
+data class NymAuthProveResponse (
+    var `proof`: kotlin.ByteArray
+    , 
+    var `pseudonym`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthProveResponse: FfiConverterRustBuffer<NymAuthProveResponse> {
+    override fun read(buf: ByteBuffer): NymAuthProveResponse {
+        return NymAuthProveResponse(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthProveResponse) = (
+            FfiConverterByteArray.allocationSize(value.`proof`) +
+            FfiConverterByteArray.allocationSize(value.`pseudonym`)
+    )
+
+    override fun write(value: NymAuthProveResponse, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`proof`, buf)
+            FfiConverterByteArray.write(value.`pseudonym`, buf)
+    }
+}
+
+
+
+/**
+ * What a verifier knows from its own request.
+ */
+data class NymAuthVerifyRequest (
+    var `issuerKeyX`: kotlin.ByteArray
+    , 
+    var `issuerKeyY`: kotlin.ByteArray
+    , 
+    var `time`: kotlin.String
+    , 
+    var `earliest`: kotlin.String
+    , 
+    var `cutoff`: kotlin.String
+    , 
+    var `challengeDigest`: kotlin.ByteArray
+    , 
+    var `verifierInput`: kotlin.ByteArray
+    , 
+    var `transcriptSeed`: kotlin.ByteArray
+    , 
+    var `pseudonym`: kotlin.ByteArray
+    , 
+    var `proof`: kotlin.ByteArray
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthVerifyRequest: FfiConverterRustBuffer<NymAuthVerifyRequest> {
+    override fun read(buf: ByteBuffer): NymAuthVerifyRequest {
+        return NymAuthVerifyRequest(
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterByteArray.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: NymAuthVerifyRequest) = (
+            FfiConverterByteArray.allocationSize(value.`issuerKeyX`) +
+            FfiConverterByteArray.allocationSize(value.`issuerKeyY`) +
+            FfiConverterString.allocationSize(value.`time`) +
+            FfiConverterString.allocationSize(value.`earliest`) +
+            FfiConverterString.allocationSize(value.`cutoff`) +
+            FfiConverterByteArray.allocationSize(value.`challengeDigest`) +
+            FfiConverterByteArray.allocationSize(value.`verifierInput`) +
+            FfiConverterByteArray.allocationSize(value.`transcriptSeed`) +
+            FfiConverterByteArray.allocationSize(value.`pseudonym`) +
+            FfiConverterByteArray.allocationSize(value.`proof`)
+    )
+
+    override fun write(value: NymAuthVerifyRequest, buf: ByteBuffer) {
+            FfiConverterByteArray.write(value.`issuerKeyX`, buf)
+            FfiConverterByteArray.write(value.`issuerKeyY`, buf)
+            FfiConverterString.write(value.`time`, buf)
+            FfiConverterString.write(value.`earliest`, buf)
+            FfiConverterString.write(value.`cutoff`, buf)
+            FfiConverterByteArray.write(value.`challengeDigest`, buf)
+            FfiConverterByteArray.write(value.`verifierInput`, buf)
+            FfiConverterByteArray.write(value.`transcriptSeed`, buf)
+            FfiConverterByteArray.write(value.`pseudonym`, buf)
+            FfiConverterByteArray.write(value.`proof`, buf)
+    }
+}
+
+
+
+/**
  * Versions of the mdoc_zk circuit interface.
  */
 
@@ -1966,6 +2853,148 @@ public object FfiConverterTypeCircuitVersion: FfiConverterRustBuffer<CircuitVers
 }
 
 
+
+
+
+
+
+/**
+ * Errors from the nym_auth prover and verifier. Nothing in this module panics on bad input; every
+ * failure is one of these.
+ */
+sealed class NymAuthException(message: String): kotlin.Exception(message) {
+        
+    /**
+     * An argument has the wrong size, format or range.
+     */
+        class InvalidInput(message: String) : NymAuthException(message)
+        
+    /**
+     * The circuit artifact is malformed, or its parameters or ids do not match.
+     */
+        class Circuit(message: String) : NymAuthException(message)
+        
+    /**
+     * The circuit is well-formed but is not one this module knows how to build a witness for.
+     */
+        class UnsupportedCircuit(message: String) : NymAuthException(message)
+        
+    /**
+     * The IssuerSigned structure does not follow the nym_auth issuance profile.
+     */
+        class Credential(message: String) : NymAuthException(message)
+        
+    /**
+     * The inputs do not satisfy the statement (for example a wrong seed, key or signature).
+     * No proof is produced.
+     */
+        class Unsatisfied(message: String) : NymAuthException(message)
+        
+    /**
+     * The proving system failed.
+     */
+        class Prover(message: String) : NymAuthException(message)
+        
+    /**
+     * The proof was not accepted.
+     */
+        class Verification(message: String) : NymAuthException(message)
+        
+
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<NymAuthException> {
+        override fun lift(error_buf: RustBuffer.ByValue): NymAuthException = FfiConverterTypeNymAuthError.lift(error_buf)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeNymAuthError : FfiConverterRustBuffer<NymAuthException> {
+    override fun read(buf: ByteBuffer): NymAuthException {
+        
+            return when(buf.getInt()) {
+            1 -> NymAuthException.InvalidInput(FfiConverterString.read(buf))
+            2 -> NymAuthException.Circuit(FfiConverterString.read(buf))
+            3 -> NymAuthException.UnsupportedCircuit(FfiConverterString.read(buf))
+            4 -> NymAuthException.Credential(FfiConverterString.read(buf))
+            5 -> NymAuthException.Unsatisfied(FfiConverterString.read(buf))
+            6 -> NymAuthException.Prover(FfiConverterString.read(buf))
+            7 -> NymAuthException.Verification(FfiConverterString.read(buf))
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+        
+    }
+
+    override fun allocationSize(value: NymAuthException): ULong {
+        return 4UL
+    }
+
+    override fun write(value: NymAuthException, buf: ByteBuffer) {
+        when(value) {
+            is NymAuthException.InvalidInput -> {
+                buf.putInt(1)
+                Unit
+            }
+            is NymAuthException.Circuit -> {
+                buf.putInt(2)
+                Unit
+            }
+            is NymAuthException.UnsupportedCircuit -> {
+                buf.putInt(3)
+                Unit
+            }
+            is NymAuthException.Credential -> {
+                buf.putInt(4)
+                Unit
+            }
+            is NymAuthException.Unsatisfied -> {
+                buf.putInt(5)
+                Unit
+            }
+            is NymAuthException.Prover -> {
+                buf.putInt(6)
+                Unit
+            }
+            is NymAuthException.Verification -> {
+                buf.putInt(7)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
+    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterByteArray.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ByteArray?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterByteArray.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterByteArray.write(value, buf)
+        }
+    }
+}
 
 
 
@@ -2141,6 +3170,122 @@ public object FfiConverterSequenceTypeAttribute: FfiConverterRustBuffer<List<Att
         FfiConverterString.lower(`time`),
         FfiConverterByRefBytes.lower(`verifierContext`),
         FfiConverterByRefBytes.lower(`proof`),_status)
+}
+    
+    
+
+        /**
+         * `e2` for a SessionTranscript already in hand and the credential's docType.
+         */
+    @Throws(NymAuthException::class) fun `nymauthChallengeDigest`(`sessionTranscript`: kotlin.ByteArray, `docType`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_challenge_digest(
+    
+        
+        FfiConverterByteArray.lower(`sessionTranscript`),
+        FfiConverterString.lower(`docType`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Derives the SessionTranscript (the transcript seed) and `e2` (the challenge digest) for the
+         * DC API handover, exactly per SPEC.md section 3. `jwk_thumbprint` is the 32-byte thumbprint of
+         * the response-encryption key, or `None` for an unencrypted response. A verifier uses this
+         * for its own request instead of values from the holder.
+         */
+    @Throws(NymAuthException::class) fun `nymauthDeriveChallenge`(`origin`: kotlin.String, `nonce`: kotlin.String, `docType`: kotlin.String, `jwkThumbprint`: kotlin.ByteArray?): NymAuthChallenge {
+            return FfiConverterTypeNymAuthChallenge.lift(
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_derive_challenge(
+    
+        
+        FfiConverterString.lower(`origin`),
+        FfiConverterString.lower(`nonce`),
+        FfiConverterString.lower(`docType`),
+        FfiConverterOptionalByteArray.lower(`jwkThumbprint`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Loads the decompressed `longfellow-nymauth` circuit artifact (signature circuit, then hash
+         * circuit) for proving.
+         */
+    @Throws(NymAuthException::class) fun `nymauthInitializeProver`(`circuit`: java.nio.ByteBuffer, `params`: NymAuthCircuitParams): NymAuthProver {
+            return FfiConverterTypeNymAuthProver.lift(
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_initialize_prover(
+    
+        
+        FfiConverterByRefBytes.lower(`circuit`),
+        FfiConverterTypeNymAuthCircuitParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Loads the circuit artifact for verifying.
+         */
+    @Throws(NymAuthException::class) fun `nymauthInitializeVerifier`(`circuit`: java.nio.ByteBuffer, `params`: NymAuthCircuitParams): NymAuthVerifier {
+            return FfiConverterTypeNymAuthVerifier.lift(
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_initialize_verifier(
+    
+        
+        FfiConverterByRefBytes.lower(`circuit`),
+        FfiConverterTypeNymAuthCircuitParams.lower(`params`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Proves; refuses, without a proof, if the inputs do not satisfy the statement.
+         */
+    @Throws(NymAuthException::class) fun `nymauthProve`(`prover`: NymAuthProver, `request`: NymAuthProveRequest): NymAuthProveResponse {
+            return FfiConverterTypeNymAuthProveResponse.lift(
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_prove(
+    
+        
+        FfiConverterTypeNymAuthProver.lower(`prover`),
+        FfiConverterTypeNymAuthProveRequest.lower(`request`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * `SHA-256(client_id)`, the request's `verifier_input`.
+         */
+    @Throws(NymAuthException::class) fun `nymauthVerifierInput`(`clientId`: kotlin.String): kotlin.ByteArray {
+            return FfiConverterByteArray.lift(
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_verifier_input(
+    
+        
+        FfiConverterString.lower(`clientId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Verifies a proof against the verifier's own request.
+         */
+    @Throws(NymAuthException::class) fun `nymauthVerify`(`verifier`: NymAuthVerifier, `request`: NymAuthVerifyRequest)
+        = 
+    uniffiRustCallWithError(NymAuthException) { _status ->
+    UniffiLib.uniffi_zk_cred_longfellow_fn_func_nymauth_verify(
+    
+        
+        FfiConverterTypeNymAuthVerifier.lower(`verifier`),
+        FfiConverterTypeNymAuthVerifyRequest.lower(`request`),_status)
 }
     
     

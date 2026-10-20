@@ -81,7 +81,10 @@ class WscdKeystoreAdapter private constructor(
     // Extension state has to land in the same blob the credentials do, or
     // it does not reach the account's other devices - and [credentialsKeystore]
     // is the JweKeystore that owns this adapter's container.
-    ExtensionStore by credentialsKeystore {
+    ExtensionStore by credentialsKeystore,
+    // The mainKey lives in [credentialsKeystore]; a wallet whose signing keys
+    // are in a WSCD still derives its private seed from that same key.
+    HolderWitnessSource by credentialsKeystore {
 
     constructor(signer: Signer) : this(signer, JweKeystore())
 
@@ -154,6 +157,14 @@ class WscdKeystoreAdapter private constructor(
     /** See [JweKeystore.setCredentialRefreshToken]. */
     suspend fun setCredentialRefreshToken(batchId: Long, entry: CredentialRefreshTokenEntry) =
         credentialsKeystore.setCredentialRefreshToken(batchId, entry)
+
+    /** See [JweKeystore.getCredentialMetadata]. */
+    suspend fun getCredentialMetadata(id: Long): kotlinx.serialization.json.JsonArray? =
+        credentialsKeystore.getCredentialMetadata(id)
+
+    /** See [JweKeystore.setCredentialMetadata]. */
+    suspend fun setCredentialMetadata(id: Long, metadata: kotlinx.serialization.json.JsonArray?) =
+        credentialsKeystore.setCredentialMetadata(id, metadata)
 
     /** See [JweKeystore.removeCredentialRefreshToken]. */
     suspend fun removeCredentialRefreshToken(batchId: Long) =
@@ -425,6 +436,9 @@ class WscdKeystoreAdapter private constructor(
                 } catch (_: Exception) { false }
             }
         } else disclosures
+
+        // Fail closed: never disclose (or silently strip) a protected claim.
+        org.siros.sdk.credentials.CredentialDisclosureGuard.requireNoneProtectedSdJwt(credential, selected)
 
         // Build SD-JWT presentation
         val sdJwtPresentation = buildString {

@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- The circuit catalog refresh also runs when a network becomes available
+         (ConnectivityManager.registerDefaultNetworkCallback). A normal,
+         install-time permission; without it the periodic refresh still runs. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application>
         <!-- Digital Credentials API entry point: the OS/Credential Manager
              starts this when the user picks one of the host app's entries in

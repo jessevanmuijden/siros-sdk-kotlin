@@ -211,6 +211,16 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _vegaProfilingEnabled: MutableStateFlow<Boolean>
     val vegaProfilingEnabled: StateFlow<Boolean> get() = _vegaProfilingEnabled
 
+    /**
+     * How the wallet treats requests: non-disclosure, `circuit_zk`, DC API origin
+     * rules, verifier-id sources (see [org.siros.sdk.wallet.WalletPolicyOptions]).
+     * Persisted here, applied by [buildWalletConfig] - so, as with
+     * [vegaProfilingEnabled], it takes effect when the wallet is next CREATED
+     * (after Disconnect, or an app restart), not on the running session.
+     */
+    private val _walletPolicy: MutableStateFlow<org.siros.sdk.wallet.WalletPolicyOptions>
+    val walletPolicy: StateFlow<org.siros.sdk.wallet.WalletPolicyOptions> get() = _walletPolicy
+
     init {
         // Read test overrides - set either via the settings sheet UI, or (debug
         // builds only) via `adb shell am start ... --es backend_url ... --es
@@ -272,6 +282,11 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         )
         _vegaProfilingEnabled = MutableStateFlow(
             activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE).getBoolean("vega_profiling_enabled", false),
+        )
+        _walletPolicy = MutableStateFlow(
+            activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE).let { p ->
+                org.siros.sdk.wallet.WalletPolicyOptions.fromStored { p.getString("$POLICY_PREFIX$it", null) }
+            },
         )
     }
 
@@ -418,6 +433,14 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             .edit()
             .putBoolean("vega_profiling_enabled", enabled)
             .apply()
+    }
+
+    /** Persists the policy; takes effect on the wallet [rebuildWalletIfNeeded] next creates - see [walletPolicy]. */
+    fun updateWalletPolicy(options: org.siros.sdk.wallet.WalletPolicyOptions) {
+        _walletPolicy.value = options
+        activity.getSharedPreferences(SETTINGS_PREFS, android.content.Context.MODE_PRIVATE).edit().apply {
+            options.toStored().forEach { (k, v) -> putString("$POLICY_PREFIX$k", v) }
+        }.apply()
     }
 
     fun updateReaderTrustRootCertificatePem(pem: String) {
@@ -937,6 +960,11 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                             zkSystems = wallet.zkSystemIds
                                 .map { SirosCredentialRegistry.ZkSystem(it, emptyMap()) },
                             useStockMatcher = BuildConfig.STOCK_DC_MATCHER,
+                            // circuit_zk: the types answered with a proof, and the
+                            // circuits that prove them. Empty while the policy
+                            // setting is off.
+                            claimlessDoctypes = wallet.circuitZkDocTypes,
+                            circuitZkCircuits = wallet.circuitZkCircuits,
                         )
                         refreshCredentialStatuses(newState.credentialsOrEmpty())
                         refreshWscdTofuMapping()
@@ -2620,7 +2648,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             null
         }
 
-        return WalletConfig(
+        val base = WalletConfig(
             backendUrl = _backendUrl.value,
             tenantId = _tenantId.value,
             zkCircuitUrls = _zkCircuitUrls.value,
@@ -2671,11 +2699,18 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 prefetchedFido2Pin = null
             },
         )
+        // The user's request-policy settings (non-disclosure, circuit_zk, DC API origin rules, verifier ids).
+        val policy = _walletPolicy.value
+        // The fake prover is an opt-in that goes with the demo circuit table; otherwise the SDK's real prover serves the catalog's circuits.
+        return policy.applyTo(base, circuits = if (policy.fakeProver) SampleCircuitZk.circuits else SampleCircuitZk.catalogCircuits)
     }
 
     companion object {
         /** The app's own settings file (the older toggles share the test-overrides file). */
         private const val SETTINGS_PREFS = "siros_sample_settings"
+
+        /** Key prefix of the persisted [org.siros.sdk.wallet.WalletPolicyOptions]. */
+        private const val POLICY_PREFIX = "wallet_policy_"
 
         private const val TAG = "SIROS_VM"
 

@@ -2,6 +2,16 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Δημιουργία απόδειξης μηδενικής γνώσης…</string>
     <string name="siros_dcapi_zk_proof_detail">Δεν κοινοποιούνται προσωπικά δεδομένα - μόνο μια κρυπτογραφική απόδειξη ότι πληροίτε το αίτημα.</string>
+    <string name="siros_dcapi_refused_title">Το αίτημα δεν ολοκληρώθηκε</string>
+    <string name="siros_dcapi_refused_ok">OK</string>
+    <string name="siros_dcapi_refused_not_trusted">Αυτός ο ιστότοπος δεν είναι αξιόπιστος για το πορτοφόλι σας, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_trust_unavailable">Το πορτοφόλι σας δεν μπόρεσε να ελέγξει αυτή τη στιγμή αν ο ιστότοπος είναι αξιόπιστος, γι\' αυτό δεν κοινοποιήθηκε τίποτα. Ελέγξτε τη σύνδεσή σας και δοκιμάστε ξανά.</string>
+    <string name="siros_dcapi_refused_no_matching_credential">Δεν έχετε διαπιστευτήριο που να ικανοποιεί αυτό το αίτημα, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_selected_unavailable">Το διαπιστευτήριο που επιλέξατε δεν μπορεί να χρησιμοποιηθεί για αυτό το αίτημα ή δεν έχει άλλες χρήσεις, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_unsupported_request">Το πορτοφόλι σας δεν μπορεί να απαντήσει σε αυτό το είδος αιτήματος, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_request_not_verified">Δεν ήταν δυνατό να επαληθευτεί ότι το αίτημα προέρχεται από τον ιστότοπο στον οποίο βρίσκεστε, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_verifier_id_unavailable">Το πορτοφόλι σας δεν μπόρεσε να καθορίσει ποιος ζητά τα στοιχεία, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_proof_failed">Το πορτοφόλι σας δεν μπόρεσε να δημιουργήσει την απόδειξη, γι\' αυτό δεν κοινοποιήθηκε τίποτα. Δοκιμάστε ξανά.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">Ο εκδότης δεν ήταν δυνατό να επαληθευτεί ως αξιόπιστος, επομένως το διαπιστευτήριο δεν προστέθηκε.</string>
 </resources>

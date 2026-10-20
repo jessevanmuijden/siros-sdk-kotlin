@@ -109,7 +109,7 @@ class KeystoreException(
 ) : SirosException(message, cause, errorCode)
 
 /** Raised for wallet-level orchestration errors. */
-class WalletException(
+open class WalletException(
     message: String,
     cause: Throwable? = null,
     errorCode: String = "wallet_error",

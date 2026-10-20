@@ -5,6 +5,17 @@
          localises or rewords these by defining strings with the same names. -->
     <string name="siros_dcapi_zk_proof_status">Generating zero-knowledge proof…</string>
     <string name="siros_dcapi_zk_proof_detail">No personal data is shared - only a cryptographic proof that you meet the request.</string>
+    <!-- Shown to the USER when the wallet refuses a DC API request; the verifier only ever gets access_denied. -->
+    <string name="siros_dcapi_refused_title">Request not completed</string>
+    <string name="siros_dcapi_refused_ok">OK</string>
+    <string name="siros_dcapi_refused_not_trusted">This site is not one your wallet trusts, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_trust_unavailable">Your wallet could not check whether this site can be trusted right now, so nothing was shared. Check your connection and try again.</string>
+    <string name="siros_dcapi_refused_no_matching_credential">You do not have a credential that satisfies this request, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_selected_unavailable">The credential you picked cannot be used for this request, or it has no uses left, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_unsupported_request">Your wallet cannot answer this kind of request, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_request_not_verified">This request could not be verified as coming from the site you are on, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_verifier_id_unavailable">Your wallet could not work out who is asking, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_proof_failed">Your wallet could not create the proof, so nothing was shared. Please try again.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">This issuer could not be verified as trusted, so the credential was not added.</string>
 </resources>

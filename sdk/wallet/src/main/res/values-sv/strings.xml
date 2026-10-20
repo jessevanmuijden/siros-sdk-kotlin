@@ -2,6 +2,16 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Genererar nollkunskapsbevis…</string>
     <string name="siros_dcapi_zk_proof_detail">Inga personuppgifter delas - endast ett kryptografiskt bevis på att du uppfyller begäran.</string>
+    <string name="siros_dcapi_refused_title">Begäran slutfördes inte</string>
+    <string name="siros_dcapi_refused_ok">OK</string>
+    <string name="siros_dcapi_refused_not_trusted">Den här webbplatsen är inte en som din plånbok litar på, så ingenting delades.</string>
+    <string name="siros_dcapi_refused_trust_unavailable">Din plånbok kunde inte kontrollera just nu om webbplatsen går att lita på, så ingenting delades. Kontrollera anslutningen och försök igen.</string>
+    <string name="siros_dcapi_refused_no_matching_credential">Du har ingen legitimation som uppfyller begäran, så ingenting delades.</string>
+    <string name="siros_dcapi_refused_selected_unavailable">Legitimationen du valde kan inte användas för den här begäran, eller har inga användningar kvar, så ingenting delades.</string>
+    <string name="siros_dcapi_refused_unsupported_request">Din plånbok kan inte besvara den här typen av begäran, så ingenting delades.</string>
+    <string name="siros_dcapi_refused_request_not_verified">Begäran kunde inte verifieras som kommande från webbplatsen du befinner dig på, så ingenting delades.</string>
+    <string name="siros_dcapi_refused_verifier_id_unavailable">Din plånbok kunde inte avgöra vem som frågar, så ingenting delades.</string>
+    <string name="siros_dcapi_refused_proof_failed">Din plånbok kunde inte skapa beviset, så ingenting delades. Försök igen.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">Utfärdaren kunde inte verifieras som betrodd, så legitimationen lades inte till.</string>
 </resources>

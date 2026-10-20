@@ -100,7 +100,12 @@ data class ZkCircuitDescriptor(
     val publishedAt: String = "",
     val deprecatedAt: String? = null,
     val notes: String? = null,
-)
+    /** The circuit's structured `capabilities`, when the catalog has them. Passed to the matcher verbatim, never read here. */
+    val capabilities: JsonObject? = null,
+) {
+    /** Published, `active` and not deprecated: the only state in which a circuit may be proved with. */
+    fun isActive(): Boolean = published && deprecatedAt == null && status == "active"
+}
 
 /**
  * The top-level document served at `GET /v1/manifest.json`, mirroring
@@ -178,12 +183,22 @@ class ZkCircuitClient(
      * the case an ISO 18013-5 proximity presentation exists for.
      */
     private val cacheDir: File? = null,
+    /** The most a manifest or descriptor body may be: a larger one is refused, not read into memory. */
+    private val maxDescriptorBytes: Int = DEFAULT_MAX_DESCRIPTOR_BYTES,
+    /** The most an artifact may be, whatever the catalog says it is: a larger artifact is refused unfetched. */
+    private val maxArtifactBytes: Long = DEFAULT_MAX_ARTIFACT_BYTES,
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
     companion object {
         /** Default zk-circuits catalog base URL (pre-DNS Fly.io deployment). */
         const val DEFAULT_ZK_CIRCUIT_URL = "https://zk-circuits.fly.dev"
+
+        /** Default [maxDescriptorBytes]: 4 MiB (the real manifest is far smaller). */
+        const val DEFAULT_MAX_DESCRIPTOR_BYTES = 4 * 1024 * 1024
+
+        /** Default [maxArtifactBytes]: 256 MiB (the largest real artifact is about 4 MB compressed). */
+        const val DEFAULT_MAX_ARTIFACT_BYTES = 256L * 1024 * 1024
     }
 
     /**
@@ -221,7 +236,15 @@ class ZkCircuitClient(
             val body = fetchRaw(url) ?: continue
             try {
                 val descriptor = json.decodeFromString(ZkCircuitDescriptor.serializer(), body)
-                writeCached(descriptorFile(id), body.toByteArray(Charsets.UTF_8))
+                if (descriptor.isActive()) {
+                    writeCached(descriptorFile(id), body.toByteArray(Charsets.UTF_8))
+                    seen[descriptor.id] = descriptor
+                } else {
+                    // Seen retired: it stops being usable now, not at the next refresh (the caller sees the
+                    // descriptor and refuses it; nothing of it stays cached to serve an offline wallet).
+                    expunge(descriptor)
+                    removeCached(descriptorFile(id))
+                }
                 return@withContext descriptor
             } catch (e: Exception) {
                 Timber.w(e, "Failed to parse zk-circuit descriptor '$id' from $url")
@@ -267,10 +290,15 @@ class ZkCircuitClient(
     suspend fun downloadArtifact(descriptor: ZkCircuitDescriptor): ByteArray = withContext(Dispatchers.IO) {
         val artifact = descriptor.artifact
             ?: throw ZkArtifactException("Circuit '${descriptor.id}' has no artifact")
+        // The size is part of the catalog's claim and bounds what is fetched: absent, non-positive or over
+        // the ceiling is refused before any byte is read.
+        if (artifact.size <= 0 || artifact.size > maxArtifactBytes) {
+            throw ZkArtifactException("Circuit '${descriptor.id}' declares an unacceptable artifact size (${artifact.size})")
+        }
         val expectedHash = bareHex(artifact.hash)
         val cacheFile = artifactFile(expectedHash)
         readCached(cacheFile)?.let { cached ->
-            if (sha256Hex(cached).equals(expectedHash, ignoreCase = true)) {
+            if (cached.size.toLong() == artifact.size && sha256Hex(cached).equals(expectedHash, ignoreCase = true)) {
                 return@withContext cached
             }
             Timber.w("Cached zk-circuit artifact for '${descriptor.id}' failed its hash check - discarding it")
@@ -279,9 +307,14 @@ class ZkCircuitClient(
 
         var lastFailure: String? = null
         for (url in candidateArtifactUrls(artifact)) {
-            val bytes = fetchBytes(url)
+            val bytes = fetchBytes(url, artifact.size)
             if (bytes == null) {
                 lastFailure = "fetch failed from $url"
+                continue
+            }
+            if (bytes.size.toLong() != artifact.size) {
+                Timber.w("zk-circuit artifact size mismatch for '${descriptor.id}' from $url: expected ${artifact.size}, got ${bytes.size}")
+                lastFailure = "size mismatch from $url"
                 continue
             }
             val actualHash = sha256Hex(bytes)
@@ -294,12 +327,73 @@ class ZkCircuitClient(
                 continue
             }
             writeCached(cacheFile, bytes)
+            seen[descriptor.id] = descriptor
             return@withContext bytes
         }
         throw ZkArtifactException(
             "Failed to download a hash-verified artifact for circuit '${descriptor.id}' " +
                 "from any of ${sources.size} source(s)" + (lastFailure?.let { " (last: $it)" } ?: ""),
         )
+    }
+
+    /** Circuits fetched in this process, by id: what a refresh may need to expunge when there is no disk cache. */
+    private val seen = java.util.concurrent.ConcurrentHashMap<String, ZkCircuitDescriptor>()
+
+    /** Every descriptor this client knows of: the cached ones and those fetched in this process, by id. */
+    fun knownDescriptors(): Map<String, ZkCircuitDescriptor> {
+        val out = LinkedHashMap<String, ZkCircuitDescriptor>()
+        val dir = cacheDir?.let { File(it, "descriptors") }
+        dir?.listFiles()?.filter { it.isFile && it.name.endsWith(".json") }?.forEach { f ->
+            try {
+                val d = json.decodeFromString(ZkCircuitDescriptor.serializer(), f.readText())
+                out[d.id] = d
+            } catch (e: Exception) {
+                Timber.w(e, "Unreadable cached zk-circuit descriptor ${f.name}; removing it")
+                f.delete()
+            }
+        }
+        out.putAll(seen)
+        return out
+    }
+
+    /** Stores [descriptor] as the cached descriptor of its id (a refresh replaces a stale copy with the manifest's). */
+    fun cacheDescriptor(descriptor: ZkCircuitDescriptor) {
+        writeCached(descriptorFile(descriptor.id), json.encodeToString(ZkCircuitDescriptor.serializer(), descriptor).toByteArray(Charsets.UTF_8))
+        // A copy cached under an alias is stale now; the next lookup by alias fetches it afresh.
+        descriptor.aliases.forEach { removeCached(descriptorFile(it)) }
+        seen[descriptor.id] = descriptor
+    }
+
+    /** Removes everything cached for [descriptor]: its descriptor under its id and aliases, and its artifact by hash. */
+    fun expunge(descriptor: ZkCircuitDescriptor) = expunge(descriptor, keepArtifactHashes = emptySet())
+
+    /** As [expunge], but an artifact whose (lower-case, bare) hash is in [keepArtifactHashes] stays: another circuit uses it. */
+    private fun expunge(descriptor: ZkCircuitDescriptor, keepArtifactHashes: Set<String>) {
+        (listOf(descriptor.id) + descriptor.aliases).forEach { descriptorFile(it)?.delete() }
+        descriptor.artifact?.hash?.let(::bareHex)?.takeIf { it.lowercase() !in keepArtifactHashes }?.let { artifactFile(it)?.delete() }
+        seen.remove(descriptor.id)
+    }
+
+    /**
+     * Keeps only what [active] (the circuits a COMPLETE catalog manifest lists as published, current and `active`)
+     * names: every other cached descriptor and every cached artifact whose hash no active circuit uses is deleted.
+     * Returns the known descriptors that were retired by this. Call only with the
+     * circuits of a complete catalog.
+     */
+    fun retainOnly(active: List<ZkCircuitDescriptor>): List<ZkCircuitDescriptor> {
+        val activeIds = active.flatMap { listOf(it.id) + it.aliases }.toSet()
+        val activeHashes = active.mapNotNull { it.artifact?.hash?.let(::bareHex)?.lowercase() }.toSet()
+        val retired = knownDescriptors().values.filter { it.id !in activeIds }
+        retired.forEach { expunge(it, activeHashes) }
+        // Descriptor files whose id is neither an active id nor an alias (a descriptor cached under a retired alias).
+        cacheDir?.let { File(it, "descriptors") }?.listFiles()?.forEach { f ->
+            val name = java.net.URLDecoder.decode(f.name.removeSuffix(".json"), "UTF-8")
+            if (f.isFile && name !in activeIds) f.delete()
+        }
+        cacheDir?.let { File(it, "artifacts") }?.listFiles()?.forEach { f ->
+            if (f.isFile && f.name.lowercase() !in activeHashes) f.delete()
+        }
+        return retired
     }
 
     /** Whether [downloadArtifact] would be served from disk for [descriptor]. Cheap; for diagnostics and tests. */
@@ -318,6 +412,16 @@ class ZkCircuitClient(
         // Ids are catalog-controlled but still go through a filename-safe
         // encoding so a hostile or odd id cannot escape the directory.
         cacheDir?.let { File(File(it, "descriptors"), java.net.URLEncoder.encode(id, "UTF-8") + ".json") }
+
+    /**
+     * Removes a cached file. A file that is already absent is fine; one that exists and cannot be removed is logged (the file
+     * name only, never contents): the cache is best effort, so this never fails the caller, but a stale copy that stays
+     * must be visible.
+     */
+    private fun removeCached(file: File?) {
+        if (file == null || !file.exists()) return
+        if (!file.delete()) Timber.w("zk-circuit cache: could not remove ${file.name}")
+    }
 
     private fun readCached(file: File?): ByteArray? =
         try {
@@ -374,19 +478,37 @@ class ZkCircuitClient(
      */
     private fun bareHex(hash: String): String = hash.removePrefix("sha256:")
 
+    // Throwable, not Exception: an OutOfMemoryError from a hostile body is a failed fetch, not a crash.
+    // Cancellation is the one thing that must propagate.
     private suspend fun fetchRaw(url: String): String? {
         return try {
-            if (httpGet != null) httpGet.invoke(url) else fetchTextWithOkHttp(url)
-        } catch (e: Exception) {
+            val body = if (httpGet != null) httpGet.invoke(url) else fetchTextWithOkHttp(url)
+            if (body != null && body.length > maxDescriptorBytes) {
+                Timber.w("zk-circuit response from $url exceeds the $maxDescriptorBytes-byte limit; refused")
+                null
+            } else {
+                body
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
             Timber.w(e, "zk-circuit fetch error from $url")
             null
         }
     }
 
-    private suspend fun fetchBytes(url: String): ByteArray? {
+    private suspend fun fetchBytes(url: String, limit: Long): ByteArray? {
         return try {
-            if (httpGetBytes != null) httpGetBytes.invoke(url) else fetchBytesWithOkHttp(url)
-        } catch (e: Exception) {
+            val bytes = if (httpGetBytes != null) httpGetBytes.invoke(url) else fetchBytesWithOkHttp(url, limit)
+            if (bytes != null && bytes.size.toLong() > limit) {
+                Timber.w("zk-circuit artifact from $url exceeds its declared size; refused")
+                null
+            } else {
+                bytes
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
             Timber.w(e, "zk-circuit artifact fetch error from $url")
             null
         }
@@ -399,18 +521,35 @@ class ZkCircuitClient(
                 Timber.w("zk-circuit fetch failed: ${response.code} from $url")
                 return null
             }
-            return response.body?.string()
+            val body = response.body ?: return null
+            val bytes = readBounded(body, maxDescriptorBytes.toLong()) ?: run {
+                Timber.w("zk-circuit response from $url exceeds the $maxDescriptorBytes-byte limit; refused")
+                return null
+            }
+            return bytes.toString(Charsets.UTF_8)
         }
     }
 
-    private fun fetchBytesWithOkHttp(url: String): ByteArray? {
+    /** At most [limit] bytes of [body], or null if it is longer: never reads the excess, whatever Content-Length says. */
+    private fun readBounded(body: okhttp3.ResponseBody, limit: Long): ByteArray? {
+        if (body.contentLength() > limit) return null
+        val source = body.source()
+        source.request(limit + 1)
+        if (source.buffer.size > limit) return null
+        return source.buffer.readByteArray()
+    }
+
+    private fun fetchBytesWithOkHttp(url: String, limit: Long): ByteArray? {
         val request = Request.Builder().url(url).get().build()
         httpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 Timber.w("zk-circuit artifact fetch failed: ${response.code} from $url")
                 return null
             }
-            return response.body?.bytes()
+            val body = response.body ?: return null
+            return readBounded(body, limit).also {
+                if (it == null) Timber.w("zk-circuit artifact from $url exceeds its declared size; refused")
+            }
         }
     }
 }

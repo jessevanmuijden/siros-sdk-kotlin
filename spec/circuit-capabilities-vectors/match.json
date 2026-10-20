@@ -1,0 +1,2788 @@
+{
+  "description": "Reference vectors for the capabilities matching rule (docs/capabilities.md). Each case gives candidate circuits (partial descriptors: only id, aliases, system, status and capabilities, which are all Match reads), a request, and the expected ids in rank order; expectError means the request is malformed. An implementation passes if, for every case, its result equals expect exactly, order included.",
+  "version": 1,
+  "cases": [
+    {
+      "name": "baseline",
+      "description": "A circuit declaring the requested function matches.",
+      "circuits": [
+        {
+          "id": "c1",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "c1"
+      ]
+    },
+    {
+      "name": "system-filter",
+      "description": "Rule 1: system must be in proofSystems when given.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysB",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ],
+        "proofSystems": [
+          "sysB"
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "system-filter-empty-means-any",
+      "description": "Rule 1: an empty or absent proofSystems filter matches every system.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysB",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a",
+        "b"
+      ]
+    },
+    {
+      "name": "id-filter",
+      "description": "Rule 1: id must be in circuitIds when given.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ],
+        "circuitIds": [
+          "b"
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "id-filter-alias",
+      "description": "Rule 1: an alias of the entry satisfies circuitIds.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "aliases": [
+            "a-alias"
+          ],
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ],
+        "circuitIds": [
+          "a-alias"
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "id-filter-no-hit",
+      "description": "Rule 1: nothing listed in circuitIds exists, so nothing matches.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ],
+        "circuitIds": [
+          "zzz"
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "system-and-id-filters-both-apply",
+      "description": "Rule 1: both filters must pass.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysB",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ],
+        "proofSystems": [
+          "sysA"
+        ],
+        "circuitIds": [
+          "b"
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "revoked-never-matches",
+      "description": "Rule 2: revoked entries never match.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "revoked",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "revoked-alone",
+      "description": "Rule 2: revoked is the only candidate, result is empty.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "revoked",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "deprecated-ranks-below-active",
+      "description": "Rule 2: a deprecated entry matches but ranks below an active one even when its id sorts first.",
+      "circuits": [
+        {
+          "id": "a-old",
+          "system": "sysA",
+          "status": "deprecated",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b-new",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b-new",
+        "a-old"
+      ]
+    },
+    {
+      "name": "deprecated-alone-matches",
+      "description": "Rule 2: a deprecated entry is still usable when nothing better matches.",
+      "circuits": [
+        {
+          "id": "a-old",
+          "system": "sysA",
+          "status": "deprecated",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a-old"
+      ]
+    },
+    {
+      "name": "no-capabilities-not-matchable",
+      "description": "Rule 3: an entry without capabilities cannot be matched.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active"
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "presentation-mismatch",
+      "description": "Rule 3: capabilities.presentation must equal the request's.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "other",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "credential-format-mismatch",
+      "description": "Rule 3: credential.format must equal the request's.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt2",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "credential-type-mismatch",
+      "description": "Rule 3: credential.type must equal the request's.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type2"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "function-not-declared",
+      "description": "Rule 4: a requested function the circuit does not declare.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-other"
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          },
+          {
+            "id": "fn-always",
+            "params": {
+              "mode": "a"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "unlisted-param",
+      "description": "Rule 4: a param not listed for the function is unsupported.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age",
+            "params": {
+              "le": "2000-01-01"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "enum-match",
+      "description": "Rule 4: a value inside the enum satisfies the constraint.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-always",
+            "params": {
+              "mode": "b",
+              "idtype": "y"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "enum-miss",
+      "description": "Rule 4: a value outside the enum fails the constraint.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b",
+                      "c"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-always",
+            "params": {
+              "mode": "c"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "enum-non-string-value",
+      "description": "Rule 4: an enum constraint only accepts a string value.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-always",
+            "params": {
+              "mode": 1
+            }
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "full-date-valid",
+      "description": "Rule 4: type full-date accepts a YYYY-MM-DD date.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age",
+            "params": {
+              "ge": "2008-02-29",
+              "le": "2008-12-31"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "full-date-invalid",
+      "description": "Rule 4: type full-date rejects a non-date value.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age",
+            "params": {
+              "ge": "2009-02-29"
+            }
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "full-date-not-a-string",
+      "description": "Rule 4: type full-date rejects a non-string value.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age",
+            "params": {
+              "ge": 20090101
+            }
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "integer-and-string-types",
+      "description": "Rule 4: type integer and string constraints.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-n",
+                "params": {
+                  "n": {
+                    "type": "integer"
+                  },
+                  "s": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-n",
+            "params": {
+              "n": 3,
+              "s": "x"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "integer-rejects-fraction",
+      "description": "Rule 4: type integer rejects 1.5.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-n",
+                "params": {
+                  "n": {
+                    "type": "integer"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-n",
+            "params": {
+              "n": 1.5
+            }
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "string-type-rejects-number",
+      "description": "Rule 4: type string rejects a non-string value.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-n",
+                "params": {
+                  "s": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-n",
+            "params": {
+              "s": 5
+            }
+          }
+        ]
+      },
+      "expect": []
+    },
+    {
+      "name": "param-omitted-is-fine",
+      "description": "Rule 4: listed params may be left out of a request item.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "max-at-limit",
+      "description": "Rule 4: instance count equal to max is within max.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "max-exceeded",
+      "description": "Rule 4: more instances than max fails.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 2,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          },
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "max-absent-is-unbounded",
+      "description": "Rule 4: no max means any number of instances.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age"
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          },
+          {
+            "id": "fn-age"
+          },
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "always-missing",
+      "description": "Rule 5: an always function the request does not ask for rules the circuit out.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b"
+      ]
+    },
+    {
+      "name": "always-present",
+      "description": "Rule 5: asking for the always function satisfies it.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-always"
+          },
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "always-only-request",
+      "description": "Rule 5: a request for just the always function matches.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              },
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-always",
+            "params": {
+              "mode": "a"
+            }
+          }
+        ]
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "empty-req",
+      "description": "Rules 4 and 5: an empty req matches a circuit with no always function and not one with.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-always",
+                "always": true,
+                "params": {
+                  "mode": {
+                    "enum": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "idtype": {
+                    "enum": [
+                      "x",
+                      "y"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": []
+      },
+      "expect": [
+        "a"
+      ]
+    },
+    {
+      "name": "profile-preferred",
+      "description": "Ranking: a circuit whose issuance_profile the credential conforms to (or that has none) ranks above one whose issuance_profile it does not conform to.",
+      "circuits": [
+        {
+          "id": "a-strict",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1",
+              "issuance_profile": "prof"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b-open",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b-open",
+        "a-strict"
+      ]
+    },
+    {
+      "name": "profile-conformant",
+      "description": "Ranking: with a conforming credential both rank equally and ids decide.",
+      "circuits": [
+        {
+          "id": "a-strict",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1",
+              "issuance_profile": "prof"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b-open",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ],
+        "conformsToProfiles": [
+          "prof"
+        ]
+      },
+      "expect": [
+        "a-strict",
+        "b-open"
+      ]
+    },
+    {
+      "name": "profile-before-status",
+      "description": "Ranking: issuance_profile preference outranks active over deprecated.",
+      "circuits": [
+        {
+          "id": "a-active-strict",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1",
+              "issuance_profile": "prof"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b-old-open",
+          "system": "sysA",
+          "status": "deprecated",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "b-old-open",
+        "a-active-strict"
+      ]
+    },
+    {
+      "name": "id-tiebreak",
+      "description": "Ranking: otherwise equal matches are ordered by id.",
+      "circuits": [
+        {
+          "id": "c",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "b",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "name": "invalid-request-no-presentation",
+      "description": "A request without presentation is malformed.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": []
+      },
+      "expectError": true
+    },
+    {
+      "name": "invalid-request-no-credential-type",
+      "description": "A request without credential.type is malformed.",
+      "circuits": [
+        {
+          "id": "a",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1"
+        },
+        "req": []
+      },
+      "expectError": true
+    },
+    {
+      "name": "issuance-profile-served",
+      "description": "credential.issuance_profile is a constraint on the input credential, not a filter: a circuit carrying it is served normally.",
+      "circuits": [
+        {
+          "id": "c1",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1",
+              "issuance_profile": "prof"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expect": [
+        "c1"
+      ]
+    },
+    {
+      "name": "legacy-profile-key-fails-closed",
+      "description": "The key `profile` was renamed `issuance_profile`; the old key is an unknown member, so the capabilities are rejected and the circuit is not served. expectRejected: the capabilities themselves fail to parse (fail closed), which is why nothing is served.",
+      "circuits": [
+        {
+          "id": "c1",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1",
+              "profile": "prof"
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expectRejected": true,
+      "expect": []
+    },
+    {
+      "name": "issuance-profile-empty-fails-closed",
+      "description": "credential.issuance_profile must be a non-empty string: an empty one is rejected and the circuit is not served. expectRejected: the capabilities themselves fail to parse (fail closed), which is why nothing is served.",
+      "circuits": [
+        {
+          "id": "c1",
+          "system": "sysA",
+          "status": "active",
+          "capabilities": {
+            "schema": 1,
+            "presentation": "pres",
+            "credential": {
+              "format": "fmt1",
+              "type": "type1",
+              "issuance_profile": ""
+            },
+            "functions": [
+              {
+                "id": "fn-age",
+                "max": 1,
+                "params": {
+                  "ge": {
+                    "type": "full-date"
+                  },
+                  "le": {
+                    "type": "full-date"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "request": {
+        "presentation": "pres",
+        "credential": {
+          "format": "fmt1",
+          "type": "type1"
+        },
+        "req": [
+          {
+            "id": "fn-age"
+          }
+        ]
+      },
+      "expectRejected": true,
+      "expect": []
+    }
+  ]
+}

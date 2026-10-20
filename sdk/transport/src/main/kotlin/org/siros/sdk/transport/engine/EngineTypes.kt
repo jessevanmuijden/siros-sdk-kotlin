@@ -321,6 +321,24 @@ data class FlowCompleteMessage(
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
     @SerialName("selected_credential_configuration_id") val selectedCredentialConfigurationId: String? = null,
     /**
+     * The response-level `credential_metadata` of the issuer's credential response, exactly as the engine relays
+     * it (one object for every credential of the response). Not display metadata; see [ResponseCredentialMetadata].
+     */
+    @SerialName("credential_metadata") override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
+    /** Set by the engine only when the issuer's response was JWE-decrypted. Metadata without it came over plain JSON. */
+    @SerialName("credential_metadata_encrypted_response")
+    @Serializable(with = org.siros.sdk.transport.EncryptedResponseFlagSerializer::class)
+    override val credentialMetadataEncryptedResponse: Boolean = false,
+    /**
+     * `redacted_members`: on a REPLAYED or resumed completion, the members that were present and withheld (from
+     * `credential_metadata`, `credential_metadata_encrypted_response`, [refreshToken], [dpopJwk], [dpopKeyId]); the
+     * credentials are kept. A listed member is NOT RECOVERABLE: never invented or reused from an earlier flow, and renewal
+     * of that issuance is unavailable (the client re-issues).
+     */
+    @SerialName("redacted_members")
+    @Serializable(with = org.siros.sdk.transport.RedactedMembersSerializer::class)
+    override val redactedMembers: Set<String> = emptySet(),
+    /**
      * OAuth refresh_token the issuer returned alongside this batch, if any
      * (credential re-issuance/renewal plan, Phase 1). The SDK does not
      * persist this durably yet (that's Phase 2 - `privatedata` storage);
@@ -354,7 +372,7 @@ data class FlowCompleteMessage(
      * the consumer never races the separate progress and completion channels.
      */
     @kotlinx.serialization.Transient val issuerTrust: IssuerTrustReport? = null,
-) {
+) : org.siros.sdk.transport.DeliveredResponseMetadata {
     /**
      * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
      * stamped by the session on receipt, never on the wire. Kept out of the
@@ -380,7 +398,11 @@ data class CredentialResult(
     val vct: String? = null,
     @SerialName("type_metadata") val typeMetadata: JsonElement? = null,
     @SerialName("notification_id") val notificationId: String? = null,
-)
+    /** The credential's own members only: delivered metadata is response-level, see [FlowCompleteMessage.credentialMetadata]. */
+) {
+    // The credential itself is never printed.
+    override fun toString() = "CredentialResult(format=$format, credential=<redacted>, notificationId=$notificationId)"
+}
 
 @Serializable
 data class FlowErrorMessage(

@@ -60,6 +60,21 @@ data class CredentialRefreshTokenEntry(
     val dpopKeyId: String? = null,
 )
 
+// Members this class writes itself. Every other member of the same object is
+// carried through from the container it was read from (privatedata-spec §6: a
+// reader that rewrites the container MUST preserve what it does not understand).
+// The credential-entry set matches the eight fields rebuilt per credential plus
+// `metadata`; the state set matches the Swift SDK's ownedWalletStateMembers.
+private val OWNED_CREDENTIAL_MEMBERS = setOf(
+    "credentialId", "format", "data", "kid", "instanceId", "batchId",
+    "credentialIssuerIdentifier", "credentialConfigurationId", "metadata",
+)
+private val OWNED_STATE_MEMBERS = setOf(
+    "schemaVersion", "keypairs", "credentials", "presentations", "settings",
+    "credentialIssuanceSessions", "wscdCredentials", "extensions", "credentialRefreshTokens",
+)
+private val OWNED_CONTAINER_MEMBERS = setOf("lastEventHash", "events", "S")
+
 /**
  * JWE-based keystore implementation fully compatible with the wallet-frontend
  * encrypted container format.
@@ -91,7 +106,7 @@ class JweKeystore(
      * orphans a credential.
      */
     private val didKeyVersion: DidKeyVersion = DidKeyVersion.forProfile(profile),
-) : KeystoreManager, ExtensionStore {
+) : KeystoreManager, ExtensionStore, HolderWitnessSource {
 
     /**
      * The pre-DIIP constructor shape, kept so existing Java and already-compiled
@@ -150,7 +165,64 @@ class JweKeystore(
     // client does, via this field.
     private var credentialRefreshTokens: MutableMap<Long, CredentialRefreshTokenEntry> = mutableMapOf()
 
+    // Per-credential `S.credentials[].metadata` (privatedata-spec §6, §5A):
+    // issuer-delivered, possibly secret, values stored EXACTLY as received.
+    //
+    // A side map on purpose, and never folded into the credential's stored
+    // JSON in [credentials]: that string is a serialized StoredCredential,
+    // whose own `metadata` member is the DISPLAY metadata object. An array
+    // under that name would fail to decode, and the store would silently drop
+    // the credential. The two are unrelated and only share a name.
+    //
+    // A JsonElement, not a JsonArray, because a peer may have written a
+    // malformed (non-array) member; it is carried through uninterpreted rather
+    // than dropped. [getCredentialMetadata] only ever returns an array.
+    private var credentialMetadata: MutableMap<Long, kotlinx.serialization.json.JsonElement> = mutableMapOf()
+
     override val isUnlocked: Boolean get() = mainKey != null
+
+    /**
+     * Derives a secret from the container `mainKey` without exporting it:
+     * `HKDF-SHA256(mainKey, salt = empty, info)[:length]`. See [PrivateSeed].
+     *
+     * `mainKey` is permanent: it is created once and never rotated or
+     * re-keyed, because every secret derived from it would change. Nothing in
+     * this class replaces it after [unlock].
+     *
+     * Internal: outside this module only the purpose-bound [HolderWitnessSource] is available.
+     *
+     * @throws KeystoreException if the keystore is locked.
+     */
+    internal fun deriveSecret(info: ByteArray, length: Int): ByteArray {
+        val key = mainKey ?: throw KeystoreException("Keystore is locked")
+        val ikm = key.encoded
+        try {
+            return EncryptedContainer.hkdfSha256(ikm, ByteArray(0), info, length)
+        } finally {
+            ikm.fill(0)
+        }
+    }
+
+    private val rootSecret = object : RootSecret {
+        override fun deriveSecret(info: ByteArray, length: Int): ByteArray = this@JweKeystore.deriveSecret(info, length)
+    }
+
+    private val witnessSource by lazy { SeedBackedWitnessSource(PrivateSeed(rootSecret)) }
+
+    override fun privateSeedCommitment(credentialType: String, issuer: String): ByteArray = witnessSource.privateSeedCommitment(credentialType, issuer)
+
+    override fun circuitZkPresenter(
+        prover: CircuitZkProver,
+        circuits: org.siros.sdk.credentials.CircuitZkCircuitSource,
+        validator: org.siros.sdk.credentials.CircuitZkRequestValidator,
+        handlers: List<CircuitZkFunctionHandler>,
+        residency: ZkProverResidency?,
+        userValue: ByteArray?,
+        serving: org.siros.sdk.credentials.CircuitZkServing?,
+    ): CircuitZkPresenter = witnessSource.circuitZkPresenter(prover, circuits, validator, handlers, residency, userValue, serving)
+
+    /** The root as the tests of this module see it. */
+    internal fun rootSecretForTest(): RootSecret = rootSecret
 
     override suspend fun unlock(
         prfOutput: ByteArray,
@@ -296,13 +368,26 @@ class JweKeystore(
         // so a value that arrives quoted (e.g. from a not-yet-migrated
         // container) still parses instead of silently dropping the entry.
         val credsArray = state["credentials"]
+        credentialMetadata.clear()
         if (credsArray is kotlinx.serialization.json.JsonArray) {
             for (entry in credsArray) {
                 val credObj = entry as? kotlinx.serialization.json.JsonObject ?: continue
+                // An entry this build cannot read (no numeric credentialId, or
+                // no data) is skipped here but NOT lost: buildWalletStateV3
+                // writes it back verbatim (see [isOwnedCredentialEntry]).
                 val credId = credObj["credentialId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
                     ?: continue
                 val data = credObj["data"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
                     ?: continue
+                // Container `metadata`: kept out of storedJson below (see
+                // [credentialMetadata]). null and [] both mean "none".
+                credObj["metadata"]?.let { md ->
+                    if (md !is kotlinx.serialization.json.JsonNull &&
+                        !(md is kotlinx.serialization.json.JsonArray && md.isEmpty())
+                    ) {
+                        credentialMetadata[credId] = md
+                    }
+                }
                 val credKid = credObj["kid"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
                 val credFormat = credObj["format"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
                 val credIssuerIdent = credObj["credentialIssuerIdentifier"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
@@ -442,6 +527,7 @@ class JweKeystore(
     override fun lock() {
         keys.clear()
         credentials.clear()
+        credentialMetadata.clear()
         presentationRecords.clear()
         keyDids.clear()
         wscdCredentials.clear()
@@ -797,6 +883,9 @@ class JweKeystore(
             filterDisclosures(disclosures, disclosedClaims)
         }
 
+        // Fail closed: never disclose (or silently strip) a protected claim.
+        org.siros.sdk.credentials.CredentialDisclosureGuard.requireNoneProtectedSdJwt(credential, selectedDisclosures)
+
         // Build the SD-JWT presentation string (with trailing ~)
         val sdJwtPresentation = buildString {
             append(issuerJwt)
@@ -976,62 +1065,7 @@ class JweKeystore(
                         }
                     }
                 ))
-                put("credentials", kotlinx.serialization.json.JsonArray(
-                    credentials.map { (id, data) ->
-                        // Parse StoredCredential to extract metadata
-                        val parsed = try {
-                            json.parseToJsonElement(data) as? kotlinx.serialization.json.JsonObject
-                        } catch (_: Exception) { null }
-
-                        // Try to find and preserve original credential entry from preserved state.
-                        // credentialId is a privatedata-spec number on the wire (matching
-                        // wallet-frontend), so compare it numerically rather than as a string.
-                        val originalCred = existingState?.let { state ->
-                            (state["S"] as? kotlinx.serialization.json.JsonObject)?.let { s ->
-                                (s["credentials"] as? kotlinx.serialization.json.JsonArray)?.find { entry ->
-                                    (entry as? kotlinx.serialization.json.JsonObject)?.let { e ->
-                                        ((e["credentialId"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() == id)
-                                    } ?: false
-                                }
-                            }
-                        } as? kotlinx.serialization.json.JsonObject
-
-                        // Preserve all metadata fields from original; use stored/parsed values as fallback
-                        val credKid = originalCred?.get("kid")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
-                            ?: parsed?.get("kid")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
-                        val credFormat = originalCred?.get("format")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
-                            ?: parsed?.get("format")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
-                        val credData = originalCred?.get("data")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
-                            ?: parsed?.get("raw")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: data
-                        // Fall back to the credential's own saved JSON (parsed) for a
-                        // credential added THIS session (saveCredential() then export,
-                        // with no matching entry in the previously-imported container
-                        // yet) - without this fallback, a freshly-saved batch
-                        // credential's batchId/instanceId would silently reset to 0 on
-                        // every export until the container is reloaded once.
-                        val instanceId = originalCred?.get("instanceId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() }
-                            ?: parsed?.get("instance_id")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() }
-                            ?: 0
-                        val batchId = originalCred?.get("batchId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
-                            ?: parsed?.get("batch_id")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
-                            ?: 0L
-                        val issuerIdent = originalCred?.get("credentialIssuerIdentifier")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
-                            ?: parsed?.get("credential_issuer_identifier")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
-                        val configId = originalCred?.get("credentialConfigurationId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
-                            ?: parsed?.get("credential_configuration_id")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
-
-                        kotlinx.serialization.json.buildJsonObject {
-                            put("credentialId", kotlinx.serialization.json.JsonPrimitive(id))
-                            put("format", kotlinx.serialization.json.JsonPrimitive(credFormat))
-                            put("data", kotlinx.serialization.json.JsonPrimitive(credData))
-                            put("kid", kotlinx.serialization.json.JsonPrimitive(credKid))
-                            put("instanceId", kotlinx.serialization.json.JsonPrimitive(instanceId))
-                            put("batchId", kotlinx.serialization.json.JsonPrimitive(batchId))
-                            put("credentialIssuerIdentifier", kotlinx.serialization.json.JsonPrimitive(issuerIdent))
-                            put("credentialConfigurationId", kotlinx.serialization.json.JsonPrimitive(configId))
-                        }
-                    }
-                ))
+                put("credentials", buildCredentialEntries(existingState))
                 // presentations is privatedata-spec's normative S.presentations[]
                 // (wallet-frontend's WalletStatePresentation) - genuinely built
                 // from the in-memory presentationRecords map, not passed through
@@ -1069,16 +1103,17 @@ class JweKeystore(
                 ))
 
                 put("settings", kotlinx.serialization.json.buildJsonObject {
-                    // Preserve settings from original state; use "0" as normative default for new state
-                    val refreshTokenAge = existingState?.let { state ->
-                        (state["S"] as? kotlinx.serialization.json.JsonObject)?.get("settings")?.let { s ->
-                            (s as? kotlinx.serialization.json.JsonObject)?.get("openidRefreshTokenMaxAgeInSeconds")
-                                ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
-                        }
-                    } ?: "0"
-                    put("openidRefreshTokenMaxAgeInSeconds", kotlinx.serialization.json.JsonPrimitive(refreshTokenAge))
+                    // Every setting this build does not own survives
+                    // (privatedata-spec §6); only the one it knows is defaulted.
+                    // "0" is the normative default for new state.
+                    val originalSettings = (existingState?.get("S") as? kotlinx.serialization.json.JsonObject)
+                        ?.get("settings") as? kotlinx.serialization.json.JsonObject
+                    originalSettings?.let { for ((name, value) in it) put(name, value) }
+                    if (originalSettings?.get("openidRefreshTokenMaxAgeInSeconds") !is kotlinx.serialization.json.JsonPrimitive) {
+                        put("openidRefreshTokenMaxAgeInSeconds", kotlinx.serialization.json.JsonPrimitive("0"))
+                    }
                 })
-                
+
                 val credIssuanceSessions = existingState?.let { state ->
                     (state["S"] as? kotlinx.serialization.json.JsonObject)?.get("credentialIssuanceSessions")
                         ?: kotlinx.serialization.json.JsonArray(emptyList())
@@ -1125,7 +1160,126 @@ class JweKeystore(
                         }
                     })
                 }
+
+                // Members of S this build does not know are written back
+                // exactly as read (privatedata-spec §6).
+                (existingState?.get("S") as? kotlinx.serialization.json.JsonObject)?.let { originalS ->
+                    for ((name, value) in originalS) {
+                        if (name !in OWNED_STATE_MEMBERS) put(name, value)
+                    }
+                }
             })
+            existingState?.let { orig ->
+                for ((name, value) in orig) {
+                    if (name !in OWNED_CONTAINER_MEMBERS) put(name, value)
+                }
+            }
+        }
+    }
+
+    /**
+     * `S.credentials[]` for export.
+     *
+     * Each entry is rebuilt from the credential's own state for the eight
+     * fields this class owns, but STARTS from the entry the container
+     * originally held, so every member this class does not own survives
+     * (privatedata-spec §6: a rewriting reader MUST preserve unknown members;
+     * the previous closed list silently dropped them). Entries this class
+     * cannot read at all are written back verbatim in their original position.
+     *
+     * Order is: the owned fields, then `metadata` (omitted when there is none;
+     * never `null` or `[]`), then the unknown members in their original order,
+     * which makes a second export of an unchanged state identical to the first.
+     */
+    private fun buildCredentialEntries(
+        existingState: kotlinx.serialization.json.JsonObject?,
+    ): kotlinx.serialization.json.JsonArray {
+        val originalEntries = ((existingState?.get("S") as? kotlinx.serialization.json.JsonObject)
+            ?.get("credentials") as? kotlinx.serialization.json.JsonArray) ?: kotlinx.serialization.json.JsonArray(emptyList())
+        val out = ArrayList<kotlinx.serialization.json.JsonElement>()
+        val emitted = HashSet<Long>()
+        for (entry in originalEntries) {
+            val obj = entry as? kotlinx.serialization.json.JsonObject
+            if (obj != null && isOwnedCredentialEntry(obj)) {
+                val id = (obj["credentialId"] as kotlinx.serialization.json.JsonPrimitive).content.toLong()
+                if (id in credentials && emitted.add(id)) out.add(rebuildCredentialEntry(id, credentials.getValue(id), obj))
+            } else {
+                // Not interpretable here: carried through untouched, unless
+                // an owned credential now has the same id (then ours wins).
+                val collides = obj?.get("credentialId")
+                    ?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
+                    ?.let { it in credentials } ?: false
+                if (!collides) out.add(if (obj != null) withoutEmptyMetadata(obj) else entry)
+            }
+        }
+        for ((id, data) in credentials) {
+            if (emitted.add(id)) out.add(rebuildCredentialEntry(id, data, null))
+        }
+        return kotlinx.serialization.json.JsonArray(out)
+    }
+
+    /** A writer MUST NOT emit `metadata` as null or []: drop exactly those, keep anything else verbatim. */
+    private fun withoutEmptyMetadata(obj: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject {
+        val md = obj["metadata"] ?: return obj
+        val empty = md is kotlinx.serialization.json.JsonNull ||
+            (md is kotlinx.serialization.json.JsonArray && md.isEmpty())
+        return if (empty) kotlinx.serialization.json.JsonObject(obj - "metadata") else obj
+    }
+
+    /** An entry [loadFromWalletStateV3] turns into a stored credential. */
+    private fun isOwnedCredentialEntry(obj: kotlinx.serialization.json.JsonObject): Boolean =
+        (obj["credentialId"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() != null &&
+            obj["data"] is kotlinx.serialization.json.JsonPrimitive
+
+    private fun rebuildCredentialEntry(
+        id: Long,
+        data: String,
+        originalCred: kotlinx.serialization.json.JsonObject?,
+    ): kotlinx.serialization.json.JsonObject {
+        // Parse StoredCredential to extract metadata
+        val parsed = try {
+            json.parseToJsonElement(data) as? kotlinx.serialization.json.JsonObject
+        } catch (_: Exception) { null }
+
+        // Preserve all metadata fields from original; use stored/parsed values as fallback
+        val credKid = originalCred?.get("kid")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?: parsed?.get("kid")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
+        val credFormat = originalCred?.get("format")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?: parsed?.get("format")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
+        val credData = originalCred?.get("data")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?: parsed?.get("raw")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: data
+        // Fall back to the credential's own saved JSON (parsed) for a
+        // credential added THIS session (saveCredential() then export,
+        // with no matching entry in the previously-imported container
+        // yet) - without this fallback, a freshly-saved batch
+        // credential's batchId/instanceId would silently reset to 0 on
+        // every export until the container is reloaded once.
+        val instanceId = originalCred?.get("instanceId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() }
+            ?: parsed?.get("instance_id")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() }
+            ?: 0
+        val batchId = originalCred?.get("batchId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
+            ?: parsed?.get("batch_id")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() }
+            ?: 0L
+        val issuerIdent = originalCred?.get("credentialIssuerIdentifier")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?: parsed?.get("credential_issuer_identifier")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
+        val configId = originalCred?.get("credentialConfigurationId")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull }
+            ?: parsed?.get("credential_configuration_id")?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull } ?: ""
+
+        return kotlinx.serialization.json.buildJsonObject {
+            put("credentialId", kotlinx.serialization.json.JsonPrimitive(id))
+            put("format", kotlinx.serialization.json.JsonPrimitive(credFormat))
+            put("data", kotlinx.serialization.json.JsonPrimitive(credData))
+            put("kid", kotlinx.serialization.json.JsonPrimitive(credKid))
+            put("instanceId", kotlinx.serialization.json.JsonPrimitive(instanceId))
+            put("batchId", kotlinx.serialization.json.JsonPrimitive(batchId))
+            put("credentialIssuerIdentifier", kotlinx.serialization.json.JsonPrimitive(issuerIdent))
+            put("credentialConfigurationId", kotlinx.serialization.json.JsonPrimitive(configId))
+            credentialMetadata[id]?.let { put("metadata", it) }
+            originalCred?.let { orig ->
+                for ((name, value) in orig) {
+                    if (name !in OWNED_CREDENTIAL_MEMBERS) put(name, value)
+                }
+            }
         }
     }
 
@@ -1155,12 +1309,72 @@ class JweKeystore(
     override suspend fun deleteCredential(id: Long): Unit = mutex.withLock {
         requireUnlocked()
         credentials.remove(id)
+        credentialMetadata.remove(id)
+        dropPreservedCredentials(id)
         Unit
     }
 
     override suspend fun clearCredentials(): Unit = mutex.withLock {
         requireUnlocked()
         credentials.clear()
+        credentialMetadata.clear()
+        dropPreservedCredentials(null)
+    }
+
+    /**
+     * Forget the container's original `S.credentials[]` entry for [id] (all of
+     * them when null), so a deleted credential's delivered metadata and
+     * unknown members are not resurrected from the snapshot taken at unlock.
+     */
+    private fun dropPreservedCredentials(id: Long?) {
+        val state = preservedWalletState ?: return
+        val s = state["S"] as? kotlinx.serialization.json.JsonObject ?: return
+        val entries = s["credentials"] as? kotlinx.serialization.json.JsonArray ?: return
+        val kept = if (id == null) emptyList() else entries.filterNot { e ->
+            ((e as? kotlinx.serialization.json.JsonObject)?.get("credentialId") as? kotlinx.serialization.json.JsonPrimitive)
+                ?.content?.toLongOrNull() == id
+        }
+        preservedWalletState = kotlinx.serialization.json.JsonObject(
+            state + ("S" to kotlinx.serialization.json.JsonObject(s + ("credentials" to kotlinx.serialization.json.JsonArray(kept)))),
+        )
+    }
+
+    /**
+     * The issuer-delivered `metadata` of credential [id], exactly as received
+     * (`S.credentials[].metadata`, privatedata-spec §6), or null when there is
+     * none. NEVER display metadata and never part of the credential's stored
+     * JSON. May hold a secret (§5A): a caller must not log, display, export or
+     * present it.
+     */
+    suspend fun getCredentialMetadata(id: Long): kotlinx.serialization.json.JsonArray? = mutex.withLock {
+        requireUnlocked()
+        credentialMetadata[id] as? kotlinx.serialization.json.JsonArray
+    }
+
+    /**
+     * Set (or, with null or an empty array, remove) credential [id]'s
+     * delivered `metadata`. Every entry must be an object with a non-empty
+     * string `type` and a `value` (privatedata-spec §6); the entries are kept
+     * verbatim and in order. The credential must already be saved; it is
+     * dropped with the credential by [deleteCredential]/[clearCredentials].
+     *
+     * @throws KeystoreException if the credential is unknown or an entry is malformed.
+     */
+    suspend fun setCredentialMetadata(id: Long, metadata: kotlinx.serialization.json.JsonArray?): Unit = mutex.withLock {
+        requireUnlocked()
+        if (id !in credentials) throw KeystoreException("Credential not found: $id")
+        if (metadata == null || metadata.isEmpty()) {
+            credentialMetadata.remove(id)
+            return@withLock
+        }
+        for (entry in metadata) {
+            val obj = entry as? kotlinx.serialization.json.JsonObject
+            val type = (obj?.get("type") as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            if (obj == null || type.isNullOrEmpty() || "value" !in obj) {
+                throw KeystoreException("Malformed credential metadata entry")
+            }
+        }
+        credentialMetadata[id] = metadata
     }
 
     // ── Presentation-history storage ────────────────────────────────

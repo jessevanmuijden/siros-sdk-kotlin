@@ -31,6 +31,13 @@ data class TrustResult(
 
     /** Domain extracted from the verifier identity. */
     val domain: String? = null,
+
+    /**
+     * The `context` object of the trust response, when it carried one; absent
+     * otherwise. Read-only: the SDK does not interpret it, and consumers (the
+     * verifier-id sources, for one) read what they need.
+     */
+    val context: kotlinx.serialization.json.JsonObject? = null,
 ) {
     /** Parsed client_id_scheme providing type-safe access to the verifier identity. */
     val parsedScheme: ClientIdScheme?

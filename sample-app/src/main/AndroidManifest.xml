@@ -36,6 +36,18 @@
         android:theme="@style/Theme.SirosSDKSample"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
 
+        <!-- Demo screen for the circuit_zk presenter; own launcher icon, no login. -->
+        <activity
+            android:name=".nymdemo.NymAuthDemoActivity"
+            android:label="Nym demo"
+            android:exported="true"
+            android:theme="@style/Theme.SirosSDKSample">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -131,6 +131,12 @@ data class CredentialConfiguration(
 data class CredentialDisplayMetadata(
     val display: List<CredentialDisplayEntry>? = null,
     val claims: List<JsonElement>? = null,
+    /**
+     * The `org.siros.secret_seed` member as published: the advertisement of a configuration that delivers a seed
+     * (`{"namespaces": [...]}`), read with [SecretSeedDelivery.classifyAdvertisement]. Kept raw so a value that
+     * must not be there can be told from a list of names.
+     */
+    @SerialName("org.siros.secret_seed") val secretSeed: JsonElement? = null,
 )
 
 @Serializable

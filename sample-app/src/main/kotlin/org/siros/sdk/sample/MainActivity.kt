@@ -695,6 +695,8 @@ fun WalletScreen(viewModel: WalletViewModel) {
                             onUpdateReaderTrustRootCertificatePem = viewModel::updateReaderTrustRootCertificatePem,
                             vegaProfilingEnabled = viewModel.vegaProfilingEnabled.collectAsState().value,
                             onUpdateVegaProfilingEnabled = viewModel::updateVegaProfilingEnabled,
+                            walletPolicy = viewModel.walletPolicy.collectAsState().value,
+                            onUpdateWalletPolicy = viewModel::updateWalletPolicy,
                         )
                         else -> CredentialsTab(
                             state = state,
@@ -1403,6 +1405,8 @@ fun SettingsTab(
     onUpdateReaderTrustRootCertificatePem: ((String) -> Unit)? = null,
     vegaProfilingEnabled: Boolean = false,
     onUpdateVegaProfilingEnabled: ((Boolean) -> Unit)? = null,
+    walletPolicy: org.siros.sdk.wallet.WalletPolicyOptions = org.siros.sdk.wallet.WalletPolicyOptions(),
+    onUpdateWalletPolicy: ((org.siros.sdk.wallet.WalletPolicyOptions) -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -1639,6 +1643,10 @@ fun SettingsTab(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        RequestPolicyCard(policy = walletPolicy, onChange = onUpdateWalletPolicy)
 
         Spacer(modifier = Modifier.height(16.dp))
 

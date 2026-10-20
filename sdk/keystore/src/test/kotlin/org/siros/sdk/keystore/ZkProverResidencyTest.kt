@@ -109,4 +109,60 @@ class ZkProverResidencyTest {
         assertEquals("b", residency.residentKey)
         assertFalse(b.closed)
     }
+
+    @Test
+    fun `releaseCircuit drops only the prover of that circuit, matched on a whole key segment`() = runBlocking {
+        val residency = ZkProverResidency()
+        val v = residency.use("vega-mc-p256-v1:circ-1", { FakeProver("v") }) { it }
+        residency.releaseCircuit("circ")      // a prefix of the id is not the id
+        residency.releaseCircuit("circ-2")
+        assertFalse(v.closed)
+        assertEquals("vega-mc-p256-v1:circ-1", residency.residentKey)
+        residency.releaseCircuit("circ-1")
+        assertTrue(v.closed)
+        assertNull(residency.residentKey)
+
+        // The nymauth key carries the artifact hash after a "sha256:" colon, and the id is still found.
+        val n = residency.use("longfellow-nymauth:nymauth-x:sha256:abc", { FakeProver("n") }) { it }
+        residency.releaseCircuit("nymauth-x")
+        assertTrue(n.closed)
+    }
+
+    @Test
+    fun `releaseCircuit during a proof waits for it to end, and ignores another circuit`() = runBlocking {
+        val residency = ZkProverResidency()
+        val started = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val job = async(Dispatchers.Default) {
+            residency.use("sys:circ-1", { FakeProver("a") }) { p ->
+                started.complete(Unit)
+                finish.await()
+                p
+            }
+        }
+        withTimeout(5000) { started.await() }
+        residency.releaseCircuit("other")
+        residency.releaseCircuit("circ-1")
+        finish.complete(Unit)
+        val p = withTimeout(5000) { job.await() }
+        assertTrue("released once the proof ended", p.closed)
+        assertNull(residency.residentKey)
+
+        // A release for another circuit during a proof does not drop this one.
+        val started2 = CompletableDeferred<Unit>()
+        val finish2 = CompletableDeferred<Unit>()
+        val job2 = async(Dispatchers.Default) {
+            residency.use("sys:circ-2", { FakeProver("b") }) { q ->
+                started2.complete(Unit)
+                finish2.await()
+                q
+            }
+        }
+        withTimeout(5000) { started2.await() }
+        residency.releaseCircuit("circ-1")
+        finish2.complete(Unit)
+        val q = withTimeout(5000) { job2.await() }
+        assertFalse(q.closed)
+        assertEquals("sys:circ-2", residency.residentKey)
+    }
 }

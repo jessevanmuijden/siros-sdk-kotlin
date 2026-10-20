@@ -66,6 +66,7 @@
     <string name="credential_detail_raw_header">Header</string>
     <string name="credential_detail_raw_payload">Payload</string>
     <string name="credential_detail_raw_disclosure">Disclosure %1$d</string>
+    <string name="credential_detail_raw_redacted">Protected claims are hidden from this view.</string>
     <string name="copy_to_clipboard">Copy to clipboard</string>
     <string name="copied_to_clipboard">Copied to clipboard</string>
     <!-- The outcomes of DIIP's Validity and Revocation Algorithm: the
@@ -305,4 +306,30 @@
     <string name="transaction_entity_pisp">Payment initiation service</string>
     <string name="transaction_entity_service">Service</string>
     <string name="transaction_entity_aisp">Account information service</string>
+    <string name="settings_policy_title">Request policy</string>
+    <string name="settings_policy_description">How this wallet answers presentation requests. Several of these are for testing the privacy-preserving (circuit_zk) flow.</string>
+    <string name="settings_policy_non_disclosure">Protected claims</string>
+    <string name="settings_policy_non_disclosure_default">Default: never match, show or share the nym_auth seed commitments (ssc, psc)</string>
+    <string name="settings_policy_non_disclosure_none">None: no protected claims (testing only)</string>
+    <string name="settings_policy_circuit_zk">zkp_req requests</string>
+    <string name="settings_policy_circuit_zk_description">Answer circuit_zk (zero-knowledge) requests. The sample app supplies only the nym_auth demo circuit, so it can answer only that query.</string>
+    <string name="settings_policy_fake_prover">FAKE prover (no real proof)</string>
+    <string name="settings_policy_fake_prover_description">Use the fake prover, which produces NO real proof. A verifier cannot accept it. Development only. Needs circuit_zk on.</string>
+    <string name="settings_policy_expected_origins">Expected origins (other formats)</string>
+    <string name="settings_policy_origins_off">Off: ignore expected_origins</string>
+    <string name="settings_policy_origins_if_present">If present: enforce it when the request has it</string>
+    <string name="settings_policy_origins_required">Required: refuse a signed request without it</string>
+    <string name="settings_policy_signed_request">Signed requests required for</string>
+    <string name="settings_policy_signed_circuit_zk_only">circuit_zk requests only (default)</string>
+    <string name="settings_policy_signed_always">Every request</string>
+    <string name="settings_policy_verifier_ids">Verifier-id types, in order of preference</string>
+    <string name="settings_policy_verifier_ids_description">The first type for which the trust service supplies an identifier is used. The names in the list must match what the trust service returns; go-trust is aligning to the trust framework. Applies the next time the wallet is created.</string>
+    <string name="settings_policy_verifier_ids_empty">Empty: pseudonym requests will be refused.</string>
+    <string name="settings_policy_verifier_ids_up">Up</string>
+    <string name="settings_policy_verifier_ids_down">Down</string>
+    <string name="settings_policy_verifier_ids_remove">Remove</string>
+    <string name="settings_policy_verifier_ids_new">New type</string>
+    <string name="settings_policy_verifier_ids_add">Add</string>
+    <string name="settings_policy_verifier_ids_reset">Reset to default</string>
+    <string name="settings_policy_applies_next">Takes effect the next time the wallet is created: after Disconnect, or an app restart.</string>
 </resources>

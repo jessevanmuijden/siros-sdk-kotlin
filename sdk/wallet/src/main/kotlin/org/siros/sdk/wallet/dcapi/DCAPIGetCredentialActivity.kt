@@ -2,6 +2,7 @@
 package org.siros.sdk.wallet.dcapi
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
@@ -18,6 +19,9 @@ import androidx.credentials.GetCredentialResponse
 import androidx.credentials.GetDigitalCredentialOption
 import androidx.credentials.exceptions.GetCredentialUnknownException
 import androidx.credentials.provider.PendingIntentHandler
+import androidx.credentials.provider.ProviderGetCredentialRequest
+import androidx.credentials.registry.provider.selectedCredentialSet
+import androidx.credentials.registry.provider.selectedEntryId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -112,7 +116,8 @@ class DCAPIGetCredentialActivity : Activity() {
         val origin = try {
             request.callingAppInfo.getOrigin(loadPrivilegedAllowlist())
         } catch (e: Exception) {
-            Timber.w(e, "Could not resolve verified origin for DC API request")
+            // Class only: the exception message can carry the calling package or origin.
+            Timber.w("Could not resolve verified origin for DC API request (${e.javaClass.simpleName})")
             null
         }
         if (origin == null) {
@@ -129,7 +134,11 @@ class DCAPIGetCredentialActivity : Activity() {
         // A payment confirmation request (transaction_data) and its response (KB-JWT with the transaction
         // hashes) are private; their content is never logged.
         val carriesTransactionData = digitalOption.requestJson.contains("transaction_data")
-        if (!carriesTransactionData) Timber.d("DCAPI raw request (origin=$origin): ${digitalOption.requestJson}")
+        // Only the size is logged: a request or response body can carry a nonce, a presentation or a pseudonym.
+        Timber.d("DCAPI request received (bytes=${digitalOption.requestJson.length}, transaction_data=$carriesTransactionData)")
+
+        // What the user picked in the OS picker; the wallet presents exactly that (circuit_zk).
+        val selectedCredentialIds = selectedCredentialIdsOf(request)
 
         scope.launch {
             try {
@@ -139,8 +148,9 @@ class DCAPIGetCredentialActivity : Activity() {
                     // The app's own screens are not in front of the user during a DC API request,
                     // so a payment confirmation is shown in this activity.
                     consentHandler = TransactionConsentHandler { showTransactionConsentDialog(this@DCAPIGetCredentialActivity, it) },
+                    selectedCredentialIds = selectedCredentialIds,
                 )
-                if (!carriesTransactionData) Timber.d("DCAPI final response: ${result.responseJson}")
+                Timber.d("DCAPI response ready (bytes=${result.responseJson.length})")
                 val responseIntent = Intent()
                 PendingIntentHandler.setGetCredentialResponse(
                     responseIntent,
@@ -155,6 +165,13 @@ class DCAPIGetCredentialActivity : Activity() {
                 // which credentials the wallet holds and why a request failed.
                 Timber.w("DC API transaction_data refused (${e.reason.code})")
                 finishWithProtocolError(null, e.verifierError)
+            } catch (e: DCAPIRequestRefused) {
+                // The request does not meet the wallet's signed-request rules. Answered with
+                // access_denied and no description, so the verifier learns nothing about why.
+                // The user is told, in coarse plain language, before the screen closes: a refusal
+                // they cannot see reads as a broken wallet.
+                Timber.w("DC API request refused for the user (reason=${e.reason})")
+                finishWithProtocolError(null, userMessageRes = e.reason.userMessageRes)
             } catch (e: WalletException) {
                 // A decline (untrusted verifier, no matching/eligible
                 // credential, missing encryption key, ...) is a normal
@@ -166,14 +183,34 @@ class DCAPIGetCredentialActivity : Activity() {
                 // real (successful) DC API response whose body is an
                 // OpenID4VP error object lets the RP read and display the
                 // actual reason instead.
-                Timber.w(e, "DC API presentation declined")
-                finishWithProtocolError(e.message ?: "Presentation declined")
+                // The message can name the verifier and the trust reason, so log only the coarse reason.
+                Timber.w("DC API presentation declined (${(e as? DCAPIPresentationDeclined)?.reason ?: e.javaClass.simpleName})")
+                // The verifier's answer is unchanged; the user is told why in coarse terms.
+                finishWithProtocolError(
+                    e.message ?: "Presentation declined",
+                    userMessageRes = (e as? DCAPIPresentationDeclined)?.reason?.userMessageRes,
+                )
             } catch (e: Exception) {
-                Timber.e(e, "DC API presentation failed unexpectedly")
+                Timber.e("DC API presentation failed unexpectedly (${e.javaClass.simpleName})")
                 finishWithError(e.message ?: "Presentation failed")
             }
         }
     }
+
+    /**
+     * The credential ids the user picked: every credential of the selected set when the OS reports
+     * a set (a multi-credential request), else the single selected entry. Entry ids this SDK
+     * registers are the credential's numeric id; anything else (the debug diagnostics entry, a
+     * foreign id) becomes an id no credential has, which the wallet refuses as an unavailable selection
+     * (it must not be dropped: an empty selection would present the first eligible credential).
+     * An absent or unreadable selection is refused the same way; see [DCAPISelection].
+     */
+    private fun selectedCredentialIdsOf(request: ProviderGetCredentialRequest): List<Long> =
+        // Fail closed: an absent or unreadable picker selection is never "no selection".
+        DCAPISelection.resolve(
+            selectedSet = { request.selectedCredentialSet?.credentials?.map { it.credentialId } },
+            selectedEntry = { request.selectedEntryId },
+        )
 
     override fun onDestroy() {
         // The wallet call is not cancelled when the Activity goes away
@@ -205,19 +242,34 @@ class DCAPIGetCredentialActivity : Activity() {
      * and OpenID4VP doesn't define a more specific code for most of them
      * anyway.
      */
-    private fun finishWithProtocolError(description: String?, error: String = "access_denied") {
+    private fun finishWithProtocolError(
+        description: String?,
+        error: String = "access_denied",
+        userMessageRes: Int? = null,
+    ) {
         val errorJson = buildJsonObject {
             put("error", JsonPrimitive(error))
             if (description != null) put("error_description", JsonPrimitive(description))
         }.toString()
-        Timber.d("DCAPI error response: $errorJson")
+        Timber.d("DCAPI error response (error=$error, bytes=${errorJson.length})")
         val responseIntent = Intent()
         PendingIntentHandler.setGetCredentialResponse(
             responseIntent,
             GetCredentialResponse(DigitalCredential(errorJson)),
         )
         setResult(RESULT_OK, responseIntent)
-        finish()
+        // The verifier's answer is already set and byte-identical with or without the dialog;
+        // the dialog only holds the screen open until the user has read why.
+        if (userMessageRes == null || isFinishing || isDestroyed) {
+            finish()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle(R.string.siros_dcapi_refused_title)
+            .setMessage(userMessageRes)
+            .setPositiveButton(R.string.siros_dcapi_refused_ok, null)
+            .setOnDismissListener { finish() }
+            .show()
     }
 
     private fun loadPrivilegedAllowlist(): String =

@@ -1,0 +1,22 @@
+vectors.jsonl is a VERBATIM copy of test-vectors/vectors.jsonl of sirosfoundation/privatedata-spec main
+(SPEC 2.6: S.credentials[] entry as wallet-frontend stores it, section 6.0; delivered secret_seed in the
+response-level credential_metadata, section 5A; per-credential metadata and unknown-member preservation):
+
+  source branch : main
+  source commit : 8c4c865bc0e56b2a89a10ed7030b2728f4d0d6bb
+  lines         : all 23
+  sha256        : 2893c0c68da7735ef17da110405161c2f81d09d9faebc1340f00218c4e3f9ec4
+
+Earlier copies (be7ce3b, 0d0e7b9, 71e269c) and the hand-patched single-credential-v3-001 and
+multi-passkey-v3-001 are superseded. CredentialMetadataKeystoreTest fails if this file no longer
+matches the hash above. Re-copy when the spec changes and update the commit and hash.
+
+derived-secrets.json is a VERBATIM copy of test-vectors/derived-secrets.json of the same repository at
+the merge commit of pull request #8 (SPEC 2.7, private_seed per issuer, label org.siros.private_seed/v2):
+
+  source commit : 1b796d2b9043fff890fd059f47c8b51382d37ff0 (main)
+  sha256        : fdcdb5f01be080adaed1dc7a9f7c4bc9c9080322a92f764bc6a4b0a961209d2c
+
+It supersedes this repository's own spec/private-seed-vectors.json (v1, withdrawn) and its generator.
+vectors.jsonl is unchanged between 8c4c865 and 1b796d2. PrivateSeedTest fails if the file no longer
+matches the hash above.

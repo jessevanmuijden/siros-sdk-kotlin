@@ -76,12 +76,15 @@ class ZkMdocPresentationTest {
     }
 
     /** Same synthetic stored-credential envelope MdocDeviceResponseBuilderTest uses. */
-    private fun storedCredential(): ByteArray {
+    private fun storedCredential(extraNamespaceFirst: Boolean = false): ByteArray {
         val items = CBORObject.NewArray()
         items.Add(buildItem(0, "family_name", "Doe"))
         items.Add(buildItem(1, "given_name", "Jane"))
         items.Add(buildItem(2, "issue_date", "2020-01-01"))
         val nameSpaces = CBORObject.NewMap()
+        if (extraNamespaceFirst) {
+            nameSpaces[CBORObject.FromObject("org.example.extra")] = CBORObject.NewArray().also { it.Add(buildItem(9, "extra_claim", "x")) }
+        }
         nameSpaces[CBORObject.FromObject(namespace)] = items
         val issuerAuth = CBORObject.NewArray()
         issuerAuth.Add(CBORObject.FromObject(ByteArray(0)))
@@ -150,6 +153,24 @@ class ZkMdocPresentationTest {
         // And it is byte-for-byte what the builder produces for the same inputs.
         val expected = p.buildDeviceResponse(storedCredential(), docType, spec, listOf("family_name", "issue_date"), result.proof)
         assertArrayEquals(expected, result.deviceResponse)
+    }
+
+    /** The legacy mso_mdoc_zk path is not the nym_auth circuit_zk path: a credential with several namespaces still proves. */
+    @Test
+    fun `a multi-namespace mdoc still proves on the legacy zk path`() = runTest {
+        val p = presentation(FakeSystem(accepted = 2))
+        val result = p.present(
+            ZkMdocPresentation.Request(
+                credentialBytes = storedCredential(extraNamespaceFirst = true),
+                requestedSystems = listOf(spec),
+                sessionTranscript = byteArrayOf(7),
+                requestedClaims = listOf("family_name", "issue_date"),
+                verifierIdentity = null,
+                priorState = null,
+            ),
+            signer = { _, _ -> ByteArray(0) },
+        )
+        assertTrue(result.deviceResponse.isNotEmpty())
     }
 
     @Test

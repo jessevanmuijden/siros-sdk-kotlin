@@ -22,6 +22,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    // The matcher's circuit capability vectors (spec/circuit-capabilities-vectors)
+    // are read by the instrumented registry test as assets of the test APK.
+    sourceSets.getByName("androidTest").assets.srcDir("../../spec")
 }
 
 dependencies {

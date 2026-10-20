@@ -2,6 +2,16 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Gerando prova de conhecimento zero…</string>
     <string name="siros_dcapi_zk_proof_detail">Nenhum dado pessoal é compartilhado - apenas uma prova criptográfica de que você atende à solicitação.</string>
+    <string name="siros_dcapi_refused_title">Pedido não concluído</string>
+    <string name="siros_dcapi_refused_ok">OK</string>
+    <string name="siros_dcapi_refused_not_trusted">Este site não é um em que a sua carteira confia, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_trust_unavailable">A sua carteira não conseguiu verificar agora se este site é de confiança, por isso nada foi partilhado. Verifique a ligação e tente novamente.</string>
+    <string name="siros_dcapi_refused_no_matching_credential">Não tem nenhuma credencial que satisfaça este pedido, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_selected_unavailable">A credencial escolhida não pode ser usada neste pedido ou já não tem utilizações disponíveis, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_unsupported_request">A sua carteira não consegue responder a este tipo de pedido, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_request_not_verified">Não foi possível verificar que este pedido vem do site em que está, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_verifier_id_unavailable">A sua carteira não conseguiu determinar quem está a pedir, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_proof_failed">A sua carteira não conseguiu criar a prova, por isso nada foi partilhado. Tente novamente.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">Não foi possível verificar este emissor como fidedigno, por isso a credencial não foi adicionada.</string>
 </resources>

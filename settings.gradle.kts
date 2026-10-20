@@ -37,6 +37,15 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Dev override for PR-built native libraries: -PsirosNativeRepo=<dir> (or in ~/.gradle/gradle.properties) adds a
+        // plain Maven directory FIRST, so AARs built by tools/build-native-aars.sh resolve without being published
+        // (see docs/NATIVE_DEV.md).
+        providers.gradleProperty("sirosNativeRepo").orNull?.let { dir ->
+            maven {
+                name = "SirosNativeLocal"
+                url = uri(file(dir))
+            }
+        }
         mavenLocal() // local-dev override: must precede GitHubPackages so local builds win
         // siros-wscd-manager AAR, published to GitHub Packages Maven.
         // Credentials come from env (CI: GITHUB_ACTOR/GITHUB_TOKEN) or Gradle

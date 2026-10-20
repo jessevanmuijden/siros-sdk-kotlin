@@ -210,7 +210,8 @@ class WmpSession(
                 try {
                     handleIncoming(data)
                 } catch (e: Exception) {
-                    Timber.e(e, "Error handling incoming WMP message")
+                    // Never the exception itself: a decode error can quote the frame (a completion may hold a secret).
+                    Timber.e("Error handling incoming WMP message (${e.javaClass.simpleName})")
                 }
             }
         }

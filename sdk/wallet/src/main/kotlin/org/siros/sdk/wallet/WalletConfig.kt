@@ -1,6 +1,11 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 package org.siros.sdk.wallet
 
+import org.siros.sdk.credentials.CircuitZkCircuitSource
+import org.siros.sdk.credentials.CircuitZkPlanner
+import org.siros.sdk.credentials.CircuitZkRequestValidator
+import org.siros.sdk.wallet.dcapi.DCAPIRequestRules
+import org.siros.sdk.wallet.dcapi.ExpectedOriginsMode
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -327,6 +332,96 @@ data class WalletConfig(
      */
     val vegaProfilingEnabled: Boolean = false,
     /**
+     * How strictly a signed DC API request's `expected_origins` is enforced
+     * for the formats other than `circuit_zk`: [ExpectedOriginsMode.OFF]
+     * (default, ignore it, as always), `IF_PRESENT` or `REQUIRED`.
+     * `circuit_zk` always requires a signed request whose `expected_origins`
+     * lists the calling origin, whatever this says.
+     */
+    val dcApiExpectedOrigins: ExpectedOriginsMode = ExpectedOriginsMode.OFF,
+    /**
+     * Which DC API requests must be signed and name the calling origin, given
+     * the request's DCQL query. The default is any query with a credential of
+     * `format: "zkp_req"`.
+     */
+    val dcApiRequiresSignedRequest: (kotlinx.serialization.json.JsonObject?) -> Boolean =
+        DCAPIRequestRules.DEFAULT_REQUIRES_SIGNED_REQUEST,
+    /**
+     * Turns on `circuit_zk` matching. `false` (default): a `circuit_zk` query
+     * matches nothing, exactly as before. With `true` it is matched through
+     * [circuitZkPlanner], [circuitZkValidator] and [circuitZkCircuits]; without
+     * a circuit source it still matches nothing (fail closed).
+     * `handleDCAPIRequest` presents a matched `circuit_zk` request with [circuitZkProver],
+     * by default the catalog prover, which answers access-denied until a native prover is supplied.
+     * A circuit that declares `capabilities` or a `credential_type` is selected
+     * only when the shared matcher serves it (never assumed unrestricted).
+     */
+    val circuitZk: Boolean = false,
+    /**
+     * Turns a `circuit_zk` credential query into a plan; see [circuitZk]. `null`
+     * (default) means the shared matcher's planner,
+     * [org.siros.sdk.credentials.SharedCircuitZkPlanner].
+     */
+    val circuitZkPlanner: CircuitZkPlanner? = null,
+    /**
+     * The wallet's satisfiability rules for a plan. `null` (default) means the
+     * rulebook rules ([org.siros.sdk.credentials.RulebookCircuitZkValidator]),
+     * accepting any `verifier_id_type` the request names (the wallet picks the
+     * type itself, see [circuitZkVerifierIdTypes]).
+     */
+    val circuitZkValidator: CircuitZkRequestValidator? = null,
+    /**
+     * The prover behind `circuit_zk` presentations. `null` (default) means the real one,
+     * [org.siros.sdk.keystore.CatalogCircuitZkProver] over the wallet's circuit catalog client and
+     * [circuitZkNativeProver]; it refuses every request while that is absent. Only a host that opts in
+     * explicitly (see [WalletPolicyOptions.fakeProver]) gets a prover that makes no real proof.
+     */
+    val circuitZkProver: org.siros.sdk.keystore.CircuitZkProver? = null,
+    /**
+     * The native half of the default `circuit_zk` prover: builds the `nymauth-*` circuit witnesses and
+     * runs the proof system (see [org.siros.sdk.keystore.NymAuthNativeProver]). Ignored when
+     * [circuitZkProver] is set. `null` (default): the UniFFI bindings of `zk-cred-vega` and
+     * `zk-cred-longfellow` ([org.siros.sdk.keystore.UniffiNymAuthNativeProver]); a build whose native libraries lack
+     * the nymauth entry points refuses every nymauth request instead of crashing.
+     */
+    val circuitZkNativeProver: org.siros.sdk.keystore.NymAuthNativeProver? = null,
+    /**
+     * The wallet's ORDERED supported `verifier_id_type`s (default
+     * `["semantic", "x509_san_dns"]`, see [VerifierIdTypeOrder]). The type is agreed in the
+     * trust framework, so for a pseudonym the wallet walks this list in order and uses the first
+     * type for which an identifier is available; the `verifier_id_type` a request names is
+     * IGNORED for selection (and a request naming another type is not refused for that).
+     * Entries must be non-blank, trimmed, comma-free and unique (checked at construction).
+     * An EMPTY list means no type is supported: a request needing a pseudonym is refused.
+     *
+     * The strings are opaque and must equal what the policy decision point returns in
+     * `context.verifier_ids`; go-trust is aligning its names and values to the trust framework.
+     */
+    val circuitZkVerifierIdTypes: List<String> = VerifierIdTypeOrder.DEFAULT,
+    /**
+     * Additional (optional) sources of `verifier_id`, for hosts that want their own. The
+     * policy decision point ([AuthZENSource]) is the default source for every supported type and
+     * is always tried first; these are tried after it, for the types they produce. Empty by default.
+     */
+    val circuitZkVerifierIdSources: List<VerifierIdSource> = emptyList(),
+    /**
+     * The claims the wallet never matches on, registers, presents or displays,
+     * by credential type. The default protects the nym_auth `ssc` and `psc`;
+     * [NonDisclosurePolicy.NONE] turns it off. A type without an entry is
+     * unaffected. Installed process-wide when the wallet is built.
+     */
+    val nonDisclosurePolicy: org.siros.sdk.credentials.NonDisclosurePolicy = org.siros.sdk.credentials.NonDisclosurePolicy.DEFAULT,
+    /** The circuits the wallet can prove with, from the circuit catalog. */
+    val circuitZkCircuits: CircuitZkCircuitSource? = null,
+    /**
+     * The namespace whose delivered seed the credential type designates: in the response-level
+     * `credential_metadata` member `org.siros.secret_seed` ([org.siros.sdk.credentials.SecretSeedDelivery.MEMBER]) the
+     * issuer maps namespaces to seeds, and the seed of this one must be 16 bytes of lowercase hex that open the
+     * credential's `ssc`, in an encrypted response; otherwise the issuance fails. Seeds of other namespaces are stored
+     * as received. Must not be blank.
+     */
+    val secretSeedNamespace: String = org.siros.sdk.credentials.SecretSeedDelivery.DEFAULT_NAMESPACE,
+    /**
      * How long a successful remote trust decision (`POST /v1/evaluate`, allow
      * or deny) is reused for the identical request: same action, subject,
      * certificate chain / key material and context. Errors, timeouts and
@@ -340,6 +435,11 @@ data class WalletConfig(
      */
     val trustDecisionCacheTtl: java.time.Duration = java.time.Duration.ofMinutes(5),
 ) {
+    init {
+        require(secretSeedNamespace.isNotBlank()) { "secretSeedNamespace must not be blank" }
+        VerifierIdTypeOrder.require(circuitZkVerifierIdTypes)
+    }
+
     /**
      * The reader-trust mode actually in force: [readerTrustEvaluationMode] if
      * one was chosen, otherwise whatever the deprecated
