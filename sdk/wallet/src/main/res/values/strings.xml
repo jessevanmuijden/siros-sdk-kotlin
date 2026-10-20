@@ -16,6 +16,38 @@
     <string name="siros_dcapi_refused_request_not_verified">This request could not be verified as coming from the site you are on, so nothing was shared.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">Your wallet could not work out who is asking, so nothing was shared.</string>
     <string name="siros_dcapi_refused_proof_failed">Your wallet could not create the proof, so nothing was shared. Please try again.</string>
+    <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
+    <string name="siros_consent_title">Confirm sharing</string>
+    <string name="siros_consent_share">Share</string>
+    <string name="siros_consent_cancel">Cancel</string>
+    <string name="siros_consent_verifier_prove">%1$s is asking you to prove:</string>
+    <string name="siros_consent_verifier_share">%1$s is asking you to share:</string>
+    <string name="siros_consent_age_between">You were born between %1$s and %2$s (about %3$d–%4$d years old). Your exact birth date is not shared.</string>
+    <string name="siros_consent_age_at_least">You are at least %1$d years old. Your exact birth date is not shared.</string>
+    <string name="siros_consent_age_at_most">You are at most %1$d years old. Your exact birth date is not shared.</string>
+    <string name="siros_consent_pseudonym_issuer">A pseudonym for %1$s is shared. You get the same pseudonym every time you visit this service, and a different one at every other service. The service that issued your credential can work out who this pseudonym belongs to.</string>
+    <string name="siros_consent_pseudonym">A pseudonym for %1$s is shared. You get the same pseudonym every time you visit this service, and a different one at every other service.</string>
+    <string name="siros_consent_footer">No other personal data is shared.</string>
+    <string name="siros_consent_claim">The value of “%1$s” from your credential is shared.</string>
+    <string name="siros_consent_legacy_pseudonym">A pseudonym is shared with %1$s.</string>
+    <string name="siros_dcapi_refused_consent_unavailable">Your wallet cannot ask for your approval right now, so nothing was shared.</string>
+    <string name="siros_dcapi_refused_user_declined">You did not approve this request, so nothing was shared.</string>
+    <!-- circuit_zk generic predicate wording (any claim). Approved by leifj 2026-10-20. -->
+    <string name="siros_consent_predicate_eq">%1$s is %2$s.</string>
+    <string name="siros_consent_predicate_ne">%1$s is not %2$s.</string>
+    <string name="siros_consent_predicate_lt">%1$s is less than %2$s.</string>
+    <string name="siros_consent_predicate_le">%1$s is at most %2$s.</string>
+    <string name="siros_consent_predicate_gt">%1$s is greater than %2$s.</string>
+    <string name="siros_consent_predicate_ge">%1$s is at least %2$s.</string>
+    <string name="siros_consent_predicate_in">%1$s is one of: %2$s.</string>
+    <!-- circuit_zk predicate wording for DATE-typed claims (generic comparison wording stays for numbers and strings). Approved by leifj 2026-10-20. -->
+    <string name="siros_consent_predicate_date_eq">%1$s is on %2$s.</string>
+    <string name="siros_consent_predicate_date_ne">%1$s is not on %2$s.</string>
+    <string name="siros_consent_predicate_date_lt">%1$s is before %2$s.</string>
+    <string name="siros_consent_predicate_date_le">%1$s is on or before %2$s.</string>
+    <string name="siros_consent_predicate_date_gt">%1$s is after %2$s.</string>
+    <string name="siros_consent_predicate_date_ge">%1$s is on or after %2$s.</string>
+    <string name="siros_consent_predicate_date_in">%1$s is one of the dates: %2$s.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">This issuer could not be verified as trusted, so the credential was not added.</string>
 </resources>

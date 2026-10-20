@@ -31,6 +31,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import org.siros.sdk.credentials.CredentialMatcher
 import org.siros.sdk.credentials.TransactionDataError
+import org.siros.sdk.wallet.PresentationConsentHandler
 import org.siros.sdk.wallet.TransactionConsentHandler
 import org.siros.sdk.credentials.WalletException
 import org.siros.sdk.wallet.R
@@ -149,6 +150,9 @@ class DCAPIGetCredentialActivity : Activity() {
                     // so a payment confirmation is shown in this activity.
                     consentHandler = TransactionConsentHandler { showTransactionConsentDialog(this@DCAPIGetCredentialActivity, it) },
                     selectedCredentialIds = selectedCredentialIds,
+                    // The OS picker has been accepted; what the verifier will receive is confirmed here, a second
+                    // surface owned by the wallet, before anything is proved.
+                    presentationConsentHandler = PresentationConsentHandler { showPresentationConsentDialog(this@DCAPIGetCredentialActivity, it) },
                 )
                 Timber.d("DCAPI response ready (bytes=${result.responseJson.length})")
                 val responseIntent = Intent()

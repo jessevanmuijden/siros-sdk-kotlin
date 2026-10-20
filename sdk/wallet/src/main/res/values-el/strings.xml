@@ -12,6 +12,38 @@
     <string name="siros_dcapi_refused_request_not_verified">Δεν ήταν δυνατό να επαληθευτεί ότι το αίτημα προέρχεται από τον ιστότοπο στον οποίο βρίσκεστε, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">Το πορτοφόλι σας δεν μπόρεσε να καθορίσει ποιος ζητά τα στοιχεία, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
     <string name="siros_dcapi_refused_proof_failed">Το πορτοφόλι σας δεν μπόρεσε να δημιουργήσει την απόδειξη, γι\' αυτό δεν κοινοποιήθηκε τίποτα. Δοκιμάστε ξανά.</string>
+    <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
+    <string name="siros_consent_title">Επιβεβαίωση κοινοποίησης</string>
+    <string name="siros_consent_share">Κοινοποίηση</string>
+    <string name="siros_consent_cancel">Ακύρωση</string>
+    <string name="siros_consent_verifier_prove">Η υπηρεσία %1$s σας ζητά να αποδείξετε:</string>
+    <string name="siros_consent_verifier_share">Η υπηρεσία %1$s σας ζητά να κοινοποιήσετε:</string>
+    <string name="siros_consent_age_between">Έχετε γεννηθεί μεταξύ %1$s και %2$s (περίπου %3$d–%4$d ετών). Η ακριβής ημερομηνία γέννησής σας δεν κοινοποιείται.</string>
+    <string name="siros_consent_age_at_least">Είστε τουλάχιστον %1$d ετών. Η ακριβής ημερομηνία γέννησής σας δεν κοινοποιείται.</string>
+    <string name="siros_consent_age_at_most">Είστε το πολύ %1$d ετών. Η ακριβής ημερομηνία γέννησής σας δεν κοινοποιείται.</string>
+    <string name="siros_consent_pseudonym_issuer">Κοινοποιείται ένα ψευδώνυμο για την υπηρεσία %1$s. Λαμβάνετε το ίδιο ψευδώνυμο κάθε φορά που επισκέπτεστε αυτή την υπηρεσία και διαφορετικό σε κάθε άλλη υπηρεσία. Ο φορέας που εξέδωσε το διαπιστευτήριό σας μπορεί να βρει σε ποιον ανήκει αυτό το ψευδώνυμο.</string>
+    <string name="siros_consent_pseudonym">Κοινοποιείται ένα ψευδώνυμο για την υπηρεσία %1$s. Λαμβάνετε το ίδιο ψευδώνυμο κάθε φορά που επισκέπτεστε αυτή την υπηρεσία και διαφορετικό σε κάθε άλλη υπηρεσία.</string>
+    <string name="siros_consent_footer">Δεν κοινοποιούνται άλλα προσωπικά δεδομένα.</string>
+    <string name="siros_consent_claim">Η τιμή «%1$s» από το διαπιστευτήριό σας κοινοποιείται.</string>
+    <string name="siros_consent_legacy_pseudonym">Κοινοποιείται ένα ψευδώνυμο στην υπηρεσία %1$s.</string>
+    <string name="siros_dcapi_refused_consent_unavailable">Το πορτοφόλι σας δεν μπορεί να ζητήσει την έγκρισή σας αυτή τη στιγμή, οπότε δεν κοινοποιήθηκε τίποτα.</string>
+    <string name="siros_dcapi_refused_user_declined">Δεν εγκρίνατε το αίτημα, οπότε δεν κοινοποιήθηκε τίποτα.</string>
+    <!-- circuit_zk generic predicate wording (any claim). Approved by leifj 2026-10-20. -->
+    <string name="siros_consent_predicate_eq">Το «%1$s» είναι %2$s.</string>
+    <string name="siros_consent_predicate_ne">Το «%1$s» δεν είναι %2$s.</string>
+    <string name="siros_consent_predicate_lt">Το «%1$s» είναι μικρότερο από %2$s.</string>
+    <string name="siros_consent_predicate_le">Το «%1$s» είναι το πολύ %2$s.</string>
+    <string name="siros_consent_predicate_gt">Το «%1$s» είναι μεγαλύτερο από %2$s.</string>
+    <string name="siros_consent_predicate_ge">Το «%1$s» είναι τουλάχιστον %2$s.</string>
+    <string name="siros_consent_predicate_in">Το «%1$s» είναι ένα από: %2$s.</string>
+    <!-- circuit_zk predicate wording for DATE-typed claims (generic comparison wording stays for numbers and strings). Approved by leifj 2026-10-20. -->
+    <string name="siros_consent_predicate_date_eq">Το «%1$s» είναι στις %2$s.</string>
+    <string name="siros_consent_predicate_date_ne">Το «%1$s» δεν είναι στις %2$s.</string>
+    <string name="siros_consent_predicate_date_lt">Το «%1$s» είναι πριν από τις %2$s.</string>
+    <string name="siros_consent_predicate_date_le">Το «%1$s» είναι στις %2$s ή νωρίτερα.</string>
+    <string name="siros_consent_predicate_date_gt">Το «%1$s» είναι μετά τις %2$s.</string>
+    <string name="siros_consent_predicate_date_ge">Το «%1$s» είναι στις %2$s ή αργότερα.</string>
+    <string name="siros_consent_predicate_date_in">Το «%1$s» είναι μία από τις ημερομηνίες: %2$s.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">Ο εκδότης δεν ήταν δυνατό να επαληθευτεί ως αξιόπιστος, επομένως το διαπιστευτήριο δεν προστέθηκε.</string>
 </resources>

@@ -46,11 +46,11 @@ private class LoadedNymAuthCircuit(val descriptor: ZkCircuitDescriptor, @Volatil
 
 /**
  * The adapter for the `nymauth-*` circuits (systems [LONGFELLOW_SYSTEM] and [VEGA_SYSTEM]): proves the
- * rulebook's `pseudonym-v1-sha256` (configuration `known-offender-matching-ssc`) and `age_check`.
+ * rulebook's `pseudonym` (configuration `known-offender-matching-ssc`) and `age_check`.
  *
  * What it does itself, in this order, refusing (an [CircuitZkError.AccessDenied], never a fallback to the
  * fake prover) at the first thing it cannot do:
- * 1. Only what the `nymauth-*` circuits prove is accepted: one `pseudonym-v1-sha256` with the config the
+ * 1. Only what the `nymauth-*` circuits prove is accepted: one `pseudonym` with the config the
  *    circuit was built for and at most one `age_check` with only `ge`/`le`; the credential an mdoc.
  * 2. The circuit's catalog descriptor (already checked by the dispatcher to be the chosen, active circuit)
  *    must be of format `mdoc` and of the configuration the circuit was built for.
@@ -224,7 +224,7 @@ class NymAuthCircuitZkAdapter(
     private fun planParts(plan: CircuitZkPlan): Triple<CircuitZkFunction, CircuitZkFunction?, String> {
         if (validator.validate(plan) !is CircuitZkVerdict.Ok) throw refuse()
         val pseudonymFn = plan.functions.singleOrNull { it.id == PseudonymFunctionHandler.functionId } ?: throw refuse()
-        val ageFn = plan.functions.filter { it.id == AgeCheckFunctionHandler.functionId }.also { if (it.size > 1) throw refuse() }.firstOrNull()
+        val ageFn = plan.functions.filter { it.id == org.siros.sdk.credentials.PredicateFunctions.AGE_CHECK.id }.also { if (it.size > 1) throw refuse() }.firstOrNull()
         if (plan.functions.any { it !== pseudonymFn && it !== ageFn }) throw refuse()
         val config = (pseudonymFn.params["config"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw refuse()
         if (config != SUPPORTED_CONFIG) throw refuse()
@@ -306,7 +306,7 @@ class NymAuthCircuitZkAdapter(
     private fun ageBounds(age: CircuitZkFunction?): Pair<String, String> {
         if (age == null) return NO_LOWER_BOUND to NO_UPPER_BOUND
         // A parameter this circuit does not prove must not be silently dropped.
-        if (age.params.keys.any { it != "ge" && it != "le" }) throw refuse()
+        if (org.siros.sdk.credentials.PredicateFunctions.AGE_CHECK.parse(age) == null) throw refuse()
         fun bound(key: String): String? {
             val p = age.params[key] ?: return null
             val text = (p as? JsonPrimitive)?.takeIf { it.isString }?.content ?: throw refuse()

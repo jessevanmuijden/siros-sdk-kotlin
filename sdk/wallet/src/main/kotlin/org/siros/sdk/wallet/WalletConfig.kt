@@ -405,6 +405,14 @@ data class WalletConfig(
      */
     val circuitZkVerifierIdSources: List<VerifierIdSource> = emptyList(),
     /**
+     * The predicate functions the wallet can describe to the user, pre-check locally and merge-check across
+     * queries (see [org.siros.sdk.credentials.PredicateFunctions]). The set of `circuit_zk` functions is
+     * open-ended: a function that is not declared here (and is not a pseudonym or the legacy disclosure) is
+     * refused before consent, because the wallet cannot say what it discloses. Declaring one here is not
+     * enough to answer it: its validator rules and its prover must exist too. Default: `age_check`.
+     */
+    val circuitZkPredicateFunctions: org.siros.sdk.credentials.PredicateFunctions = org.siros.sdk.credentials.PredicateFunctions.DEFAULT,
+    /**
      * The claims the wallet never matches on, registers, presents or displays,
      * by credential type. The default protects the nym_auth `ssc` and `psc`;
      * [NonDisclosurePolicy.NONE] turns it off. A type without an entry is

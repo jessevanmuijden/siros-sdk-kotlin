@@ -225,9 +225,41 @@ object LegacyDisclosureFunctionHandler : CircuitZkFunctionHandler {
         org.siros.sdk.credentials.CircuitZkLegacyDisclosure.parse(function)?.pseudonym == true
 }
 
-/** The handlers a presenter has unless it is given others: the rulebook's two functions and the proposed legacy one. */
+/**
+ * The handler of a predicate function, generic over its declaration ([org.siros.sdk.credentials.PredicateFunction]):
+ * the same declaration that drives consent, the local pre-check, the cross-query rule and the validator's rules. It
+ * needs no wallet-held private input, and holds when the declared comparison holds for the credential's own claim value
+ * ([org.siros.sdk.credentials.PredicateFunctions.holdsFor] over an mdoc claim reader; a claim the reader cannot read is
+ * not judged here, the prover decides). One per declared function, so a function the user was asked about can also be
+ * presented. The handler registry itself keeps only hook-style functions (the pseudonym, the legacy disclosure).
+ */
+class PredicateFunctionHandler(private val declaration: org.siros.sdk.credentials.PredicateFunction) : CircuitZkFunctionHandler {
+    private val functions = org.siros.sdk.credentials.PredicateFunctions(listOf(declaration))
+
+    override val functionId: String get() = declaration.id
+
+    override fun witnessNeeds(function: CircuitZkFunction): Set<CircuitZkWitnessKind> = emptySet()
+
+    // A circuit that binds the doctype namespace never proves a credential with a decoy or extra namespace.
+    override fun admitsCredential(function: CircuitZkFunction, credential: DocumentMdoc): Boolean =
+        !declaration.doctypeNamespaceOnly || credential.issuerSigned.nameSpaces.keys == setOf(credential.docType)
+
+    override fun holds(function: CircuitZkFunction, credential: DocumentMdoc): Boolean =
+        functions.holdsFor(function, org.siros.sdk.credentials.PredicateFunctions.mdocReader(credential))
+
+    companion object {
+        /** The hook-style handlers (the pseudonym, the legacy disclosure) plus one [PredicateFunctionHandler] per function [functions] declares. */
+        fun handlersFor(functions: org.siros.sdk.credentials.PredicateFunctions): List<CircuitZkFunctionHandler> =
+            HOOK_CIRCUIT_ZK_HANDLERS + functions.ids.map { PredicateFunctionHandler(functions[it]!!) }
+    }
+}
+
+/** The hook-style handlers: functions that are not declared predicates. */
+val HOOK_CIRCUIT_ZK_HANDLERS: List<CircuitZkFunctionHandler> = listOf(PseudonymFunctionHandler, LegacyDisclosureFunctionHandler)
+
+/** The handlers a presenter has unless it is given others: the hook-style ones plus the rulebook's declared predicates. */
 val DEFAULT_CIRCUIT_ZK_HANDLERS: List<CircuitZkFunctionHandler> =
-    listOf(PseudonymFunctionHandler, AgeCheckFunctionHandler, LegacyDisclosureFunctionHandler)
+    PredicateFunctionHandler.handlersFor(org.siros.sdk.credentials.PredicateFunctions.DEFAULT)
 
 /** Input of [CircuitZkProver.prove]. The witness values are private: the prover must not log them. */
 class CircuitZkProveInput(
@@ -520,7 +552,7 @@ class CircuitZkPresenter(
  * Never registered by default: a host gets one only by calling [optIn], and
  * [isFake] (reported through [CircuitZkPresenter.usesFakeProver]) says so.
  */
-class FakeCircuitZkProver private constructor() : CircuitZkProver {
+class FakeCircuitZkProver private constructor(private val predicates: org.siros.sdk.credentials.PredicateFunctions) : CircuitZkProver {
     override val isFake: Boolean get() = true
 
     override suspend fun prove(input: CircuitZkProveInput): CircuitZkProveOutput {
@@ -548,8 +580,7 @@ class FakeCircuitZkProver private constructor() : CircuitZkProver {
                         ),
                     )
                 }
-                AgeCheckFunctionHandler.functionId -> ResultValue.Predicate
-                else -> throw CircuitZkError.AccessDenied(CircuitZkStep.PROVE)
+                else -> if (function.id in predicates.ids) ResultValue.Predicate else throw CircuitZkError.AccessDenied(CircuitZkStep.PROVE)
             }
         }
         return CircuitZkProveOutput(proof = DUMMY_PROOF.copyOf(), results = results)
@@ -560,6 +591,6 @@ class FakeCircuitZkProver private constructor() : CircuitZkProver {
         val DUMMY_PROOF: ByteArray = "FAKE-CIRCUIT-ZK-PROOF-NOT-A-PROOF".toByteArray(Charsets.US_ASCII)
 
         /** The only way to get a fake prover: an explicit opt-in, for tests and development only. */
-        fun optIn(): FakeCircuitZkProver = FakeCircuitZkProver()
+        fun optIn(predicates: org.siros.sdk.credentials.PredicateFunctions = org.siros.sdk.credentials.PredicateFunctions.DEFAULT): FakeCircuitZkProver = FakeCircuitZkProver(predicates)
     }
 }

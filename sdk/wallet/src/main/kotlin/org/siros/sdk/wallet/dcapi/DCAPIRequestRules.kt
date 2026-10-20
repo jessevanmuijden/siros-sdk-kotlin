@@ -72,6 +72,12 @@ enum class DCAPIRefusalReason {
 
     /** Building the proof failed. */
     PROOF_FAILED,
+
+    /** The wallet has no way to ask the user for consent (no consent handler is registered), so it cannot answer. */
+    CONSENT_UNAVAILABLE,
+
+    /** The user did not approve (declined, dismissed, or did not answer in time). */
+    USER_DECLINED,
     ;
 
     /** The string resource with the plain-language sentence shown to the user. */
@@ -85,6 +91,8 @@ enum class DCAPIRefusalReason {
             REQUEST_NOT_VERIFIED -> R.string.siros_dcapi_refused_request_not_verified
             VERIFIER_ID_UNAVAILABLE -> R.string.siros_dcapi_refused_verifier_id_unavailable
             PROOF_FAILED -> R.string.siros_dcapi_refused_proof_failed
+            CONSENT_UNAVAILABLE -> R.string.siros_dcapi_refused_consent_unavailable
+            USER_DECLINED -> R.string.siros_dcapi_refused_user_declined
         }
 }
 

@@ -300,10 +300,22 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     /** The user's answer to the pending payment confirmation. */
     fun answerTransactionConsent(confirmed: Boolean) = transactionConsentGate.answer(confirmed)
 
+    // ── circuit_zk presentation consent ──────────────────────────────
+
+    private val presentationConsentGate = PresentationConsentGate()
+
+    /** A `circuit_zk` presentation consent the SDK asked to show, until the user answers. */
+    val pendingPresentationConsent: StateFlow<PendingPresentationConsent?> = presentationConsentGate.pending
+
+    /** The user's answer to [shown], which must be the pending one (a stale dialog's answer is ignored). */
+    fun answerPresentationConsent(shown: PendingPresentationConsent, agreed: Boolean) =
+        presentationConsentGate.answer(shown, agreed)
+
     /** Applies the persisted setting and the consent hook to [target]. */
     private fun configureTransactionData(target: SirosWallet) {
         target.transactionDataEnabled = _transactionDataEnabled.value
         target.transactionConsentHandler = transactionConsentGate.handler
+        target.presentationConsentHandler = presentationConsentGate.handler
     }
 
     /** Persists the setting and applies it to the wallet now; it governs flows started afterwards. */

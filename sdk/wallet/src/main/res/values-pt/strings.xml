@@ -12,6 +12,38 @@
     <string name="siros_dcapi_refused_request_not_verified">Não foi possível verificar que este pedido vem do site em que está, por isso nada foi partilhado.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">A sua carteira não conseguiu determinar quem está a pedir, por isso nada foi partilhado.</string>
     <string name="siros_dcapi_refused_proof_failed">A sua carteira não conseguiu criar a prova, por isso nada foi partilhado. Tente novamente.</string>
+    <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
+    <string name="siros_consent_title">Confirmar partilha</string>
+    <string name="siros_consent_share">Partilhar</string>
+    <string name="siros_consent_cancel">Cancelar</string>
+    <string name="siros_consent_verifier_prove">%1$s pede-lhe que prove:</string>
+    <string name="siros_consent_verifier_share">%1$s pede-lhe que partilhe:</string>
+    <string name="siros_consent_age_between">Nasceu entre %1$s e %2$s (cerca de %3$d–%4$d anos). A sua data de nascimento exata não é partilhada.</string>
+    <string name="siros_consent_age_at_least">Tem pelo menos %1$d anos. A sua data de nascimento exata não é partilhada.</string>
+    <string name="siros_consent_age_at_most">Tem no máximo %1$d anos. A sua data de nascimento exata não é partilhada.</string>
+    <string name="siros_consent_pseudonym_issuer">É partilhado um pseudónimo para %1$s. Obtém o mesmo pseudónimo sempre que visita este serviço e um diferente em cada outro serviço. O serviço que emitiu a sua credencial consegue apurar a quem pertence este pseudónimo.</string>
+    <string name="siros_consent_pseudonym">É partilhado um pseudónimo para %1$s. Obtém o mesmo pseudónimo sempre que visita este serviço e um diferente em cada outro serviço.</string>
+    <string name="siros_consent_footer">Não são partilhados outros dados pessoais.</string>
+    <string name="siros_consent_claim">O valor de «%1$s» da sua credencial é partilhado.</string>
+    <string name="siros_consent_legacy_pseudonym">É partilhado um pseudónimo com %1$s.</string>
+    <string name="siros_dcapi_refused_consent_unavailable">A sua carteira não consegue pedir a sua aprovação neste momento, por isso nada foi partilhado.</string>
+    <string name="siros_dcapi_refused_user_declined">Não aprovou o pedido, por isso nada foi partilhado.</string>
+    <!-- circuit_zk generic predicate wording (any claim). Approved by leifj 2026-10-20. -->
+    <string name="siros_consent_predicate_eq">%1$s é %2$s.</string>
+    <string name="siros_consent_predicate_ne">%1$s não é %2$s.</string>
+    <string name="siros_consent_predicate_lt">%1$s é inferior a %2$s.</string>
+    <string name="siros_consent_predicate_le">%1$s é no máximo %2$s.</string>
+    <string name="siros_consent_predicate_gt">%1$s é superior a %2$s.</string>
+    <string name="siros_consent_predicate_ge">%1$s é pelo menos %2$s.</string>
+    <string name="siros_consent_predicate_in">%1$s é um de: %2$s.</string>
+    <!-- circuit_zk predicate wording for DATE-typed claims (generic comparison wording stays for numbers and strings). Approved by leifj 2026-10-20. -->
+    <string name="siros_consent_predicate_date_eq">%1$s é %2$s.</string>
+    <string name="siros_consent_predicate_date_ne">%1$s não é %2$s.</string>
+    <string name="siros_consent_predicate_date_lt">%1$s é anterior a %2$s.</string>
+    <string name="siros_consent_predicate_date_le">%1$s é %2$s ou anterior.</string>
+    <string name="siros_consent_predicate_date_gt">%1$s é posterior a %2$s.</string>
+    <string name="siros_consent_predicate_date_ge">%1$s é %2$s ou posterior.</string>
+    <string name="siros_consent_predicate_date_in">%1$s é uma das datas: %2$s.</string>
     <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
     <string name="siros_issuer_not_trusted">Não foi possível verificar este emissor como fidedigno, por isso a credencial não foi adicionada.</string>
 </resources>

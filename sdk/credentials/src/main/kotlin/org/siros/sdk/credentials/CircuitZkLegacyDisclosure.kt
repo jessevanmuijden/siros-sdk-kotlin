@@ -10,7 +10,7 @@ import kotlinx.serialization.json.booleanOrNull
  * PROPOSAL, not part of the `circuit_zk` rulebook: a `circuit_zk` function that discloses named claims of an
  * mdoc through one of the existing (legacy) proof systems, Longfellow (`longfellow-libzk-v1`) and Vega
  * (`vega-mc-p256-v1`), which prove disclosure of claims rather than the rulebook's `age_check` and
- * `pseudonym-v1-sha256`. The naming is for the rulebook owners to settle; the id is this one constant.
+ * `pseudonym`. The naming is for the rulebook owners to settle; the id is this one constant.
  *
  * ```
  * function item: { "id": "zk-claim-disclosure-v1", "return": <handle>, "params": {

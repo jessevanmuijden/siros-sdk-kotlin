@@ -8,6 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **User consent for `circuit_zk` presentations.** One `PresentationConsentHandler`
+  (a sibling of `TransactionConsentHandler`, not coupled to `transactionDataEnabled`;
+  wallet-level `SirosWallet.presentationConsentHandler`, per request through a new
+  `presentationConsentHandler` parameter of `handleDCAPIRequest` and `handleDCAPIRequestWithPresentationConsent`)
+  is asked once for ALL queries of a request, before anything is signed or proved and before
+  the issuer-delivered secret seed is fetched. `handleCircuitZkDcApi` now runs in two phases:
+  phase 1 (validation, trust, the user's pick, local age check, verifier id, consent items)
+  touches no secret; phase 2 (seed, sign, prove) runs only after consent. A decline, a handler
+  that throws, the SDK-side two-minute time limit and a cancelled activity are all a decline
+  (`DCAPIRefusalReason.USER_DECLINED`) with zero seed, signer and prover calls; with no handler
+  the request is refused (`DCAPIRefusalReason.CONSENT_UNAVAILABLE`, answered `access_denied`).
+  The model (`PresentationConsentRequest`, `ConsentVerifier`, `CredentialRef`, `ConsentEntry`,
+  `ConsentItem.{Claim,Predicate,Pseudonym,LegacyPseudonym}`, `AgeForm`, built by
+  `ConsentRequests.build`) says what the verifier will receive and never carries a claim value,
+  seed, proof or pseudonym value; the age range is precomputed (born between / at least / at most).
+  `PresentationConsentText` is the SDK-owned wording (default, sv, fi, el, pt), parameterised per
+  item; the trust framework and `verifier_id_type` are in the model but never in the text. The DC
+  API activity shows it in a plain dialog after the OS picker. Cross-SDK vectors:
+  `spec/circuit-zk-consent-vectors.json` (generator `tools/gen_circuit_zk_consent_vectors.py`).
+  The sample app renders the same model in Compose (`PresentationConsentDialog`).
+  Predicates are not about `birth_date` alone: the `circuit_zk` function set is open-ended, so the consent item
+  is a generic `ConsentItem.Predicate` (function, claim with the credential's OWN display label, comparisons
+  `eq ne lt le gt ge in`, operands; what the verifier learns, never the value) and functions are declared as data
+  (`PredicateFunctions`, `WalletConfig.circuitZkPredicateFunctions`, default `age_check`, which keeps the approved
+  "born between / at least / at most" wording). Generic wording per comparison (default, sv, fi, el, pt) says
+  "{claim} is at least {value}" and that the actual value is not shared. A function that is not declared is refused
+  before consent (the wallet cannot describe it). The local pre-check is driven by the same declarations (dates,
+  numbers, strings, bools; a claim path or format the reader cannot judge is skipped, not guessed), and the
+  cross-query rule is generalised: per credential and claim path, predicates are intersected across queries and a
+  function's declared minimum selectivity is enforced (`age_check`: 365 days); functions that declare none have
+  no merge rule. `intermediary_risk` is read from the PDP's `context.intermediary_risk` (boolean, optional) and is
+  PROVISIONAL until go-trust defines it.
+  A DATE-typed claim has its own operator sentences ("is on or after {date}", "is after", "is on or before",
+  "is before", "is on", "is not on", "is one of the dates: ..."; `siros_consent_predicate_date_*`), numbers and strings
+  keep the generic wording, and the age wording of `age_check` still wins. Vectors: `date_compare` cases.
+  The consent wording (all five locales) was approved by leifj on 2026-10-20.
+  Predicate functions are ONE declaration (`PredicateFunction`): it drives consent, the local pre-check, the
+  cross-query merge rule AND the validator's per-function rules (`PredicateFunction.validatorRules()`, rule ids
+  `<function-id-with-dashes>-count|no-bounds|bad-date|bad-operand|bad-claim|le-before-ge|span-short`; `age_check`
+  keeps its rulebook ids). `RulebookCircuitZkValidator`/`CircuitZkRuleSet.rulebookV03(predicates=...)` and the
+  wallet's default validator take the declared functions. The presenter's handler for a predicate is the generic
+  `PredicateFunctionHandler(declaration)` (`holds` is `PredicateFunctions.holdsFor` over an mdoc claim reader);
+  `AgeCheckFunctionHandler` and `DeclaredPredicateHandler` are gone, and the handler registry keeps only hook-style
+  functions (`HOOK_CIRCUIT_ZK_HANDLERS`: the pseudonym, the legacy disclosure). `FakeCircuitZkProver.optIn(predicates)`.
+  Known follow-up (not filed): the approved year strings use `%d` with words, so fi/el (and sv/pt as needed)
+  need proper plural resources.
 - **`CatalogCircuitZkProver`: the real `circuit_zk` prover, and the wallet's
   default.** `WalletConfig.circuitZkProver = null` now means the catalog prover
   (it was "refuse every request"); `FakeCircuitZkProver` stays an explicit
@@ -125,6 +171,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-cancelled start is no longer reported as an error.
 
 ### Fixed
+- **Consent builder parity with the Swift review.** (1) The age wording ("your exact birth date is not shared") is used
+  only when every condition of an age-specialised function is a single `ge` or `le` bound; one that also declares `eq`
+  (or another comparison) renders with the generic wording stating every comparison (`age_with_eq` in the shared
+  vectors; an age-specialised function may now declare more than `ge`/`le`). (2) `ConsentRequests.build` takes a required
+  `requestSigned` (no default; the wallet passes whether the request carried key material); an empty query list is
+  refused (new vector); a numeric span whose bounds cannot be aligned exactly (`1e999999999`) is refused instead of
+  building a billion-digit number (the 2^64 span vector already pins exact arithmetic).
 - **SD-JWT `ssc` reader (`SecretSeedCommitment.sscOfSdJwt`) fails closed on a non-`sha-256` `_sd_alg`
   and ignores a nested same-named claim.** Only an `ssc` disclosure whose digest is in the payload's
   top-level `_sd` counts; a disclosure of a same-named claim of a nested object no longer makes the
@@ -143,6 +196,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downgrading.
 
 ### Changed
+- **`circuit_zk` never presents a credential the user did not pick.** An empty
+  `selectedCredentialIds` no longer means "the first eligible credential": it is refused
+  (`SELECTED_CREDENTIAL_UNAVAILABLE`). Plain OpenID4VP is unchanged. An `age_check` is checked
+  locally against the credential's `birth_date` before the user is asked; an unsatisfiable one is
+  refused without consent. Only per-verifier pseudonym configs (`known-offender-matching-ssc`,
+  `-psc`) have consent wording; any other config is refused (`UNSUPPORTED_REQUEST`) for now.
+- **Consent review follow-ups.** The numeric merge rule compares the span as a `BigDecimal` (it
+  was narrowed to `Long`; vector added); generic predicate text no longer says "the value is not
+  shared" (a proof of `== SE` reveals it); the presenter is given a `DeclaredPredicateHandler` for every
+  function the wallet declared in `circuitZkPredicateFunctions`, so a function the user was asked about
+  can also be presented. `context.intermediary_risk` is optional and provisional until go-trust defines it.
+- **`VerifierIdRegistry.resolve` returns `ResolvedVerifierId(type, id)`** instead of the bare id
+  string. Removed the unused precursor `CircuitZkConsentSummary` / `circuitZkConsentSummary()`.
+- **BREAKING (unreleased `circuit_zk`): the response is the JSON shape of siros-dc-matcher `docs/circuit_zk_response.md`.**
+  `vp_token[queryId]` is an ARRAY of presentation objects `{circuit_id, proof_system, proof, x5chain, results}`
+  (`CircuitZkResponsePresentation`; `CircuitZkPresenter.Result.presentation` / `.json`; `base64Url` is gone). `proof` is
+  base64url without padding. `x5chain` is REQUIRED: the credential's own `issuerAuth` `x5chain`, leaf (Document Signer)
+  first, at most 8 certificates of at most 4096 bytes each, standard base64 with padding (the verifier validates it
+  through go-trust and takes the issuer key from the leaf; the wallet never sends a bare key). `results` is
+  `{handle: {pseudonym}}` or `{handle: {satisfied: true}}`, one per `return` handle, none skipped. `circuit_id` and
+  `proof_system` are values the request OFFERED (`circuit_id_values`, `circuit_proof_system_values`): a request that
+  offered none cannot be answered and is refused before anything is proved (an offered alias is stated as the id). The old
+  CBOR presentation and its `proof_time` are no longer produced. `CircuitZkResponseValidator` (a mirror of the matcher's
+  `validate_response`, strict: `null` is a type error, repeated members refused, an item type with no result shape refuses
+  the response) checks every response before it is sent; the 79 shared vectors are vendored in
+  `spec/circuit-zk-response-vectors` (siros-dc-matcher 932b07af, set digest 5c7fd1d3...). Only `multiple: true` queries may
+  carry more than one presentation. A legacy `zk-claim-disclosure-v1` plan has no result shape yet and so cannot be
+  answered over this shape. The verification time T is NOT decided and not implemented.
+- **Redirect (OpenID4VP QR) handover for `circuit_zk`:** `MdocDeviceResponseBuilder.buildCircuitZkRedirectSessionTranscript`
 - **BREAKING (unreleased): rulebook v0.4, `circuit_zk` is `zkp_req`.** Names (the matcher's, siros-dc-matcher pull request 50,
   head `69e6be1`, `spec/zkp-req-vectors`): format `zkp_req`, `req` is `_req`, item `id` is `fn_id`, `pseudonym-v1-sha256` is
   `pseudonym` with `config`, `ver` (1) and `prf` (`sha-256`; `hashdh-bls12381g1` for the held `bbs_cd`), `circuit_id` is

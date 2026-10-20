@@ -883,9 +883,10 @@ class CircuitZkPresenterTest {
         assertFalse(PseudonymFunctionHandler.needsSecretSeed(psc))
         assertFalse(PseudonymFunctionHandler.needsVerifierId(fn("user-managed-pseudonym-xsite-ssc")))
         assertEquals("ctx", PseudonymFunctionHandler.verifierContext(ssc))
-        assertNull(AgeCheckFunctionHandler.verifierContext(ageFn()))
-        assertFalse(AgeCheckFunctionHandler.needsVerifierId(ageFn()))
-        assertFalse(AgeCheckFunctionHandler.needsSecretSeed(ageFn()))
+        val ageHandler = DEFAULT_CIRCUIT_ZK_HANDLERS.single { it.functionId == "age_check" }
+        assertNull(ageHandler.verifierContext(ageFn()))
+        assertFalse(ageHandler.needsVerifierId(ageFn()))
+        assertFalse(ageHandler.needsSecretSeed(ageFn()))
         // The legacy disclosure needs a verifier id only for its pseudonym.
         val spec = """[{"id":"c","system":"s"}]"""
         fun legacy(extra: String) = CircuitZkFunction(org.siros.sdk.credentials.CircuitZkLegacyDisclosure.FUNCTION_ID, "d", params("""{"claims":["a"],"systems":$spec$extra}"""))
@@ -904,7 +905,7 @@ class CircuitZkPresenterTest {
             val code = f.readLines().filter { l -> val t = l.trimStart(); !t.startsWith("*") && !t.startsWith("//") && !t.startsWith("/*") }
             val hits = code.filter { names.containsMatchIn(it) }
             // The fake prover is test-only and names the rulebook functions it fakes.
-            val nonFake = if (f.name == "CircuitZkPresenter.kt") hits.filterNot { it.contains("AgeCheckFunctionHandler.functionId") || it.contains("PseudonymFunctionHandler.functionId") } else hits
+            val nonFake = if (f.name == "CircuitZkPresenter.kt") hits.filterNot { it.contains("PseudonymFunctionHandler.functionId") } else hits
             assertTrue("${f.name} names a nym_auth detail: $nonFake", nonFake.isEmpty())
         }
     }
