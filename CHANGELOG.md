@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Issuance start is visible at once.** `startIssuance` and
+  `startIssuanceByOffer` now publish `WalletState.FlowActive` synchronously,
+  before any network work, with `flowType = "issuance"`, a placeholder
+  `flowId` (`FlowActive.PENDING_FLOW_ID`, `FlowActive.isPending`) and a
+  client-side `status` that steps through `initializing`, `connecting_engine`,
+  `establishing_session`, `checking_entitlement`, `preparing_issuance` and
+  `starting_flow` (`FlowActive.STEP_*`) until the engine's own progress events
+  take over. Previously the wallet stayed `Ready` for about five seconds on a
+  mobile network (engine reconnect, entitlement check, metadata fetches), so
+  hosts showed no feedback after the user chose a credential type. A start that
+  fails (engine unreachable, entitlement refusal) returns the wallet to
+  `Ready` and throws, as before; `cancelCurrentFlow()` during the start resets
+  at once, sends nothing to the engine and stops the suspended start from
+  reaching it later. The flow type now stays `"issuance"` across the first
+  engine progress event for flows begun this way.
+- Sample app: label for the new `initializing` step (en, sv, fi, el, pt); a
+  user-cancelled start is no longer reported as an error.
+
 ### Fixed
 - **mdoc issuer trust evaluation no longer 502s and silently downgrades to
   local VICAL validation.** The `mdoc-issuer-auth` AuthZEN request named the

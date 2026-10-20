@@ -145,6 +145,7 @@
     <string name="flow_step_submitting_response">Αποστολή απάντησης στον επαληθευτή…</string>
     <string name="flow_step_computing_proof">Υπολογισμός απόδειξης…</string>
     <string name="flow_step_unknown">Επεξεργασία…</string>
+    <string name="flow_step_initializing">Αρχικοποίηση\u2026</string>
     <string name="flow_diagnostic_label">Διαγνωστικό: %1$s</string>
     <string name="flow_credentials_received">Ελήφθησαν %1$d πιστοποιητικά</string>
     <string name="flow_presentation_sent">Η παρουσίαση στάλθηκε με επιτυχία</string>

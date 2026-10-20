@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.siros.sdk.credentials.interop.AuthorizationDetail
@@ -130,12 +131,31 @@ class WalletEngineSession(
      * preserves OkHttp's own delivery order while guaranteeing at most one
      * [handleMessage] call is ever in flight at a time.
      */
-    private val rawMessageChannel = Channel<String>(Channel.UNLIMITED)
+    /** A received frame, or - with a null [text] - the marker [forceReconnect] queues to purge stale flow traffic. */
+    private class RawFrame(val generation: Int, val text: String?)
+
+    private val rawMessageChannel = Channel<RawFrame>(Channel.UNLIMITED)
+
+    /**
+     * Incremented for every socket this session opens (first connect,
+     * [forceReconnect], automatic reconnect). Every flow frame carries the
+     * generation of the socket that delivered it, so a consumer can tell a
+     * reply to something it sent on an earlier connection from one on the
+     * current connection, even after both were buffered together.
+     */
+    private val generationCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Generation of the most recently opened socket. */
+    val connectionGeneration: Int get() = generationCounter.get()
+
+    /** Orders overlapping [forceReconnect] calls; only the latest may replace the socket. */
+    private val reconnectRequests = java.util.concurrent.atomic.AtomicInteger(0)
 
     init {
         scope.launch {
-            for (text in rawMessageChannel) {
-                handleMessage(text)
+            for (frame in rawMessageChannel) {
+                val text = frame.text
+                if (text == null) purgeStaleFlowTraffic() else handleMessage(text, frame.generation)
             }
         }
     }
@@ -246,6 +266,7 @@ class WalletEngineSession(
             .pingInterval(pingIntervalMs, TimeUnit.MILLISECONDS)
             .build()
 
+        val generation = generationCounter.incrementAndGet()
         webSocket = connectionClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Timber.d("Engine WebSocket connected, sending handshake")
@@ -258,7 +279,7 @@ class WalletEngineSession(
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                rawMessageChannel.trySend(text)
+                rawMessageChannel.trySend(RawFrame(generation, text))
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
@@ -314,13 +335,17 @@ class WalletEngineSession(
      * @return the token to reconnect with, or null if reconnecting should
      *   stop (state has already been updated to reflect why).
      */
-    private suspend fun refreshTokenOrSignalReauth(): String? {
+    private suspend fun refreshTokenOrSignalReauth(request: Int? = null): String? {
         val provider = tokenProvider ?: return lastAppToken
+        // A refresh whose caller was superseded (see [forceReconnect]) must not
+        // publish anything: no token, no reauth signal, no state change.
+        fun superseded() = request != null && reconnectRequests.get() != request
         return try {
-            provider().also { lastAppToken = it }
+            provider().also { if (!superseded()) lastAppToken = it }
         } catch (e: CancellationException) {
             throw e
         } catch (e: AuthException) {
+            if (superseded()) return null
             if (e.code == 401 || e.code == 403) {
                 Timber.w(e, "Token refresh rejected (${e.code}) before reconnect - session invalid")
                 onAuthRejected?.invoke()
@@ -331,12 +356,13 @@ class WalletEngineSession(
                 lastAppToken
             }
         } catch (e: Exception) {
+            if (superseded()) return null
             Timber.w(e, "Token refresh failed before reconnect (transient) - retrying with existing token")
             lastAppToken
         }
     }
 
-    private suspend fun handleMessage(text: String) {
+    private suspend fun handleMessage(text: String, generation: Int) {
         try {
             val element = json.parseToJsonElement(text).jsonObject
             val type = element["type"]?.jsonPrimitive?.content ?: return
@@ -359,21 +385,26 @@ class WalletEngineSession(
                 }
                 MessageTypes.FLOW_PROGRESS -> {
                     val msg = json.decodeFromString(FlowProgressMessage.serializer(), text)
+                        .also { it.connectionGeneration = generation }
                     recordIssuerTrustReport(msg)
                     flowProgressChannel.trySend(msg)
                 }
                 MessageTypes.FLOW_COMPLETE -> {
                     val decoded = json.decodeFromString(FlowCompleteMessage.serializer(), text)
+                    // copy() builds a new instance, so stamp the generation on the copy.
                     val msg = decoded.copy(issuerTrust = issuerTrustByFlow.remove(decoded.flowId))
+                        .also { it.connectionGeneration = generation }
                     flowCompleteChannel.trySend(msg)
                 }
                 MessageTypes.FLOW_ERROR -> {
                     val msg = json.decodeFromString(FlowErrorMessage.serializer(), text)
+                        .also { it.connectionGeneration = generation }
                     msg.flowId?.let { issuerTrustByFlow.remove(it) }
                     flowErrorChannel.trySend(msg)
                 }
                 MessageTypes.SIGN_REQUEST -> {
                     val msg = json.decodeFromString(SignRequestMessage.serializer(), text)
+                        .also { it.connectionGeneration = generation }
                     signRequestChannel.trySend(msg)
                 }
                 MessageTypes.MATCH_REQUEST -> {
@@ -710,17 +741,42 @@ class WalletEngineSession(
      */
     suspend fun forceReconnect() {
         if (lastAppToken == null) return
-        val token = refreshTokenOrSignalReauth()
+        val request = reconnectRequests.incrementAndGet()
+        val token = refreshTokenOrSignalReauth(request)
+        // A newer forceReconnect began while this one was refreshing its token
+        // (the caller moved on - e.g. a cancelled start that was retried). It
+        // owns the socket now; replacing it again would close the newer
+        // caller's connection and drop its replies.
+        if (reconnectRequests.get() != request) return
         // Clear the (possibly zombie) socket unconditionally, even if refresh was
         // rejected below - otherwise isConnected stays true and send() would keep
         // appearing usable on a session that's actually no longer valid.
         webSocket?.cancel() // ungraceful - the connection may already be dead
         webSocket = null
         sessionId = null
+        rawMessageChannel.trySend(RawFrame(0, null))
         if (token == null) return // refreshTokenOrSignalReauth already set State.REAUTH_REQUIRED
         _state.value = State.CONNECTING
         reconnectAttempts = 0
         doConnect(token)
+    }
+
+    /**
+     * Drop flow traffic the replaced connection delivered that no collector has
+     * consumed yet. Server-side flow state died with that socket, so such a
+     * reply is stale; left queued it would reach whatever flow the caller
+     * starts next. Runs in the single reader, at the point in the frame order
+     * where [forceReconnect] queued its marker: every earlier frame has been
+     * processed (so a `trust_evaluated` report still reaches its
+     * `flow_complete`, and a credential-bearing `flow_complete`, push and
+     * notification ack are all kept) and no later frame has. Best effort: a
+     * message a collector already took cannot be recalled.
+     */
+    private fun purgeStaleFlowTraffic() {
+        while (flowProgressChannel.tryReceive().isSuccess) { /* drop */ }
+        while (flowErrorChannel.tryReceive().isSuccess) { /* drop */ }
+        while (signRequestChannel.tryReceive().isSuccess) { /* drop */ }
+        while (matchRequestChannel.tryReceive().isSuccess) { /* drop */ }
     }
 
     /** Disconnect the WebSocket session. */

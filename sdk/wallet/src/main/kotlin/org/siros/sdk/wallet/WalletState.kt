@@ -47,7 +47,36 @@ sealed class WalletState {
         val flowType: String,
         val status: String,
         val credentials: List<StoredCredential> = emptyList(),
-    ) : WalletState()
+    ) : WalletState() {
+        /**
+         * True while the wallet is still doing the local work that precedes the
+         * engine's first progress event (see [PENDING_FLOW_ID]). There is no
+         * engine flow to cancel or correlate yet; [flowId] is a placeholder.
+         */
+        val isPending: Boolean get() = flowId == PENDING_FLOW_ID
+
+        companion object {
+            /** [flowId] of the synchronous pre-engine state; never a real engine flow id. */
+            const val PENDING_FLOW_ID: String = ""
+
+            /** [flowType] of an issuance flow. */
+            const val FLOW_TYPE_ISSUANCE: String = "issuance"
+
+            /**
+             * Client-side [status] tokens emitted before the engine reports
+             * its first progress step ("parsing_offer"), in order. The wallet
+             * does this work itself, so it is not part of the engine's step
+             * vocabulary. Steps that do not apply to a given start path are
+             * skipped (an offer URI has no entitlement check).
+             */
+            const val STEP_INITIALIZING: String = "initializing"
+            const val STEP_CONNECTING_ENGINE: String = "connecting_engine"
+            const val STEP_ESTABLISHING_SESSION: String = "establishing_session"
+            const val STEP_CHECKING_ENTITLEMENT: String = "checking_entitlement"
+            const val STEP_PREPARING_ISSUANCE: String = "preparing_issuance"
+            const val STEP_STARTING_FLOW: String = "starting_flow"
+        }
+    }
 
     /**
      * The backend refuses this installation because of its wallet instance's

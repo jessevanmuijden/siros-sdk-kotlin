@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.siros.sdk.flow.FlowStepCatalog
+import org.siros.sdk.wallet.WalletState
 
 /**
  * Localized display support for [FlowStepCatalog]'s raw FlowStep tokens.
@@ -35,6 +36,17 @@ private val STEP_LABEL_RES: Map<String, Int> = mapOf(
     "submitting_response" to R.string.flow_step_submitting_response,
     "waiting_for_reader" to R.string.flow_step_waiting_for_reader,
     "reader_connected" to R.string.flow_step_reader_connected,
+    // Client-side steps the wallet reports before the engine's first progress
+    // event (WalletState.FlowActive.STEP_*): connecting, then the issuer
+    // entitlement/metadata work. They share a few labels rather than each
+    // getting its own, since they last well under a second apiece on a good
+    // network and the raw token is still shown as the diagnostic line.
+    WalletState.FlowActive.STEP_INITIALIZING to R.string.flow_step_initializing,
+    WalletState.FlowActive.STEP_CONNECTING_ENGINE to R.string.flow_step_initializing,
+    WalletState.FlowActive.STEP_ESTABLISHING_SESSION to R.string.flow_step_initializing,
+    WalletState.FlowActive.STEP_CHECKING_ENTITLEMENT to R.string.flow_step_fetching_metadata,
+    WalletState.FlowActive.STEP_PREPARING_ISSUANCE to R.string.flow_step_fetching_metadata,
+    WalletState.FlowActive.STEP_STARTING_FLOW to R.string.flow_step_initializing,
     // Client-only status - see SirosWallet.kt's sign_presentation ZK-proof
     // handling, not part of FlowStepCatalog's server-mirrored vocabulary.
     "computing_proof" to R.string.flow_step_computing_proof,

@@ -7539,6 +7539,567 @@ class SirosWalletTest {
         )
     }
 
+    // ---- Issuance start: visible state before any network work ----------
+
+    private val engineGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private val startOffer = org.siros.sdk.credentials.CredentialOffer(
+        credentialConfigurationId = "pid",
+        credentialIssuerIdentifier = "https://issuer.invalid",
+        credentialName = "Personal ID",
+        issuerName = "Issuer",
+    )
+
+    private fun startingWallet(engine: WalletEngineSession, stateFlow: MutableStateFlow<WalletState>) = newWallet(
+        "_state" to stateFlow,
+        "engineSession" to engine,
+        "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+    )
+
+    /** Records every state the wallet publishes, in order, interleaved with [log] entries. */
+    private fun CoroutineScope.recordStates(stateFlow: MutableStateFlow<WalletState>, log: MutableList<String>) =
+        launch(Dispatchers.Unconfined) {
+            stateFlow.collect { s ->
+                log += when {
+                    s is WalletState.FlowActive && s.isPending -> "state:${s.status}"
+                    s is WalletState.FlowActive -> "state:flow:${s.flowId}:${s.flowType}:${s.status}"
+                    else -> "state:${s::class.simpleName}"
+                }
+            }
+        }
+
+    @Test
+    fun startIssuanceByOffer_emitsInitializing_beforeAnyNetworkWork_andStepsThroughTheStart() = runTest(dispatcher) {
+        val log = mutableListOf<String>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        coEvery { engine.forceReconnect() } coAnswers { log += "net:forceReconnect" }
+        coEvery { engine.awaitConnected(any()) } coAnswers { log += "net:awaitConnected" }
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } answers { log += "net:startIssuance" }
+        val wallet = startingWallet(engine, stateFlow)
+        val recorder = recordStates(stateFlow, log)
+
+        wallet.startIssuanceByOffer(startOffer)
+        recorder.cancel()
+
+        val steps = log.filter { it.startsWith("state:") || it.startsWith("net:") }
+        assertEquals(
+            listOf(
+                "state:Ready",
+                "state:initializing",
+                "state:connecting_engine",
+                "net:forceReconnect",
+                "state:establishing_session",
+                "net:awaitConnected",
+                "state:checking_entitlement",
+                "state:preparing_issuance",
+                "state:starting_flow",
+                "net:startIssuance",
+            ),
+            steps,
+        )
+        // Still the flow screen, not Ready, until the engine reports its first
+        // progress step; a host must not drop back to the list in this window.
+        val now = stateFlow.value as WalletState.FlowActive
+        assertTrue(now.isPending)
+        assertEquals("issuance", now.flowType)
+    }
+
+    @Test
+    fun startIssuance_withOfferUri_emitsInitializing_beforeAnyNetworkWork() = runTest(dispatcher) {
+        val log = mutableListOf<String>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        coEvery { engine.forceReconnect() } coAnswers { log += "net:forceReconnect" }
+        val wallet = startingWallet(engine, stateFlow)
+        val recorder = recordStates(stateFlow, log)
+
+        wallet.startIssuance("""{"credential_issuer":"https://issuer.invalid","credential_configuration_ids":["pid"]}""")
+        recorder.cancel()
+
+        val steps = log.filter { it.startsWith("state:") || it.startsWith("net:") }
+        assertEquals(listOf("state:Ready", "state:initializing", "state:connecting_engine", "net:forceReconnect"), steps.take(4))
+        assertTrue(steps.contains("state:starting_flow"))
+        assertFalse("no entitlement check on the offer-URI path", steps.contains("state:checking_entitlement"))
+    }
+
+    @Test
+    fun startIssuanceByOffer_engineUnreachable_clearsPendingState_andThrows() = runTest(dispatcher) {
+        val log = mutableListOf<String>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        coEvery { engine.awaitConnected(any()) } throws IllegalStateException("Engine WebSocket connection failed")
+        val wallet = startingWallet(engine, stateFlow)
+        val recorder = recordStates(stateFlow, log)
+
+        val e = runCatching { wallet.startIssuanceByOffer(startOffer) }.exceptionOrNull()
+        recorder.cancel()
+
+        assertTrue("the failure must reach the caller, was $e", e is IllegalStateException)
+        assertTrue("pending state was shown first: $log", "state:establishing_session" in log)
+        // Never left on a spinner nothing will clear, and never a silent return
+        // to a state the caller cannot tell from "nothing happened".
+        assertTrue(stateFlow.value is WalletState.Ready)
+        assertFalse(getField(wallet, "issuanceInFlight") as Boolean)
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+
+        // And a retry is allowed.
+        coEvery { engine.awaitConnected(any()) } returns Unit
+        wallet.startIssuanceByOffer(startOffer)
+        verify(exactly = 1) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun startIssuanceByOffer_engineStartThrows_clearsPendingState() = runTest(dispatcher) {
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } throws IllegalStateException("not connected")
+        val wallet = startingWallet(engine, stateFlow)
+
+        val e = runCatching { wallet.startIssuanceByOffer(startOffer) }.exceptionOrNull()
+
+        assertTrue(e is IllegalStateException)
+        assertTrue(stateFlow.value is WalletState.Ready)
+        assertFalse(getField(wallet, "issuanceInFlight") as Boolean)
+    }
+
+    @Test
+    fun cancelDuringStart_resetsAtOnce_andTheSuspendedStartNeverReachesTheEngine() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        coEvery { engine.forceReconnect() } coAnswers { gate.await() }
+        val wallet = startingWallet(engine, stateFlow)
+
+        val job = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            runCatching { wallet.startIssuanceByOffer(startOffer) }
+        }
+        assertTrue("pending state is up while the engine connects", (stateFlow.value as WalletState.FlowActive).isPending)
+
+        wallet.cancelCurrentFlow()
+
+        assertTrue(stateFlow.value is WalletState.Ready)
+        assertFalse(getField(wallet, "issuanceInFlight") as Boolean)
+        // There is no engine flow to cancel yet - sending one would name a
+        // flow id that does not exist.
+        verify(exactly = 0) { engine.cancelFlow(any()) }
+
+        gate.complete(Unit)
+        job.join()
+
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertTrue("the cancelled start must not resurrect the flow", stateFlow.value is WalletState.Ready)
+        assertFalse(getField(wallet, "issuanceInFlight") as Boolean)
+    }
+
+    @Test
+    fun cancelledStart_doesNotClobberANewerStart() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        var first = true
+        coEvery { engine.forceReconnect() } coAnswers { if (first) { first = false; gate.await() } }
+        val wallet = startingWallet(engine, stateFlow)
+
+        val job = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            runCatching { wallet.startIssuanceByOffer(startOffer) }
+        }
+        wallet.cancelCurrentFlow()
+        wallet.startIssuanceByOffer(startOffer) // second attempt completes
+        gate.complete(Unit)
+        job.join() // first attempt unwinds as cancelled
+
+        verify(exactly = 1) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertTrue("the newer start's pending state survives", (stateFlow.value as WalletState.FlowActive).isPending)
+        assertTrue("and so does its in-flight guard", getField(wallet, "issuanceInFlight") as Boolean)
+    }
+
+    @Test
+    fun firstEngineProgress_replacesPendingState_andKeepsTheIssuanceFlowType() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+
+        wallet.startIssuanceByOffer(startOffer)
+        assertTrue((stateFlow.value as WalletState.FlowActive).isPending)
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-1", step = "parsing_offer"))
+        advanceUntilIdle()
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-1", step = "offer_parsed"))
+        advanceUntilIdle()
+
+        val s = stateFlow.value as WalletState.FlowActive
+        assertEquals("flow-1", s.flowId)
+        assertFalse(s.isPending)
+        assertEquals("issuance", s.flowType)
+        assertEquals("offer_parsed", s.status)
+    }
+
+    @Test
+    fun failureOfACancelledStart_unwindsAsCancellation_notAsTheNetworkError() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        // Fails only after the cancel, past every epoch check, so it is the
+        // network error itself that has to be suppressed.
+        coEvery { engine.awaitConnected(any()) } coAnswers {
+            gate.await()
+            throw IllegalStateException("Engine WebSocket connection failed")
+        }
+        coEvery { engine.forceReconnect() } just runs
+        val wallet = startingWallet(engine, stateFlow)
+        var result: Throwable? = null
+        val job = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            result = runCatching { wallet.startIssuanceByOffer(startOffer) }.exceptionOrNull()
+        }
+        wallet.cancelCurrentFlow()
+        gate.complete(Unit)
+        job.join()
+
+        assertTrue("a late failure after cancel must not surface as an error, was $result",
+            result is kotlinx.coroutines.CancellationException)
+        assertTrue(stateFlow.value is WalletState.Ready)
+    }
+
+    @Test
+    fun cancelDuringMetadataFetch_doesNotPublishIntoSharedFields() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val vctmFetcher = mockk<org.siros.sdk.credentials.VctmFetcher>(relaxed = true)
+        val reached = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { vctmFetcher.fetchDocument(any(), any(), any(), any(), any()) } coAnswers {
+            reached.complete(Unit)
+            gate.await()
+            null
+        }
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "engineSession" to engine,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "vctmFetcher" to vctmFetcher,
+        )
+        val job = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            runCatching { wallet.startIssuanceByOffer(startOffer) }
+        }
+        // Wait until the start is parked inside the metadata fetch (after the
+        // entitlement check, which runs on the IO dispatcher), then cancel.
+        reached.await()
+        wallet.cancelCurrentFlow()
+        setField(wallet, "activeOffer", null)
+        gate.complete(Unit)
+        job.join()
+
+        assertNull("cancelled start published its offer", getField(wallet, "activeOffer"))
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun cancelAfterFlowStartSent_cancelsTheFlowOnItsFirstEvent_andIgnoresIt() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
+        every { engine.cancelFlow(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+
+        wallet.startIssuanceByOffer(startOffer) // flow_start is out, no flow id yet
+        wallet.cancelCurrentFlow()
+        assertTrue(stateFlow.value is WalletState.Ready)
+
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-late", step = "parsing_offer").also { it.connectionGeneration = engineGeneration.get() })
+        advanceUntilIdle()
+
+        verify(exactly = 1) { engine.cancelFlow("flow-late") }
+        assertTrue("the cancelled flow must not reopen: ${stateFlow.value}", stateFlow.value is WalletState.Ready)
+    }
+
+    private fun abandonedStartWallet(
+        progressFlow: MutableSharedFlow<FlowProgressMessage>,
+        flowErrors: MutableSharedFlow<FlowErrorMessage> = MutableSharedFlow(),
+        listener: WalletEventListener,
+        stateFlow: MutableStateFlow<WalletState>,
+    ): Pair<SirosWallet, WalletEngineSession> {
+        val engine = mockEngineConstructor(progressFlow = progressFlow, flowErrors = flowErrors)
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
+        every { engine.cancelFlow(any()) } just runs
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        return wallet to engine
+    }
+
+    @Test
+    fun cancelledStart_whoseFirstReplyIsAnError_doesNotResetState_orReachTheHost() = runTest(dispatcher) {
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(MutableSharedFlow(), flowErrors, listener, stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        wallet.cancelCurrentFlow()
+
+        flowErrors.emit(
+            FlowErrorMessage(flowId = "flow-late", error = org.siros.sdk.transport.engine.FlowError(code = "x", message = "boom")).also { it.connectionGeneration = engineGeneration.get() }
+        )
+        advanceUntilIdle()
+
+        verify(exactly = 1) { engine.cancelFlow("flow-late") }
+        verify(exactly = 0) { listener.onFlowError(any(), any(), any()) }
+    }
+
+    @Test
+    fun retryAfterACancelledStart_isNotMistakenForTheCancelledFlow() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(progressFlow, listener = listener, stateFlow = stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        wallet.cancelCurrentFlow()
+        // The retry replaces the socket; the cancelled flow's reply can no longer arrive.
+        wallet.startIssuanceByOffer(startOffer)
+
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-retry", step = "parsing_offer").also { it.connectionGeneration = engineGeneration.get() })
+        advanceUntilIdle()
+
+        verify(exactly = 0) { engine.cancelFlow(any()) }
+        assertEquals("flow-retry", (stateFlow.value as WalletState.FlowActive).flowId)
+    }
+
+    @Test
+    fun supersededStartResumingAfterReconnect_doesNotEraseALaterCancelledStartsMarker() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(progressFlow, listener = listener, stateFlow = stateFlow)
+        advanceUntilIdle()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { engine.forceReconnect() } coAnswers { if (calls++ == 0) gate.await() }
+
+        val a = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            runCatching { wallet.startIssuanceByOffer(startOffer) }
+        }
+        wallet.cancelCurrentFlow()                      // A parked in forceReconnect, cancelled
+        wallet.startIssuanceByOffer(startOffer)         // B sends its start...
+        wallet.cancelCurrentFlow()                      // ...and is cancelled after send
+        gate.complete(Unit)                             // A resumes: must not touch B's marker
+        a.join()
+
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-b", step = "parsing_offer"))
+        advanceUntilIdle()
+
+        verify(exactly = 1) { engine.cancelFlow("flow-b") }
+        assertTrue(stateFlow.value is WalletState.Ready)
+    }
+
+    @Test
+    fun cancelledIssuanceMarker_isRetiredByAnyConnectionReplacement_notJustAnIssuanceRetry() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(progressFlow, listener = listener, stateFlow = stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        wallet.cancelCurrentFlow()
+
+        // A presentation/renewal path reconnects through ensureEngineConnected.
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "ensureEngineConnected" }
+        method.isAccessible = true
+        method.callSuspend(wallet, engine)
+
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-presentation", step = "parsing_request").also { it.connectionGeneration = engineGeneration.get() })
+        advanceUntilIdle()
+
+        verify(exactly = 0) { engine.cancelFlow(any()) }
+        assertEquals("flow-presentation", (stateFlow.value as WalletState.FlowActive).flowId)
+    }
+
+    @Test
+    fun staleBufferedCompletion_afterARetry_isRecognisedAsTheCancelledStarts_andNotTheRetrys() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val completes = MutableSharedFlow<FlowCompleteMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow, flowComplete = completes)
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
+        every { engine.cancelFlow(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        val oldGeneration = engineGeneration.get() // the connection the start was sent on
+        wallet.cancelCurrentFlow()                 // cancelled after send, on that connection
+        wallet.startIssuanceByOffer(startOffer)    // retry: new connection
+
+        // The retry's own first event arrives first and must not be taken for the cancelled flow...
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-new", step = "parsing_offer").also { it.connectionGeneration = engineGeneration.get() })
+        advanceUntilIdle()
+        assertEquals("flow-new", (stateFlow.value as WalletState.FlowActive).flowId)
+        verify(exactly = 0) { engine.cancelFlow("flow-new") }
+
+        // ...and the buffered completion of the cancelled start, still tagged with
+        // the old connection, is dropped instead of acting on the retry's state.
+        completes.emit(FlowCompleteMessage(flowId = "flow-old").also { it.connectionGeneration = oldGeneration })
+        advanceUntilIdle()
+        verify(exactly = 1) { engine.cancelFlow("flow-old") }
+        assertEquals("flow-new", (stateFlow.value as WalletState.FlowActive).flowId)
+    }
+
+    @Test
+    fun reconnectBetweenSendAndCancel_stillMatchesTheConnectionTheStartWasSentOn() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(progressFlow, listener = listener, stateFlow = stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        val sentOn = engineGeneration.get()
+        engineGeneration.incrementAndGet() // automatic reconnect before the user cancels
+        wallet.cancelCurrentFlow()
+
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-late", step = "parsing_offer").also { it.connectionGeneration = sentOn })
+        advanceUntilIdle()
+
+        verify(exactly = 1) { engine.cancelFlow("flow-late") }
+        assertTrue(stateFlow.value is WalletState.Ready)
+    }
+
+    @Test
+    fun sessionReplacement_doesNotReuseAnAbandonedMarkerFromTheOldSession() = runTest(dispatcher) {
+        val progress1 = MutableSharedFlow<FlowProgressMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine1) = abandonedStartWallet(progress1, listener = listener, stateFlow = stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        val generation = engineGeneration.get()
+        wallet.cancelCurrentFlow()               // marker: session 1, generation g
+        every { engine1.disconnect() } just runs
+
+        // Logout/login: a brand new session whose generations restart at the same number.
+        val progress2 = MutableSharedFlow<FlowProgressMessage>()
+        val engine2 = mockEngineConstructor(progressFlow = progress2)
+        every { engine2.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
+        every { engine2.cancelFlow(any()) } just runs
+        engineGeneration.set(generation - 1) // so the new session's first connection is generation g again
+        invokeConnectEngine(wallet, "app-token-2")
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        assertEquals(generation, engineGeneration.get())
+
+        progress2.emit(FlowProgressMessage(flowId = "flow-legit", step = "parsing_offer").also { it.connectionGeneration = generation })
+        advanceUntilIdle()
+
+        verify(exactly = 0) { engine2.cancelFlow(any()) }
+        assertEquals("flow-legit", (stateFlow.value as WalletState.FlowActive).flowId)
+    }
+
+    @Test
+    fun cancelFromASynchronousStateCollector_onStartingFlow_stopsTheStartBeforeItIsSent() = runTest(dispatcher) {
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val wallet = startingWallet(engine, stateFlow)
+        val collector = CoroutineScope(Dispatchers.Unconfined).launch {
+            stateFlow.collect { s ->
+                if (s is WalletState.FlowActive && s.status == WalletState.FlowActive.STEP_STARTING_FLOW) {
+                    wallet.cancelCurrentFlow()
+                }
+            }
+        }
+
+        val e = runCatching { wallet.startIssuanceByOffer(startOffer) }.exceptionOrNull()
+        collector.cancel()
+
+        assertTrue("start must unwind as a cancellation, was $e", e is kotlinx.coroutines.CancellationException)
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertTrue(stateFlow.value is WalletState.Ready)
+    }
+
+    @Test
+    fun cancellationErrorOfAnActiveFlow_doesNotClearAnImmediateRetry() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(progressFlow, flowErrors, listener, stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-old", step = "parsing_offer").also { it.connectionGeneration = engineGeneration.get() })
+        advanceUntilIdle()
+        assertEquals("flow-old", (stateFlow.value as WalletState.FlowActive).flowId)
+
+        wallet.cancelCurrentFlow()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        coEvery { engine.forceReconnect() } coAnswers { gate.await() }
+        val retry = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            runCatching { wallet.startIssuanceByOffer(startOffer) }
+        }
+        // The old flow's cancellation error arrives while the retry refreshes its token.
+        flowErrors.emit(FlowErrorMessage(flowId = "flow-old", error = org.siros.sdk.transport.engine.FlowError(code = "cancelled", message = "cancelled")))
+        advanceUntilIdle()
+
+        verify(exactly = 0) { listener.onFlowError(any(), any(), any()) }
+        assertTrue("retry keeps its pending state", (stateFlow.value as WalletState.FlowActive).isPending)
+        assertTrue("and its in-flight guard", getField(wallet, "issuanceInFlight") as Boolean)
+        gate.complete(Unit)
+        retry.join()
+    }
+
+    @Test
+    fun cancelledStart_whoseFirstReplyIsAnErrorWithoutAFlowId_isIgnored() = runTest(dispatcher) {
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val (wallet, engine) = abandonedStartWallet(MutableSharedFlow(), flowErrors, listener, stateFlow)
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        wallet.cancelCurrentFlow()
+        wallet.startIssuanceByOffer(startOffer) // immediate retry; its reconnect has not replaced the socket yet in the old reply's view
+        val sentOn = engineGeneration.get() - 1  // the cancelled start's connection
+
+        flowErrors.emit(
+            FlowErrorMessage(flowId = null, error = org.siros.sdk.transport.engine.FlowError(code = "x", message = "boom"))
+                .also { it.connectionGeneration = sentOn }
+        )
+        advanceUntilIdle()
+
+        verify(exactly = 0) { listener.onFlowError(any(), any(), any()) }
+        verify(exactly = 0) { engine.cancelFlow(any()) }
+        assertTrue("retry keeps its pending state", (stateFlow.value as WalletState.FlowActive).isPending)
+        assertTrue(getField(wallet, "issuanceInFlight") as Boolean)
+    }
+
     private fun newWallet(vararg fields: Pair<String, Any?>): SirosWallet {
         val wallet = allocateInstance(SirosWallet::class.java) as SirosWallet
         val values = fields.toMap(mutableMapOf())
@@ -7572,6 +8133,25 @@ class SirosWalletTest {
         if ("zkPreparationsByFlow" !in values) {
             values["zkPreparationsByFlow"] =
                 java.util.concurrent.ConcurrentHashMap<String, org.siros.sdk.credentials.ZkIssuancePreparation>()
+        }
+        // Same allocateInstance reason: the start-attempt counter's initializer
+        // never runs, and every issuance start and cancel touches it.
+        // readyState() (cancel/failure of a pending issuance start) reads the account list.
+        if ("accountRegistry" !in values) {
+            val registry = mockk<AccountRegistry>(relaxed = true)
+            every { registry.listAccounts() } returns emptyList()
+            values["accountRegistry"] = registry
+        }
+        if ("abandonedStarts" !in values) {
+            values["abandonedStarts"] = java.util.concurrent.CopyOnWriteArrayList<Any>()
+        }
+        if ("abandonedFlowIds" !in values) {
+            values["abandonedFlowIds"] = java.util.Collections.newSetFromMap(
+                java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+            )
+        }
+        if ("issuanceStartEpoch" !in values) {
+            values["issuanceStartEpoch"] = java.util.concurrent.atomic.AtomicInteger(0)
         }
         if ("credentialConsumptionPolicy" !in values) {
             values["credentialConsumptionPolicy"] = CredentialConsumptionPolicy.NEVER_CONSUME
@@ -8504,7 +9084,9 @@ class SirosWalletTest {
         val engine = mockk<WalletEngineSession>()
         every { engine.connect(any(), any(), any()) } just runs
         coEvery { engine.awaitConnected(any()) } just runs
-        coEvery { engine.forceReconnect() } just runs
+        // Each reconnect opens a new connection generation, as the real session does.
+        coEvery { engine.forceReconnect() } coAnswers { engineGeneration.incrementAndGet() }
+        every { engine.connectionGeneration } answers { engineGeneration.get() }
         every { engine.state } returns MutableStateFlow(WalletEngineSession.State.CONNECTED)
         every { engine.sendSignResponse(any(), any(), any(), any()) } just runs
         every { engine.sendMatchResponse(any(), any(), any()) } just runs

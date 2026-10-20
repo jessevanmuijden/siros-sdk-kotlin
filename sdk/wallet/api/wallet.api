@@ -820,6 +820,15 @@ public final class org/siros/sdk/wallet/WalletState$Error : org/siros/sdk/wallet
 }
 
 public final class org/siros/sdk/wallet/WalletState$FlowActive : org/siros/sdk/wallet/WalletState {
+	public static final field Companion Lorg/siros/sdk/wallet/WalletState$FlowActive$Companion;
+	public static final field FLOW_TYPE_ISSUANCE Ljava/lang/String;
+	public static final field PENDING_FLOW_ID Ljava/lang/String;
+	public static final field STEP_CHECKING_ENTITLEMENT Ljava/lang/String;
+	public static final field STEP_CONNECTING_ENGINE Ljava/lang/String;
+	public static final field STEP_ESTABLISHING_SESSION Ljava/lang/String;
+	public static final field STEP_INITIALIZING Ljava/lang/String;
+	public static final field STEP_PREPARING_ISSUANCE Ljava/lang/String;
+	public static final field STEP_STARTING_FLOW Ljava/lang/String;
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)V
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
@@ -838,7 +847,11 @@ public final class org/siros/sdk/wallet/WalletState$FlowActive : org/siros/sdk/w
 	public final fun getStatus ()Ljava/lang/String;
 	public final fun getUserId ()Ljava/lang/String;
 	public fun hashCode ()I
+	public final fun isPending ()Z
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class org/siros/sdk/wallet/WalletState$FlowActive$Companion {
 }
 
 public final class org/siros/sdk/wallet/WalletState$KeystoreLocked : org/siros/sdk/wallet/WalletState {

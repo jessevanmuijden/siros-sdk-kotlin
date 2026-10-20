@@ -168,6 +168,7 @@
     <string name="flow_step_submitting_response">Sending response to verifier\u2026</string>
     <string name="flow_step_computing_proof">Computing proof\u2026</string>
     <string name="flow_step_unknown">Processing\u2026</string>
+    <string name="flow_step_initializing">Initializing\u2026</string>
     <string name="flow_diagnostic_label">Diagnostic: %1$s</string>
     <string name="flow_credentials_received">Received %1$d credential(s)</string>
     <string name="flow_presentation_sent">Presentation sent successfully</string>

@@ -300,7 +300,16 @@ data class FlowProgressMessage(
     val step: String,
     val payload: JsonElement? = null,
     val timestamp: String? = null,
-)
+) {
+    /**
+     * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
+     * stamped by the session on receipt, never on the wire. Kept out of the
+     * primary constructor so the existing constructor and `copy` signatures
+     * stay binary compatible.
+     */
+    @kotlinx.serialization.Transient
+    var connectionGeneration: Int = 0
+}
 
 @Serializable
 data class FlowCompleteMessage(
@@ -345,7 +354,16 @@ data class FlowCompleteMessage(
      * the consumer never races the separate progress and completion channels.
      */
     @kotlinx.serialization.Transient val issuerTrust: IssuerTrustReport? = null,
-)
+) {
+    /**
+     * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
+     * stamped by the session on receipt, never on the wire. Kept out of the
+     * primary constructor so the existing constructor and `copy` signatures
+     * stay binary compatible.
+     */
+    @kotlinx.serialization.Transient
+    var connectionGeneration: Int = 0
+}
 
 /** Server-side issuer trust outcome reported by the engine for one flow. */
 data class IssuerTrustReport(
@@ -371,7 +389,16 @@ data class FlowErrorMessage(
     val step: String? = null,
     val error: FlowError,
     val timestamp: String? = null,
-)
+) {
+    /**
+     * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
+     * stamped by the session on receipt, never on the wire. Kept out of the
+     * primary constructor so the existing constructor and `copy` signatures
+     * stay binary compatible.
+     */
+    @kotlinx.serialization.Transient
+    var connectionGeneration: Int = 0
+}
 
 @Serializable
 data class FlowError(
@@ -388,7 +415,16 @@ data class SignRequestMessage(
     val action: String,
     val params: SignRequestParams,
     val timestamp: String? = null,
-)
+) {
+    /**
+     * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
+     * stamped by the session on receipt, never on the wire. Kept out of the
+     * primary constructor so the existing constructor and `copy` signatures
+     * stay binary compatible.
+     */
+    @kotlinx.serialization.Transient
+    var connectionGeneration: Int = 0
+}
 
 @Serializable
 data class SignRequestParams(

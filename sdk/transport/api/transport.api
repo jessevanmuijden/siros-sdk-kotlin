@@ -754,6 +754,7 @@ public final class org/siros/sdk/transport/engine/FlowCompleteMessage {
 	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/transport/engine/IssuerTrustReport;)Lorg/siros/sdk/transport/engine/FlowCompleteMessage;
 	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/FlowCompleteMessage;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/transport/engine/IssuerTrustReport;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/FlowCompleteMessage;
 	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConnectionGeneration ()I
 	public final fun getCredentialIssuer ()Ljava/lang/String;
 	public final fun getCredentials ()Ljava/util/List;
 	public final fun getDpopJwk ()Ljava/lang/String;
@@ -767,6 +768,7 @@ public final class org/siros/sdk/transport/engine/FlowCompleteMessage {
 	public final fun getType ()Ljava/lang/String;
 	public final fun getTypeMetadata ()Lkotlinx/serialization/json/JsonElement;
 	public fun hashCode ()I
+	public final fun setConnectionGeneration (I)V
 	public fun toString ()Ljava/lang/String;
 }
 
@@ -829,12 +831,14 @@ public final class org/siros/sdk/transport/engine/FlowErrorMessage {
 	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/transport/engine/FlowError;Ljava/lang/String;)Lorg/siros/sdk/transport/engine/FlowErrorMessage;
 	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/FlowErrorMessage;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/transport/engine/FlowError;Ljava/lang/String;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/FlowErrorMessage;
 	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConnectionGeneration ()I
 	public final fun getError ()Lorg/siros/sdk/transport/engine/FlowError;
 	public final fun getFlowId ()Ljava/lang/String;
 	public final fun getStep ()Ljava/lang/String;
 	public final fun getTimestamp ()Ljava/lang/String;
 	public final fun getType ()Ljava/lang/String;
 	public fun hashCode ()I
+	public final fun setConnectionGeneration (I)V
 	public fun toString ()Ljava/lang/String;
 }
 
@@ -865,12 +869,14 @@ public final class org/siros/sdk/transport/engine/FlowProgressMessage {
 	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Ljava/lang/String;)Lorg/siros/sdk/transport/engine/FlowProgressMessage;
 	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/FlowProgressMessage;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Ljava/lang/String;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/FlowProgressMessage;
 	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConnectionGeneration ()I
 	public final fun getFlowId ()Ljava/lang/String;
 	public final fun getPayload ()Lkotlinx/serialization/json/JsonElement;
 	public final fun getStep ()Ljava/lang/String;
 	public final fun getTimestamp ()Ljava/lang/String;
 	public final fun getType ()Ljava/lang/String;
 	public fun hashCode ()I
+	public final fun setConnectionGeneration (I)V
 	public fun toString ()Ljava/lang/String;
 }
 
@@ -1279,12 +1285,14 @@ public final class org/siros/sdk/transport/engine/SignRequestMessage {
 	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/SignRequestMessage;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lorg/siros/sdk/transport/engine/SignRequestParams;Ljava/lang/String;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/SignRequestMessage;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAction ()Ljava/lang/String;
+	public final fun getConnectionGeneration ()I
 	public final fun getFlowId ()Ljava/lang/String;
 	public final fun getMessageId ()Ljava/lang/String;
 	public final fun getParams ()Lorg/siros/sdk/transport/engine/SignRequestParams;
 	public final fun getTimestamp ()Ljava/lang/String;
 	public final fun getType ()Ljava/lang/String;
 	public fun hashCode ()I
+	public final fun setConnectionGeneration (I)V
 	public fun toString ()Ljava/lang/String;
 }
 
@@ -1429,6 +1437,7 @@ public final class org/siros/sdk/transport/engine/WalletEngineSession : org/siro
 	public final fun flowErrors ()Lkotlinx/coroutines/flow/Flow;
 	public final fun flowProgress ()Lkotlinx/coroutines/flow/Flow;
 	public final fun forceReconnect (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+	public final fun getConnectionGeneration ()I
 	public final fun getState ()Lkotlinx/coroutines/flow/StateFlow;
 	public final fun isConnected ()Z
 	public final fun matchRequests ()Lkotlinx/coroutines/flow/Flow;

@@ -6,7 +6,9 @@ import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -775,6 +777,133 @@ class WalletEngineSessionTest {
                 matches = listOf(CredentialMatch(credentialId = "cred-1", format = "dc+sd-jwt")),
             )
         }
+    }
+
+    @Test
+    fun forceReconnect_discardsFlowRepliesBufferedFromTheReplacedConnection() = runTest {
+        val session = WalletEngineSession(
+            baseUrl = "https://wallet.example.com",
+            tenantId = "tenant-42",
+            client = client,
+        )
+        session.connect("app-token")
+        // A reply the old connection delivered that nobody has consumed yet. The
+        // handshake frame after it is awaited so the consumer has certainly
+        // routed the progress frame into its (buffered) channel.
+        listener.onMessage(webSocket, """{"type":"flow_progress","flow_id":"old-flow","step":"parsing_offer"}""")
+        listener.onMessage(webSocket, """{"type":"match_request","flow_id":"old-flow","dcql_query":{}}""")
+        session.messages().test {
+            listener.onMessage(webSocket, """{"type":"handshake_complete","session_id":"s1"}""")
+            // Handling is sequential: once the handshake envelope is seen, every
+            // frame sent before it has been routed to its channel.
+            while (awaitItem().type != MessageTypes.HANDSHAKE_COMPLETE) { /* keep consuming */ }
+            cancelAndIgnoreRemainingEvents()
+        }
+
+        session.forceReconnect()
+
+        // The reader processes the purge marker before anything the new connection
+        // delivers: once the new handshake envelope is seen, the purge has run.
+        session.messages().test {
+            listener.onMessage(webSocket, """{"type":"handshake_complete","session_id":"s2"}""")
+            while (awaitItem().type != MessageTypes.HANDSHAKE_COMPLETE) { /* keep consuming */ }
+            cancelAndIgnoreRemainingEvents()
+        }
+        session.matchRequests().test {
+            listener.onMessage(webSocket, """{"type":"match_request","flow_id":"new-flow","dcql_query":{}}""")
+            assertEquals("new-flow", awaitItem().flowId)
+            cancelAndIgnoreRemainingEvents()
+        }
+        session.flowProgress().test {
+            listener.onMessage(webSocket, """{"type":"flow_progress","flow_id":"new-flow","step":"parsing_offer"}""")
+            assertEquals("new-flow", awaitItem().flowId)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun forceReconnect_keepsTheIssuerTrustReportOfAFlowCompletedAcrossIt() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "t", client = client)
+        session.connect("app-token")
+        // Both frames are still queued (not awaited) when the connection is replaced.
+        listener.onMessage(
+            webSocket,
+            """{"type":"flow_progress","flow_id":"f","step":"trust_evaluated","payload":{"issuer_trust_evaluated":true,"issuer":"https://i.example","trusted":false,"reason":"no"}}""",
+        )
+        listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"f"}""")
+        session.forceReconnect()
+
+        session.flowComplete().test {
+            val done = awaitItem()
+            assertEquals(false, done.issuerTrust?.trusted)
+            assertEquals("no", done.issuerTrust?.reason)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun forceReconnect_keepsABufferedCredentialBearingFlowComplete() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "t", client = client)
+        session.connect("app-token")
+        listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"done-flow","credentials":[{"format":"dc+sd-jwt","credential":"jwt"}]}""")
+        session.messages().test {
+            listener.onMessage(webSocket, """{"type":"handshake_complete","session_id":"s1"}""")
+            while (awaitItem().type != MessageTypes.HANDSHAKE_COMPLETE) { /* keep consuming */ }
+            cancelAndIgnoreRemainingEvents()
+        }
+
+        session.forceReconnect()
+
+        session.flowComplete().test {
+            val done = awaitItem()
+            assertEquals("done-flow", done.flowId)
+            // Still tagged with the connection that delivered it, not the current one.
+            assertEquals(1, done.connectionGeneration)
+            assertEquals(2, session.connectionGeneration)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun overlappingForceReconnect_supersededCallDoesNotReplaceTheNewerSocket() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "t", client = client)
+        val gate = kotlinx.coroutines.CompletableDeferred<String>()
+        var calls = 0
+        session.connect("app-token", tokenProvider = { if (calls++ == 0) gate.await() else "fresh-token" })
+
+        val first = launch(start = CoroutineStart.UNDISPATCHED) {
+            session.forceReconnect() // parked in the token refresh
+        }
+        session.forceReconnect()      // the newer caller opens the new socket
+        verify(exactly = 2) { client.newWebSocket(any(), any()) }
+        gate.complete("stale-token")
+        first.join()
+
+        // The superseded call must not cancel/replace the newer caller's socket.
+        verify(exactly = 2) { client.newWebSocket(any(), any()) }
+        verify(exactly = 1) { webSocket.cancel() }
+    }
+
+    @Test
+    fun overlappingForceReconnect_supersededRejectionDoesNotSignalReauthOverTheNewerConnection() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "t", client = client)
+        val gate = kotlinx.coroutines.CompletableDeferred<String>()
+        var calls = 0
+        var rejected = 0
+        session.connect(
+            "app-token",
+            tokenProvider = { if (calls++ == 0) { gate.await(); throw AuthException("expired", code = 401) } else "fresh-token" },
+            onAuthRejected = { rejected++ },
+        )
+        val first = launch(start = CoroutineStart.UNDISPATCHED) { session.forceReconnect() }
+        session.forceReconnect()
+        val stateBefore = session.state.value
+        gate.complete("unused") // the older call now fails with 401, after the newer one succeeded
+        first.join()
+
+        assertEquals("the stale rejection must not reach the wallet", 0, rejected)
+        assertEquals(stateBefore, session.state.value)
+        assertTrue(session.state.value != WalletEngineSession.State.REAUTH_REQUIRED)
     }
 
     @Test
