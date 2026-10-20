@@ -2,4 +2,6 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Δημιουργία απόδειξης μηδενικής γνώσης…</string>
     <string name="siros_dcapi_zk_proof_detail">Δεν κοινοποιούνται προσωπικά δεδομένα - μόνο μια κρυπτογραφική απόδειξη ότι πληροίτε το αίτημα.</string>
+    <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
+    <string name="siros_issuer_not_trusted">Ο εκδότης δεν ήταν δυνατό να επαληθευτεί ως αξιόπιστος, επομένως το διαπιστευτήριο δεν προστέθηκε.</string>
 </resources>

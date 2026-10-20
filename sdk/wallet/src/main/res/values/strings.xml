@@ -5,4 +5,6 @@
          localises or rewords these by defining strings with the same names. -->
     <string name="siros_dcapi_zk_proof_status">Generating zero-knowledge proof…</string>
     <string name="siros_dcapi_zk_proof_detail">No personal data is shared - only a cryptographic proof that you meet the request.</string>
+    <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
+    <string name="siros_issuer_not_trusted">This issuer could not be verified as trusted, so the credential was not added.</string>
 </resources>

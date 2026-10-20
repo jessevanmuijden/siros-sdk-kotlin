@@ -2,4 +2,6 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Gerando prova de conhecimento zero…</string>
     <string name="siros_dcapi_zk_proof_detail">Nenhum dado pessoal é compartilhado - apenas uma prova criptográfica de que você atende à solicitação.</string>
+    <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
+    <string name="siros_issuer_not_trusted">Não foi possível verificar este emissor como fidedigno, por isso a credencial não foi adicionada.</string>
 </resources>

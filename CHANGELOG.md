@@ -7,7 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **mdoc issuer trust evaluation no longer 502s and silently downgrades to
+  local VICAL validation.** The `mdoc-issuer-auth` AuthZEN request named the
+  issuer URL as `subject.id` but the certificate hash as `resource.id`; go-trust
+  requires `resource.id == subject.id` on every full evaluation and answered
+  400, which go-wallet-backend's authzen proxy turns into a 502 on
+  `POST /v1/evaluate`, so every mdoc issuance fell back to local root validation
+  and was stored `trusted=false`. `resource.id` now always equals `subject.id`
+  (the key material stays in `resource.key`). The fallback to local validation
+  is also stricter: only a network failure, or a 502/503/504 carrying no
+  upstream JSON error body, counts as "backend unreachable"; a 4xx, a 500, or a
+  502/503/504 whose body is a PDP error now fails closed instead of silently
+  downgrading.
+
 ### Changed
+- **BEHAVIOUR-BREAKING for hosts relying on storing untrusted credentials:
+  issuance is fail-closed on issuer trust.** A credential is stored only if its
+  issuer's trust is established: an mdoc needs a verifiable `issuerAuth` and a
+  positive `evaluateIssuerTrust` (remote `decision=true`, or - only when the
+  backend was genuinely unreachable - a positive local validation against
+  configured roots); a negative decision, a 4xx/validation rejection,
+  unreachable with no (or negative) local roots, or a missing/unverifiable
+  `issuerAuth` refuses the issuance. Other formats are refused when the engine's
+  server-side issuer trust (`trust_evaluated`) was negative. A refusal stores
+  nothing, captures no refresh token, syncs nothing, leaves a renewal's
+  superseded batch in place, sends the OID4VCI `credential_failure`
+  notification (best effort, no detail) and ends the flow with the new
+  `WalletEventListener.onIssuerNotTrusted` plus `onFlowError` carrying the
+  default wording (string resource `siros_issuer_not_trusted`, localised
+  en/sv/fi/el/pt). There is no host switch to turn this off. The engine's
+  issuer-trust report now travels on `FlowCompleteMessage.issuerTrust`
+  (attached by `WalletEngineSession` in message order, so it cannot race the
+  completion), and a completion whose flow was cancelled while its trust check
+  was pending is dropped without touching state.
+- **One trust-decision cache replaces `TrustCache`** (removed). Every
+  `/v1/evaluate` call (mdoc issuer/reader, DC API, engine-relayed and WMP trust
+  evaluation) goes through `TrustDecisionCache`: successful decisions (allow
+  and deny) only, keyed by a hash of the whole request (action, subject, full
+  certificate chain / key material, context), `WalletConfig.trustDecisionCacheTtl`
+  (default 5 minutes, `Duration.ZERO` disables), in memory, 256 entries LRU,
+  single-flight for identical concurrent requests, cleared when the backend
+  connection is dropped or replaced (logout, account deletion, reconnect).
+  Errors and timeouts are never cached and an expired entry is never served,
+  not even while the backend is unreachable; the old "cached positive while the
+  backend is unreachable" fallback is gone. Trade-off: a trust revocation can
+  take up to the TTL to take effect.
 - **BREAKING (unreleased TS12 API): payment SCA takes its authentication
   factors from the signing operation, not from a provider.**
   `siros-wscd-manager` 0.9.1 -> 0.10.0 (UniFFI bindings regenerated:

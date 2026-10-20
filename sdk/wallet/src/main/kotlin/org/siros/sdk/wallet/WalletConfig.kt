@@ -326,6 +326,19 @@ data class WalletConfig(
      * toggle; flip this and rebuild the wallet to change it.
      */
     val vegaProfilingEnabled: Boolean = false,
+    /**
+     * How long a successful remote trust decision (`POST /v1/evaluate`, allow
+     * or deny) is reused for the identical request: same action, subject,
+     * certificate chain / key material and context. Errors, timeouts and
+     * unreachable-backend outcomes are never cached, and an expired entry is
+     * never used, not even while the backend is unreachable. In memory only,
+     * cleared on logout and when the backend connection changes.
+     *
+     * Trade-off: a trust revocation can take up to this long to take effect
+     * for requests already answered within the window. [java.time.Duration.ZERO]
+     * disables the cache. Default 5 minutes.
+     */
+    val trustDecisionCacheTtl: java.time.Duration = java.time.Duration.ofMinutes(5),
 ) {
     /**
      * The reader-trust mode actually in force: [readerTrustEvaluationMode] if

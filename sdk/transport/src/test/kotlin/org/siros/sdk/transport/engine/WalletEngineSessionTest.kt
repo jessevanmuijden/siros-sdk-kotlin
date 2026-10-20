@@ -206,6 +206,34 @@ class WalletEngineSessionTest {
     }
 
     @Test
+    fun flow_complete_carries_the_issuer_trust_report_received_before_it() = runTest {
+        val session = WalletEngineSession(
+            baseUrl = "https://wallet.example.com",
+            tenantId = "tenant-42",
+            client = client,
+        )
+        session.connect("app-token")
+
+        session.flowComplete().test {
+            listener.onMessage(
+                webSocket,
+                """{"type":"flow_progress","flow_id":"flow-1","step":"trust_evaluated","payload":""" +
+                    """{"issuer_trust_evaluated":true,"issuer":"https://i.example","trusted":false,"reason":"no"}}""",
+            )
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"flow-1"}""")
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"flow-2"}""")
+
+            val first = awaitItem()
+            assertEquals("https://i.example", first.issuerTrust?.issuer)
+            assertEquals(false, first.issuerTrust?.trusted)
+            assertEquals("no", first.issuerTrust?.reason)
+            // Another flow's completion carries nothing, and the report is consumed.
+            assertEquals(null, awaitItem().issuerTrust)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
     fun flow_error_message_emits_to_error_flow() = runTest {
         val session = WalletEngineSession(
             baseUrl = "https://wallet.example.com",

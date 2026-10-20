@@ -2,4 +2,6 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Luodaan nollatietotodistetta…</string>
     <string name="siros_dcapi_zk_proof_detail">Henkilötietoja ei jaeta - vain kryptografinen todiste siitä, että täytät pyynnön vaatimukset.</string>
+    <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
+    <string name="siros_issuer_not_trusted">Myöntäjää ei voitu todentaa luotetuksi, joten tunnistetietoa ei lisätty.</string>
 </resources>

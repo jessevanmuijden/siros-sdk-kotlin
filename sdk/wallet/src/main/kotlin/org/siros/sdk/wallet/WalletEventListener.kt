@@ -107,6 +107,16 @@ interface WalletEventListener {
     fun onFlowError(flowId: String, errorMessage: String, redirectUri: String? = null) {}
 
     /**
+     * An issuance was refused because the issuer's trust could not be
+     * established (remote evaluation negative or rejected, backend unreachable
+     * with no positive local validation, or an unverifiable mdoc `issuerAuth`).
+     * Nothing was stored. Called in addition to [onFlowError], which carries the
+     * default English wording; apps wording it themselves use the string
+     * resource `siros_issuer_not_trusted`. [reason] is for logs, not users.
+     */
+    fun onIssuerNotTrusted(flowId: String, issuer: String?, reason: String) {}
+
+    /**
      * A presentation request carrying OpenID4VP `transaction_data` (EC TS12)
      * was refused or declined, with nothing signed. The SDK reports the
      * machine-readable [reason]; the app words it for the user in its own

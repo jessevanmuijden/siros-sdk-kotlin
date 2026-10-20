@@ -2,4 +2,6 @@
 <resources>
     <string name="siros_dcapi_zk_proof_status">Genererar nollkunskapsbevis…</string>
     <string name="siros_dcapi_zk_proof_detail">Inga personuppgifter delas - endast ett kryptografiskt bevis på att du uppfyller begäran.</string>
+    <!-- Shown when an issuance is refused because the issuer's trust could not be established. -->
+    <string name="siros_issuer_not_trusted">Utfärdaren kunde inte verifieras som betrodd, så legitimationen lades inte till.</string>
 </resources>
