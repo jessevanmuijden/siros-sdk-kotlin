@@ -335,6 +335,36 @@ class SirosWalletTest {
     }
 
     @Test
+    fun deleteCredential_unsupportedSchemaVersion_persistsAndUploadsNothingAndIsReported() = runBlocking {
+        val store = FakeCredentialStore(mutableListOf())
+        val keystore = mockk<KeystoreManager>()
+        val sessionStore = mockk<SessionStore>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val existing = """{"prfKeys":[],"jwe":"existing"}"""
+        every { keystore.isUnlocked } returns true
+        every { sessionStore.privateDataJwe } returns existing
+        coEvery { keystore.exportEncryptedContainer() } throws
+            org.siros.sdk.credentials.UnsupportedSchemaVersionException(
+                "S.schemaVersion 5", org.siros.sdk.credentials.UnsupportedSchemaVersionException.Kind.STATE_VERSION, 5,
+            )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "credentialStore" to store,
+            "keystore" to keystore,
+            "sessionStore" to sessionStore,
+            "apiClient" to apiClient,
+            "eventListener" to listener,
+        )
+
+        wallet.deleteCredential(999L)
+
+        verify(exactly = 0) { sessionStore.privateDataJwe = any() }
+        coVerify(exactly = 0) { apiClient.updatePrivateData(any()) }
+        verify(exactly = 1) { listener.onFlowError("sync", match { it.contains("does not support") }, null) }
+    }
+
+    @Test
     fun handleTrustEvaluation_rejects_missing_subject_id_without_backend_call() = runTest(dispatcher) {
         val engine = mockk<WalletEngineSession>(relaxed = true)
         val apiClient = mockk<BackendApiClient>()

@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container (the SDK always rewrites at 4); containers written earlier that already carry them
   under version 3 are read as version 4. The SDK emits no events and does not fold or merge them,
   so event stamping and the ETag/`If-Match` handling are unchanged.
+- **Older SDK releases have no such guard.** The Kotlin exporter before this change unconditionally
+  wrote version 3, so an older SDK that rewrites a version 4 container silently downgrades it
+  instead of refusing. Integrators must not rely on the refusal until every SDK that shares an
+  account is on a release with this change.
 - **Breaking for clients still on version 3 only:** wallet-frontend (and older SDKs) that do not
   implement version 4 will refuse to rewrite a container this SDK has rewritten, until updated.
 - The vendored privatedata-spec vectors are re-copied verbatim from 8ca8860 (with the fixtures
