@@ -6807,7 +6807,15 @@ class SirosWalletTest {
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
         verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
         // Five non-empty segments (direct ECDH-ES has an empty encrypted-key segment only), header as the engine validates it.
+        val segments = jwe.captured.split(".")
+        assertEquals(5, segments.size)
+        // Only the encrypted-key segment may be empty, and only for direct ECDH-ES (this request's alg).
+        segments.forEachIndexed { i, seg -> if (i != 1) assertTrue("segment $i is empty", seg.isNotEmpty()) }
         val parsed = com.nimbusds.jose.JWEObject.parse(jwe.captured)
+        val protectedHeader = Json.parseToJsonElement(String(java.util.Base64.getUrlDecoder().decode(segments[0]))).jsonObject
+        assertEquals("ECDH-ES", protectedHeader["alg"]!!.jsonPrimitive.content)
+        assertEquals("A128GCM", protectedHeader["enc"]!!.jsonPrimitive.content)
+        assertEquals("verifier-enc-1", protectedHeader["kid"]!!.jsonPrimitive.content)
         assertEquals("ECDH-ES", parsed.header.algorithm.name)
         assertEquals("A128GCM", parsed.header.encryptionMethod.name)
         assertEquals("verifier-enc-1", parsed.header.keyID)
