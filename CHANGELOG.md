@@ -286,9 +286,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (unreleased): the response is the rulebook's base64url CBOR `ZkpPresentation`.** `vp_token[queryId]` is an array of
   strings, each the unpadded base64url of `{system_id, proof, issuer_key_set, ? proof_time, results}`
   (`CircuitZkResponsePresentation`; `CircuitZkPresenter.Result.presentation` / `.json`; `base64Url` is gone, and the earlier
-  CBOR/JSON presentation classes with `circuit_id`/`x5chain` are removed). `issuer_key_set` is the credential's own
-  `issuerAuth` `x5chain` (DER, leaf first, at most 8 certificates of at most 4096 bytes each, checked before any proof is
-  made; the verifier validates them through go-trust and takes the issuer key from the leaf). `proof_time` (tag 0) is the
+  CBOR/JSON presentation classes with `circuit_id`/`x5chain` are removed). `issuer_key_set` holds exactly ONE element, the
+  Document Signer leaf certificate (first of the credential's `issuerAuth` `x5chain`, DER, at most 4096 bytes; never an
+  intermediate or the root, which made the vc verifier refuse the nym_auth system); a credential with no usable leaf is refused
+  before any proof is made (`CircuitZkStep.ISSUER_KEY` / `ISSUER_KEY_UNUSABLE`). The response validator still accepts up to 8
+  elements of 4096 bytes. The verifier validates the certificate through go-trust and takes the issuer key from it. `proof_time` (tag 0) is the
   EXACT 20-byte form `YYYY-MM-DDThh:mm:ssZ` and required for `mso_mdoc`: the prover's own time input when it has one, else the
   device clock, rendered by the one function `ProofTime.render`. A pseudonym is 32 bytes for `sha-256`, a predicate result is
   `true`; no item type is skipped. `CircuitZkResponseValidator` (strict CBOR: definite lengths, no duplicate keys, no trailing

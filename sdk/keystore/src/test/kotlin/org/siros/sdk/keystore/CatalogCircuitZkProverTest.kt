@@ -79,7 +79,7 @@ class CatalogCircuitZkProverTest {
         return CBORObject.FromObjectAndTag(m.EncodeToBytes(), 24)
     }
 
-    private fun credential(withX5chain: Boolean = true, x5: ByteArray = certDer): ByteArray {
+    private fun credential(withX5chain: Boolean = true, x5: ByteArray = certDer, chain: List<ByteArray>? = null): ByteArray {
         val items = CBORObject.NewArray()
         items.Add(item(0, "birth_date", CBORObject.FromObjectAndTag("2000-06-15", 1004)))
         items.Add(item(1, "ssc", cbor(sha256(seed))))
@@ -88,7 +88,8 @@ class CatalogCircuitZkProverTest {
         val mso = CBORObject.NewMap()
         mso[cbor("docType")] = cbor(docType)
         val unprotected = CBORObject.NewMap()
-        if (withX5chain) unprotected[cbor(33)] = cbor(x5)
+        if (chain != null) unprotected[cbor(33)] = CBORObject.NewArray().also { a -> chain.forEach { a.Add(cbor(it)) } }
+        else if (withX5chain) unprotected[cbor(33)] = cbor(x5)
         val auth = CBORObject.NewArray()
         auth.Add(cbor(CBORObject.NewMap().also { it[cbor(1)] = cbor(-7) }.EncodeToBytes()))
         auth.Add(unprotected)
@@ -280,6 +281,15 @@ class CatalogCircuitZkProverTest {
         assertEquals(hex(seed), hex(native.seedSeen!!))
         assertArrayEquals(i.sessionTranscript, r.transcriptSeed)
         assertArrayEquals(deviceSignature, r.deviceSignature)
+    }
+
+    @Test
+    fun `with a leaf-plus-root x5chain the proof input Q is still the leaf key`() {
+        val native = honestNative()
+        prove(prover(native), input(cred = credential(chain = listOf(certDer, ByteArray(30) { (it + 100).toByte() }))))
+        val r = native.request!!
+        assertEquals(hex(qx), hex(r.issuerKeyX))
+        assertEquals(hex(qy), hex(r.issuerKeyY))
     }
 
     @Test
