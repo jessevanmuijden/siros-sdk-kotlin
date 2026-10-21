@@ -7335,6 +7335,23 @@ class SirosWalletTest {
     }
 
     @Test
+    fun circuitZkDcApi_theVerifierIdentityIsResolvedOncePerRequest_andEveryQueryAndTheConsentUseIt() = runTest(dispatcher) {
+        // A source that answers differently (here: then declines) on later calls must not split the request's identity.
+        var calls = 0
+        val flaky = object : VerifierIdSource {
+            override val type = "x509_san_dns"
+            override suspend fun resolve(context: VerifierIdContext): String? = if (++calls == 1) "x509_san_dns:first.example" else null
+        }
+        val s = czkSetup(trust = { buildJsonObject { put("decision", true) } }, sources = listOf(flaky))
+        val result = czkRun(s, czkRequest(queryIds = listOf("q", "q2")))
+        assertEquals(1, calls)
+        val tokens = Json.parseToJsonElement(result.responseJson).jsonObject["data"]!!.jsonObject["vp_token"]!!.jsonObject
+        val expected = org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:first.example"))
+        for (q in listOf("q", "q2")) assertEquals(q, expected, CzkDecoded(tokens[q]!!.jsonArray.single().jsonPrimitive.content).results["n"])
+        assertEquals("x509_san_dns:first.example", s.consents.single().verifier.verifierId)
+    }
+
+    @Test
     fun circuitZkDcApi_sourcesForOneTypeAreTriedInOrder_andADecliningSourceFallsThrough() = runTest(dispatcher) {
         val calls = mutableListOf<String>()
         val s = czkSetup(trust = { buildJsonObject { put("decision", true) } }, sources = listOf(

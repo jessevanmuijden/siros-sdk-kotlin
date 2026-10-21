@@ -4421,8 +4421,15 @@ class SirosWallet private constructor(
             // issuer-delivered secret seed is needed (it is fetched in phase 2, after consent).
             val planHandlers = plan.functions.mapNotNull { f -> circuitZkHandlers[f.id]?.let { f to it } }
             val needsVerifierId = planHandlers.any { (f, h) -> h.needsVerifierId(f) }
-            val resolved = if (needsVerifierId) registry.resolve(verifierContext) ?: refuse("verifier-id", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.VERIFIER_ID_UNAVAILABLE) else null
-            if (resolved != null && resolvedVerifier == null) resolvedVerifier = resolved
+            // The verifier's identity is resolved ONCE per request and reused by every query, the consent and every proof: a source
+            // that succeeds for one query and fails (or answers differently) for another must not make the scope of a pseudonym
+            // differ from the identity the user was shown.
+            val resolved = if (needsVerifierId) {
+                resolvedVerifier ?: (registry.resolve(verifierContext) ?: refuse("verifier-id", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.VERIFIER_ID_UNAVAILABLE))
+                    .also { resolvedVerifier = it }
+            } else {
+                null
+            }
             val context = planHandlers.firstNotNullOfOrNull { (f, h) -> h.verifierContext(f) }
             val needsSecretSeed = planHandlers.any { (f, h) -> h.needsSecretSeed(f) }
             prepared += Prepared(result.queryId, plan, cred, resolved?.id, context, needsSecretSeed)
