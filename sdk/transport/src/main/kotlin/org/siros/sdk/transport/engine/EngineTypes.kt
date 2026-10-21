@@ -216,8 +216,20 @@ data class SignResponseMessage(
      */
     @SerialName("dpop_key_id") val dpopKeyId: String? = null,
     @SerialName("dpop_proof") val dpopProof: String? = null,
+    /**
+     * A sign-stage refusal (wmp spec 3.2.6): [errorCode] [SIGN_REFUSED] answers the `sign_request` (its `message_id` echoed) with
+     * "the wallet will not sign". The engine ends the signing at once and tells the verifier `access_denied` with no description.
+     * [error] is wallet-private detail the engine only logs: never anything sensitive. Without [SIGN_REFUSED] an error-bearing
+     * response is a plain SIGN_ERROR (the flow fails, the verifier is not contacted).
+     */
+    @SerialName("error_code") val errorCode: String? = null,
+    val error: String? = null,
     val timestamp: String? = null,
-)
+) {
+    companion object {
+        const val SIGN_REFUSED = "SIGN_REFUSED"
+    }
+}
 
 @Serializable
 data class ProofObject(

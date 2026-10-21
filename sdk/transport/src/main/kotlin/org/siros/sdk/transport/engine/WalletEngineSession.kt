@@ -561,6 +561,19 @@ class WalletEngineSession(
         ))
     }
 
+    /**
+     * Refuse the sign step of a presentation: answers the `sign_request` [messageId] with `error_code` SIGN_REFUSED, which ends the
+     * engine's signing wait at once and tells the verifier `access_denied` (no description). [detail] is only logged by the engine.
+     */
+    fun sendSignRefusal(flowId: String, messageId: String?, detail: String? = null) {
+        send(SignResponseMessage.serializer(), SignResponseMessage(
+            flowId = flowId,
+            messageId = messageId,
+            errorCode = SignResponseMessage.SIGN_REFUSED,
+            error = detail,
+        ))
+    }
+
     /** Cancel an in-progress flow by sending a decline action. */
     fun cancelFlow(flowId: String) {
         sendFlowAction(flowId, "decline", kotlinx.serialization.json.buildJsonObject {

@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   response_uri]`. A missing thumbprint, response_uri, trust result or consent handler, an
   untrusted verifier, a mismatched audience or `transaction_data` is refused and the flow
   cancelled. The answering core is shared with the DC API path (`answerCircuitZkQueries`).
+  A refusal at the sign step is answered with `sign_response` `error_code` SIGN_REFUSED
+  (`WalletEngineSession.sendSignRefusal`, wmp spec 3.2.6): the engine ends signing at once and
+  tells the verifier `access_denied` with no description.
   The circuit catalog's `proofSystem` field is the identity offered to verifiers
   (`ZkCircuitDescriptor.proofSystem`); entries without it are not offered for `zkp_req`.
 - **User consent for `circuit_zk` presentations.** One `PresentationConsentHandler`

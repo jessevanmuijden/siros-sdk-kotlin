@@ -7089,7 +7089,7 @@ class SirosWallet private constructor(
      * Everything else is [answerCircuitZkQueries], shared with the DC API path. The session transcript is the OpenID4VPHandover over
      * `[client id, nonce, JWK thumbprint, response_uri]`: the thumbprint of the verifier's response-encryption key is REQUIRED (the
      * response is always encrypted over redirects), so a request without one is refused, never answered with a null.
-     * A refusal or a decline ends the flow with the user's decline action, which the engine answers to the verifier with
+     * A refusal or a decline answers the sign_request with SIGN_REFUSED, which the engine answers to the verifier with
      * `access_denied` and no description.
      */
     private suspend fun handleCircuitZkEngineSignPresentation(engine: WalletEngineSession, msg: SignRequestMessage) {
@@ -7193,14 +7193,16 @@ class SirosWallet private constructor(
             Timber.w("zkp_req request refused on the engine transport (step=${e.step}, reason=${e.reason}) for flow $flowId")
             circuitZkClientMetadataByFlow.remove(flowId)
             reportSignFailure(flowId, "Request not completed", notifyError = e.reason != org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
-            engine.cancelFlow(flowId)
+            // The sign-stage refusal ends the engine's signing wait and answers the verifier access_denied (no description); the text is
+            // only the coarse step, never a request content.
+            engine.sendSignRefusal(flowId, msg.messageId, e.step)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             Timber.e("zkp_req presentation failed on the engine transport (${e.javaClass.simpleName}) for flow $flowId")
             circuitZkClientMetadataByFlow.remove(flowId)
             reportSignFailure(flowId, "Request not completed")
-            engine.cancelFlow(flowId)
+            engine.sendSignRefusal(flowId, msg.messageId, "error")
         }
     }
 

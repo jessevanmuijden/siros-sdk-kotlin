@@ -6365,6 +6365,7 @@ class SirosWalletTest {
         val complete = MutableSharedFlow<FlowCompleteMessage>()
         val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete)
         every { engine.cancelFlow(any()) } just runs
+        every { engine.sendSignRefusal(any(), any(), any()) } just runs
         every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
         every { engine.sendMatchResponse(any(), any(), any()) } just runs
         val seen = mutableListOf<JsonObject?>()
@@ -6447,6 +6448,7 @@ class SirosWalletTest {
         assertEquals("Example RP", e.s.consents.single().verifier.label)
         assertTrue(e.s.history.single().zkProof) // written once, when answered
         verify(exactly = 0) { e.engine.cancelFlow(any()) }
+        verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
     }
 
     private fun czkTwoCredentials() = listOf(
@@ -6527,7 +6529,9 @@ class SirosWalletTest {
         advanceUntilIdle()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
-        verify(exactly = 1) { e.engine.cancelFlow("f1") }
+        // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        verify(exactly = 0) { e.engine.cancelFlow(any()) }
     }
 
     @Test
@@ -6647,7 +6651,9 @@ class SirosWalletTest {
             e.sign.emit(req)
             advanceUntilIdle()
             verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
-            verify(exactly = 1) { e.engine.cancelFlow("f1") }
+            // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
+            verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+            verify(exactly = 0) { e.engine.cancelFlow(any()) }
             assertEquals(name, 0, e.s.prover.calls)
             assertTrue(name, e.s.consents.isEmpty())
         }
@@ -6668,7 +6674,9 @@ class SirosWalletTest {
             e.sign.emit(req)
             advanceUntilIdle()
             verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
-            verify(exactly = 1) { e.engine.cancelFlow("f1") }
+            // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
+            verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+            verify(exactly = 0) { e.engine.cancelFlow(any()) }
             if (name != "declined") assertEquals(name, 0, e.s.prover.calls)
         }
     }
