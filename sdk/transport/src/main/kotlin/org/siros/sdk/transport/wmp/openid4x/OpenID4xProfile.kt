@@ -142,7 +142,8 @@ data class CredentialDisplay(
 @Serializable
 data class CredentialResult(
     val format: String,
-    val credential: String,
+    /** Empty when [FlowCompleteResult.credentialResponseEncrypted]: the engine never held it, the wallet fills it in. */
+    val credential: String = "",
     val vct: String? = null,
     @SerialName("c_nonce") val cNonce: String? = null,
     @SerialName("notification_id") val notificationId: String? = null,
@@ -162,17 +163,19 @@ data class FlowCompleteResult(
     val credentials: List<CredentialResult>? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
     @SerialName("redirect_uri") val redirectUri: String? = null,
-    /** The response-level `credential_metadata`; see [org.siros.sdk.transport.engine.FlowCompleteMessage.credentialMetadata]. */
-    @SerialName("credential_metadata") override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
-    /** See [org.siros.sdk.transport.engine.FlowCompleteMessage.credentialMetadataEncryptedResponse]. */
-    @SerialName("credential_metadata_encrypted_response")
+    /** See [org.siros.sdk.transport.engine.FlowCompleteMessage.credentialResponseEncrypted]. */
+    @SerialName("credential_response_encrypted")
     @Serializable(with = org.siros.sdk.transport.EncryptedResponseFlagSerializer::class)
-    override val credentialMetadataEncryptedResponse: Boolean = false,
-    /** `redacted_members`: what a replayed completion withheld; see [org.siros.sdk.transport.DeliveredResponseMetadata.redactedMembers]. */
+    val credentialResponseEncrypted: Boolean = false,
+    /** `redacted_members`: what a replayed completion withheld (the renewal material); see [org.siros.sdk.transport.engine.FlowCompleteMessage.redactedMembers]. */
     @SerialName("redacted_members")
     @Serializable(with = org.siros.sdk.transport.RedactedMembersSerializer::class)
-    override val redactedMembers: Set<String> = emptySet(),
-) : org.siros.sdk.transport.DeliveredResponseMetadata {
+    val redactedMembers: Set<String> = emptySet(),
+) {
+    /** Whether the renewal material (`refresh_token`, `dpop_jwk`, `dpop_key_id`) was withheld, wholly or in part. */
+    val renewalMaterialRedacted: Boolean
+        get() = redactedMembers.any { it == "refresh_token" || it == "dpop_jwk" || it == "dpop_key_id" }
+
     companion object {
         private val lenient = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
 
@@ -270,6 +273,15 @@ data class SignSubFlowParams(
     @SerialName("holder_commitments") val holderCommitments: List<String>? = null,
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
+    /** Same members, same meaning as the legacy transport's [org.siros.sdk.transport.engine.SignRequestParams]. */
+    @SerialName("credential_response_encryption")
+    val credentialResponseEncryption: org.siros.sdk.transport.CredentialResponseEncryptionRequest? = null,
+    val jwe: String? = null,
+    val deferred: Boolean? = null,
+    @SerialName("response_encryption") val responseEncryption: org.siros.sdk.transport.ResponseEncryptionRequest? = null,
+    val state: String? = null,
+    /** See [org.siros.sdk.transport.engine.SignRequestParams.verifiedRequest]. */
+    @SerialName("verified_request") val verifiedRequest: org.siros.sdk.transport.VerifiedRequest? = null,
 )
 
 // ---------------------------------------------------------------------------
@@ -348,7 +360,22 @@ data class SignSubFlowResult(
     val clientAttestationPoP: String? = null,
     val dpopKeyId: String? = null,
     val dpopProof: String? = null,
-)
+    /**
+     * The engine-blind encryption answers, under the legacy transport's names (see
+     * [org.siros.sdk.transport.engine.SignResponseMessage]): the public JWK of the key generated for the credential
+     * response, the control fields of a decrypted response, the encrypted authorization response, and an error.
+     */
+    val credentialResponseEncryptionJwk: JsonObject? = null,
+    val transactionId: String? = null,
+    val interval: Int? = null,
+    val responseJwe: String? = null,
+    val error: String? = null,
+) {
+    init {
+        // A refusal on this transport is a flow error, never a result; an error here carries no response either.
+        require(responseJwe == null || error == null) { "A sign result that carries an error carries no response_jwe" }
+    }
+}
 
 @Serializable
 data class ProofObject(
@@ -545,6 +572,11 @@ class OpenID4xProfile(
             result.clientAttestationPoP?.let { put("client_attestation_pop", JsonPrimitive(it)) }
             result.dpopKeyId?.let { put("dpop_key_id", JsonPrimitive(it)) }
             result.dpopProof?.let { put("dpop_proof", JsonPrimitive(it)) }
+            result.credentialResponseEncryptionJwk?.let { put("credential_response_encryption_jwk", it) }
+            result.transactionId?.let { put("transaction_id", JsonPrimitive(it)) }
+            result.interval?.let { put("interval", JsonPrimitive(it)) }
+            result.responseJwe?.let { put("response_jwe", JsonPrimitive(it)) }
+            result.error?.let { put("error", JsonPrimitive(it)) }
         }
         ctx.notify(WmpMethods.FLOW_ACTION, params)
     }

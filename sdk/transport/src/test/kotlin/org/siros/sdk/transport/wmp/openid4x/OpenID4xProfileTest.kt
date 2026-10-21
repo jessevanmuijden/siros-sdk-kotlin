@@ -316,41 +316,28 @@ class OpenID4xProfileTest {
     }
 
     @Test
-    fun flowCompleteResultKeepsTheResponseMetadataMembersVerbatimAndInOrder() {
+    fun flowCompleteResultOfAnEncryptedIssuanceHasEmptyCredentialsAndSaysSo() {
         val result = kotlinx.serialization.json.Json.parseToJsonElement(
-            """{"credentials":[{"format":"dc+sd-jwt","credential":"x"}],"credential_metadata":{"z.last":{"n":1.50},"a.first":1}}""",
-        ) as JsonObject
-        val members = FlowCompleteResult.decode(result)!!.credentialMetadata!!.members
-        assertEquals(listOf("z.last", "a.first"), members.keys.toList())
-        assertEquals("1.50", ((members["z.last"] as JsonObject)["n"] as JsonPrimitive).content)
-    }
-
-    @Test
-    fun flowCompleteResultWithCredentialMetadataThatIsNotAnObjectDecodesWithAMalformedPlaceholder() {
-        listOf("""[{"type":"other","value":1}]""", """"text"""", "5").forEach { md ->
-            val result = kotlinx.serialization.json.Json.parseToJsonElement(
-                """{"credentials":[{"format":"dc+sd-jwt","credential":"x","notification_id":"n1"}],"credential_metadata":$md}""",
-            ) as JsonObject
-            val decoded = FlowCompleteResult.decode(result)!!
-            assertEquals(md, "n1", decoded.credentials!!.single().notificationId)
-            assertTrue(md, decoded.credentialMetadata!!.malformed)
-        }
-    }
-
-    @Test
-    fun flowCompleteResultDecodesTheDeliveredCredentialMetadata() {
-        val result = kotlinx.serialization.json.Json.parseToJsonElement(
-            """{"type":"flow_complete","flow_id":"f","credentials":[{"format":"mso_mdoc","credential":"AA","notification_id":"n"},""" +
-                """{"format":"dc+sd-jwt","credential":"x"}],""" +
-                """"credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}},""" +
-                """"credential_metadata_encrypted_response":true}""",
+            """{"credentials":[{"format":"mso_mdoc"},{"format":"dc+sd-jwt","vct":"urn:v"}],"credential_response_encrypted":true}""",
         ) as JsonObject
         val decoded = FlowCompleteResult.decode(result)!!
-        val seeds = decoded.credentialMetadata!!.members["org.siros.secret_seed"] as JsonObject
-        assertEquals("00112233445566778899aabbccddeeff", (seeds["org.siros.nym_auth"] as JsonPrimitive).content)
-        assertTrue(decoded.credentialMetadataEncryptedResponse)
-        assertNull(FlowCompleteResult.decode(JsonObject(emptyMap()))!!.credentialMetadata)
+        assertTrue(decoded.credentialResponseEncrypted)
+        assertEquals(listOf("", ""), decoded.credentials!!.map { it.credential })
+        assertEquals("urn:v", decoded.credentials!![1].vct)
+        assertEquals(false, FlowCompleteResult.decode(JsonObject(emptyMap()))!!.credentialResponseEncrypted)
         assertNull(FlowCompleteResult.decode(null))
+    }
+
+    @Test
+    fun flowCompleteResultWithANonBooleanEncryptedMarkerReadsItAsFalse() {
+        listOf(""""true"""", "1", "null", "{}").forEach { flag ->
+            val result = kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"credentials":[{"format":"dc+sd-jwt","credential":"x","notification_id":"n1"}],"credential_response_encrypted":$flag}""",
+            ) as JsonObject
+            val decoded = FlowCompleteResult.decode(result)!!
+            assertEquals(flag, false, decoded.credentialResponseEncrypted)
+            assertEquals(flag, "n1", decoded.credentials!!.single().notificationId)
+        }
     }
 
     @Test
@@ -362,40 +349,136 @@ class OpenID4xProfileTest {
             ) as JsonObject,
         )!!
         assertEquals(emptySet<String>(), decode(null).redactedMembers)
-        assertEquals(false, decode(null).credentialMetadataRedacted)
         assertEquals(false, decode("[]").renewalMaterialRedacted)
-        val replay = decode("""["credential_metadata","credential_metadata_encrypted_response","dpop_jwk","refresh_token"]""")
-        assertEquals(setOf("credential_metadata", "credential_metadata_encrypted_response", "dpop_jwk", "refresh_token"), replay.redactedMembers)
-        assertTrue(replay.credentialMetadataRedacted)
+        val replay = decode("""["dpop_jwk","refresh_token"]""")
+        assertEquals(setOf("dpop_jwk", "refresh_token"), replay.redactedMembers)
         assertTrue(replay.renewalMaterialRedacted)
-        assertNull(replay.credentialMetadata)
-        // Only the metadata withheld: renewal material is not.
-        val onlyMetadata = decode("""["credential_metadata"]""")
-        assertTrue(onlyMetadata.credentialMetadataRedacted)
-        assertEquals(false, onlyMetadata.renewalMaterialRedacted)
-        // Only the encryption flag withheld: the metadata cannot be trusted as encrypted, so it counts as withheld.
-        assertTrue(decode("""["credential_metadata_encrypted_response"]""").credentialMetadataRedacted)
-        // Only part of the renewal material: still unavailable, the metadata is not.
-        val partial = decode("""["dpop_key_id"]""")
-        assertTrue(partial.renewalMaterialRedacted)
-        assertEquals(false, partial.credentialMetadataRedacted)
+        // Only part of the renewal material: still unavailable.
+        assertTrue(decode("""["dpop_key_id"]""").renewalMaterialRedacted)
         // A marker that cannot be read says nothing reliable: everything it can list is withheld.
-        for (bad in listOf(""""credential_metadata"""", "5", "[1]", """[null]""", "{}")) {
-            val d = decode(bad)
-            assertTrue(bad, d.credentialMetadataRedacted && d.renewalMaterialRedacted)
+        for (bad in listOf(""""refresh_token"""", "5", "[1]", """[null]""", "{}")) {
+            assertTrue(bad, decode(bad).renewalMaterialRedacted)
         }
     }
 
     @Test
-    fun theSeedAppearsInNoStringFormOfTheDecodedResult() {
+    fun theCredentialIsInNoStringFormOfTheDecodedResult() {
         val result = kotlinx.serialization.json.Json.parseToJsonElement(
-            """{"credentials":[{"format":"mso_mdoc","credential":"secret-credential"}],""" +
-                """"credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}""",
+            """{"credentials":[{"format":"mso_mdoc","credential":"secret-credential"}]}""",
         ) as JsonObject
         val decoded = FlowCompleteResult.decode(result)!!
-        for (text in listOf(decoded.toString(), decoded.credentialMetadata.toString(), decoded.credentials.toString())) {
-            assertTrue(text, !text.contains("00112233445566778899aabbccddeeff"))
-            assertTrue(text, !text.contains("secret-credential"))
+        assertTrue(!decoded.toString().contains("secret-credential"))
+        assertTrue(!decoded.credentials.toString().contains("secret-credential"))
+    }
+
+    @Test
+    fun aSignSubFlowDecodesTheBlindEncryptionMembers() {
+        val codec = WmpCodec()
+        val issuance = codec.json.decodeFromJsonElement(
+            SignSubFlowParams.serializer(),
+            kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"action":"generate_proof","nonce":"n","audience":"a","credential_response_encryption":{"alg":"ECDH-ES","enc":"A256GCM","required":true}}""",
+            ),
+        )
+        assertEquals("ECDH-ES", issuance.credentialResponseEncryption!!.alg)
+        assertEquals(true, issuance.credentialResponseEncryption!!.required)
+        val decrypt = codec.json.decodeFromJsonElement(
+            SignSubFlowParams.serializer(),
+            kotlinx.serialization.json.Json.parseToJsonElement("""{"action":"decrypt_credential_response","jwe":"a.b.c.d.e","deferred":true}"""),
+        )
+        assertEquals("a.b.c.d.e", decrypt.jwe)
+        assertEquals(true, decrypt.deferred)
+        val vp = codec.json.decodeFromJsonElement(
+            SignSubFlowParams.serializer(),
+            kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"action":"sign_presentation","nonce":"n","audience":"v","state":"st","response_encryption":{"jwk":{"kty":"EC","kid":"k1"},"alg":"ECDH-ES","enc":"A128GCM"}}""",
+            ),
+        )
+        assertEquals("st", vp.state)
+        assertEquals("A128GCM", vp.responseEncryption!!.enc)
+    }
+
+    @Test
+    fun theSignResponseCarriesTheBlindEncryptionAnswersUnderTheLegacyWireNames() = runBlocking {
+        val jwk = buildJsonObject { put("kty", JsonPrimitive("EC")) }
+        val profile = OpenID4xProfile(
+            OpenID4xConfig(
+                onSignRequest = { _, _ ->
+                    SignSubFlowResult(
+                        credentialResponseEncryptionJwk = jwk,
+                        transactionId = "tx-1",
+                        interval = 5,
+                        responseJwe = "h.k.i.c.t",
+                    )
+                },
+            ),
+        )
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+        profile.handleProgress(FlowProgressParams(wmp = WmpMeta(), flowId = "f9", step = "sign_request", payload = buildSignPayload()))
+
+        val params = ctx.notifications.single().second!!
+        assertEquals(jwk, params["credential_response_encryption_jwk"])
+        assertEquals(JsonPrimitive("tx-1"), params["transaction_id"])
+        assertEquals(JsonPrimitive(5), params["interval"])
+        assertEquals(JsonPrimitive("h.k.i.c.t"), params["response_jwe"])
+    }
+
+    @Test
+    fun aFailedDecryptionAnswersWithAnErrorMemberAlone() = runBlocking {
+        val profile = OpenID4xProfile(OpenID4xConfig(onSignRequest = { _, _ -> SignSubFlowResult(error = "could not be decrypted") }))
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+        profile.handleProgress(FlowProgressParams(wmp = WmpMeta(), flowId = "f9", step = "sign_request", payload = buildSignPayload()))
+        val params = ctx.notifications.single().second!!
+        assertEquals(JsonPrimitive("could not be decrypted"), params["error"])
+        assertNull(params["response_jwe"])
+    }
+
+    @Test
+    fun aSignSubFlowDecodesTheVerifiedRequest() {
+        val codec = WmpCodec()
+        val p = codec.json.decodeFromJsonElement(
+            SignSubFlowParams.serializer(),
+            kotlinx.serialization.json.Json.parseToJsonElement(
+                """{"action":"sign_presentation","nonce":"n","audience":"admin","verified_request":{"client_id":"x509_san_dns:v.example",""" +
+                    """"response_uri":"https://v.example/r","signed":true,"signature_verification":"verified","extra":1}}""",
+            ),
+        )
+        assertEquals("x509_san_dns:v.example", p.verifiedRequest!!.clientId)
+        assertEquals(true, p.verifiedRequest!!.signed)
+        assertNull(codec.json.decodeFromJsonElement(SignSubFlowParams.serializer(), buildSignPayload()).verifiedRequest)
+    }
+
+    @Test
+    fun aSignResultWithAnErrorCannotCarryAResponseJwe() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { SignSubFlowResult(responseJwe = "h.k.i.c.t", error = "nope") }
+    }
+
+    @Test
+    fun aRefusedSignRequestIsAFlowErrorNeverASignResponseCarryingAResponseJwe() = runBlocking {
+        val profile = OpenID4xProfile(
+            OpenID4xConfig(onSignRequest = { _, _ -> throw org.siros.sdk.credentials.WalletException("the user declined") }),
+        )
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+        profile.handleProgress(FlowProgressParams(wmp = WmpMeta(), flowId = "f9", step = "sign_request", payload = buildSignPayload()))
+
+        val sent = ctx.notifications
+        assertTrue(sent.toString(), sent.none { (_, params) -> params?.get("action") == JsonPrimitive("sign_response") })
+        assertTrue(sent.none { (_, params) -> params?.containsKey("response_jwe") == true })
+        assertTrue("the refusal still reaches the engine", sent.isNotEmpty())
+    }
+
+    @Test
+    fun anOrdinarySignResponseCarriesNoBlindEncryptionMembers() = runBlocking {
+        val profile = OpenID4xProfile(OpenID4xConfig(onSignRequest = { _, _ -> SignSubFlowResult(proofs = listOf(ProofObject(jwt = "t"))) }))
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+        profile.handleProgress(FlowProgressParams(wmp = WmpMeta(), flowId = "f9", step = "sign_request", payload = buildSignPayload()))
+        val params = ctx.notifications.single().second!!
+        for (member in listOf("credential_response_encryption_jwk", "transaction_id", "interval", "response_jwe", "error")) {
+            assertNull(member, params[member])
         }
     }
 

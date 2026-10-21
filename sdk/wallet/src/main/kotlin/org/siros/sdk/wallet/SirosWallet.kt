@@ -124,6 +124,8 @@ import org.siros.sdk.wallet.dcapi.DCAPIRequestParser
 import org.siros.sdk.wallet.dcapi.DCAPIRequestRules
 import org.siros.sdk.wallet.dcapi.ExpectedOriginsMode
 import org.siros.sdk.transport.CredentialNotifier
+import org.siros.sdk.transport.DeliveredResponseMetadata
+import org.siros.sdk.transport.engine.FlowCompleteMessage
 import org.siros.sdk.transport.engine.CredentialMatch
 import org.siros.sdk.transport.engine.CredentialNotificationEvent
 import org.siros.sdk.transport.engine.CredentialResult
@@ -5447,6 +5449,14 @@ class SirosWallet private constructor(
     private val pscIssuerByFlow = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
+     * The response-encryption keys of in-flight issuances and what the wallet opened with them. The engine never
+     * holds a credential, a delivered seed or a `vp_token`: this wallet generates the key the issuer encrypts to,
+     * opens the issuer's JWE itself, and builds the encrypted `direct_post.jwt` response. Forgotten when the flow
+     * ends, is cancelled, or the connection is replaced.
+     */
+    private val blindIssuance = BlindIssuance()
+
+    /**
      * Report a flow-terminating failure immediately (e.g. a keystore/WSCD
      * exception raised while handling a sign request) instead of leaving
      * the flow to die silently until the engine's own reply timeout fires.
@@ -5771,6 +5781,7 @@ class SirosWallet private constructor(
      * acceptable or absent. An undecodable `credentials` array is refused as malformed (fail closed).
      */
     internal fun wmpDeliveredMetadataRefusal(
+        flowId: String,
         result: kotlinx.serialization.json.JsonObject?,
     ): Pair<DeliveredMetadataRefusal, List<String>>? {
         val decoded = try {
@@ -5780,15 +5791,65 @@ class SirosWallet private constructor(
         } catch (e: Exception) {
             return DeliveredMetadataRefusal.MALFORMED to emptyList()
         } ?: return null
-        val creds = decoded.credentials.orEmpty()
+        // An encrypted issuance's credentials and metadata are the wallet's own decrypted response, never the engine's.
+        val opened = if (decoded.credentialResponseEncrypted) {
+            blindIssuance.take(flowId) ?: return DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE to emptyList()
+        } else {
+            null
+        }
+        val engineCreds = decoded.credentials.orEmpty()
+        if (opened != null && opened.credentials.size != engineCreds.size) {
+            return DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE to listOfNotNull(opened.notificationId)
+        }
+        val creds = if (opened == null) {
+            engineCreds
+        } else {
+            engineCreds.mapIndexed { i, c -> c.copy(credential = opened.credentials[i], notificationId = c.notificationId ?: opened.notificationId) }
+        }
         val verdict = DeliveredCredentialMetadata.check(
-            response = decoded,
+            response = opened ?: PlainDeliveredResponse,
             credentials = creds.map { DeliveredCredential(it.format, it.credential, it.notificationId) },
             secretNamespace = config.secretSeedNamespace,
             canStoreSecret = keystoreCanHoldCredentialMetadata(),
             advertised = isSecretSeedAdvertised(decoded.credentialIssuer, null),
         )
         return (verdict as? DeliveredMetadataVerdict.Refuse)?.let { it.reason to creds.mapNotNull { c -> c.notificationId } }
+    }
+
+    /** What an engine completion becomes once the credentials it left empty are filled from the wallet's own response. */
+    private sealed class EncryptedCompletion {
+        /** [message] carries every credential; [opened] is the decrypted response, null for a plain (unencrypted) issuance. */
+        class Filled(val message: FlowCompleteMessage, val opened: OpenedIssuance?) : EncryptedCompletion()
+
+        /** The wallet holds no usable decrypted response for an encrypted completion: nothing is invented. */
+        class Unavailable(val notificationIds: List<String>) : EncryptedCompletion()
+    }
+
+    /** The response of a plain issuance: no delivered metadata the engine could have relayed, nothing encrypted. */
+    private object PlainDeliveredResponse : DeliveredResponseMetadata {
+        override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null
+        override val credentialMetadataEncryptedResponse: Boolean = false
+    }
+
+    /**
+     * An encrypted completion ([FlowCompleteMessage.credentialResponseEncrypted]) pairs entry i with the i-th
+     * credential of the response this wallet opened; a count mismatch, or no such response, is
+     * [EncryptedCompletion.Unavailable]. The wallet's `notification_id` fills entries the engine left without one.
+     */
+    private fun fillEncryptedCompletion(msg: FlowCompleteMessage): EncryptedCompletion {
+        if (!msg.credentialResponseEncrypted) return EncryptedCompletion.Filled(msg, null)
+        val opened = blindIssuance.take(msg.flowId) ?: return EncryptedCompletion.Unavailable(emptyList())
+        val entries = msg.credentials.orEmpty()
+        if (entries.size != opened.credentials.size) {
+            return EncryptedCompletion.Unavailable(listOfNotNull(opened.notificationId))
+        }
+        val filled = msg.copy(
+            credentials = entries.mapIndexed { i, c ->
+                c.copy(credential = opened.credentials[i], notificationId = c.notificationId ?: opened.notificationId)
+            },
+        )
+        filled.connectionGeneration = msg.connectionGeneration
+        return EncryptedCompletion.Filled(filled, opened)
     }
 
     private suspend fun removeCredentialRefreshToken(batchId: Long) {
@@ -6279,6 +6340,8 @@ class SirosWallet private constructor(
         // later issuance that supplies none must not silently inherit this
         // one's claims and commit to them.
         activeZkIssuanceInput = null
+        // The key of an issuance that is over (or abandoned) must not outlive it.
+        blindIssuance.clear()
     }
 
     /**
@@ -6439,6 +6502,7 @@ class SirosWallet private constructor(
         // Same leaked-connection hazard as connectEngine's engineSession -
         // tear down any prior live peer before replacing the reference.
         wmpPeer?.close()
+        blindIssuance.clear()
 
         // Resolve engine URL: explicit config > discovery > same as backend
         val engineBaseUrl = (config.engineUrl
@@ -6459,7 +6523,7 @@ class SirosWallet private constructor(
                 onComplete = { flowId, result ->
                     // This transport stores nothing from the result, but a malformed or refused
                     // delivered credential_metadata still ends the flow as a refusal, not a success.
-                    val refusal = wmpDeliveredMetadataRefusal(result)
+                    val refusal = wmpDeliveredMetadataRefusal(flowId, result)
                     if (refusal != null) {
                         rejectDeliveredMetadata(
                             flowId,
@@ -6921,6 +6985,29 @@ class SirosWallet private constructor(
         }
     }
 
+    /**
+     * The `aud` of an encrypted (`direct_post.jwt`) response: the `client_id` the ENGINE validated, from `verified_request`,
+     * never the sign request's `audience`. Without it nothing is built (fail closed): the engine owns that validation.
+     */
+    private fun jarmAudience(verified: org.siros.sdk.transport.VerifiedRequest?): String =
+        verified?.clientId?.takeIf { it.isNotEmpty() }
+            ?: throw WalletException("The engine sent no verified client_id for an encrypted presentation response")
+
+    /**
+     * The WMP `sign_presentation` answer: `response_jwe` (the engine then never sees the `vp_token`) when the
+     * engine sent `response_encryption` for a `direct_post.jwt` request, else the token as before.
+     */
+    private fun wmpPresentationResult(
+        params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
+        presented: List<Pair<String?, String>>,
+    ): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult {
+        val responseEncryption = params.responseEncryption
+            ?: return org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(vpToken = presented.joinToString("\n") { it.second })
+        return org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
+            responseJwe = BlindPresentation.responseJwe(responseEncryption, jarmAudience(params.verifiedRequest), params.state, presented),
+        )
+    }
+
     private suspend fun handleWmpSignRequest(
         flowId: String,
         params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
@@ -6928,6 +7015,8 @@ class SirosWallet private constructor(
         return when (params.action) {
             "generate_proof" -> {
                 val count = params.count ?: 1
+                // Before any proof is made (which can prompt the user): see the legacy handler's identical step.
+                val responseKeyJwk = blindIssuance.offer(flowId, params.credentialResponseEncryption)
                 val generated = generateProofsForRequest(
                     audience = params.audience,
                     nonce = params.nonce,
@@ -6954,7 +7043,21 @@ class SirosWallet private constructor(
                 org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
                     proofs = proofs,
                     credentialRequestExtras = zkIssuanceExtras(flowId),
+                    credentialResponseEncryptionJwk = responseKeyJwk,
                 )
+            }
+            org.siros.sdk.transport.BlindEncryptionWire.ACTION_DECRYPT_CREDENTIAL_RESPONSE -> {
+                try {
+                    val control = blindIssuance.open(flowId, params.jwe.orEmpty(), params.deferred == true)
+                    org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
+                        transactionId = control.transactionId,
+                        interval = control.interval,
+                    )
+                } catch (e: BlindIssuanceException) {
+                    // The profile turns this into a flow error for the engine; the issuance also ends here.
+                    reportSignFailure(flowId, e.message ?: SIGNING_FAILED_MESSAGE)
+                    throw e
+                }
             }
             "sign_presentation" -> {
                 // Same defense-in-depth audience check as the legacy engine
@@ -6969,8 +7072,9 @@ class SirosWallet private constructor(
                 val wire = params.transactionData?.takeIf { it.isNotEmpty() }
                 if (wire != null) {
                     return try {
-                        org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
-                            vpToken = signScaPresentation(
+                        wmpPresentationResult(
+                            params,
+                            signScaPresentation(
                                 params.credentialsToInclude.orEmpty(), params.nonce, params.audience, params.responseMode,
                                 wire, verifierName, wmpSessionDeclaredTransactionData,
                             ),
@@ -6985,7 +7089,10 @@ class SirosWallet private constructor(
                     audience = params.audience,
                     credentialIds = emptyList(),
                 )
-                org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(vpToken = vpToken)
+                // This transport answers with the one token above whatever was selected, so it can only be
+                // attributed to a query when exactly one credential was.
+                val queryId = params.credentialsToInclude?.singleOrNull()?.credentialQueryId
+                wmpPresentationResult(params, listOf(queryId to vpToken))
             }
             // Client authentication, same semantics as the legacy transport's
             // handleRequestAttestation / handleSignClientAuth: the WMP sign
@@ -7040,7 +7147,7 @@ class SirosWallet private constructor(
         wire: List<org.siros.sdk.transport.wmp.openid4x.TransactionData>,
         verifierName: String?,
         declared: Boolean,
-    ): String {
+    ): List<Pair<String?, String>> {
         val all = credentialStore.getAll()
         val selected = refs.map { ref -> ref to all.find { it.id == ref.credentialId.toLongOrNull() } }
         val verifier = verifierName ?: audience
@@ -7072,20 +7179,20 @@ class SirosWallet private constructor(
             ),
             declared = declared,
         )
-        val tokens = mutableListOf<String>()
+        val tokens = mutableListOf<Pair<String?, String>>()
         for ((ref, cred) in selected) {
             val c = cred ?: throw TransactionDataError(
                 org.siros.sdk.credentials.TransactionDataReason.INVALID_ENTRY,
                 "A selected credential is not in the wallet",
             )
             val binding = plan.bindingFor(ref.credentialQueryId)
-            tokens += if (binding != null) {
+            tokens += ref.credentialQueryId to if (binding != null) {
                 signScaVp(c, ref.disclosedClaims, nonce, audience, binding, plan)
             } else {
                 keystore.signVpToken(c.raw, ref.disclosedClaims, nonce, audience, c.kid)
             }
         }
-        return tokens.joinToString("\n")
+        return tokens
     }
 
     /** The legacy-transport `sign_presentation` for a request carrying `transaction_data` (see [signScaPresentation]). */
@@ -7096,7 +7203,7 @@ class SirosWallet private constructor(
             // validateAudience consumes the flow's trust result, so read the verifier's name first.
             val verifierName = lastTrustResults[msg.flowId]?.entityName
             validateAudience(msg.flowId, audience)
-            val vpToken = signScaPresentation(
+            val presented = signScaPresentation(
                 refs = params.credentialsToInclude.orEmpty(),
                 nonce = params.nonce ?: "",
                 audience = audience,
@@ -7105,7 +7212,16 @@ class SirosWallet private constructor(
                 verifierName = verifierName,
                 declared = engineFlowDeclaredTransactionData,
             )
-            engine.sendSignResponse(msg.flowId, vpToken = vpToken, messageId = msg.messageId)
+            val responseEncryption = params.responseEncryption
+            if (responseEncryption != null) {
+                engine.sendSignResponse(
+                    msg.flowId,
+                    responseJwe = BlindPresentation.responseJwe(responseEncryption, jarmAudience(params.verifiedRequest), params.state, presented),
+                    messageId = msg.messageId,
+                )
+            } else {
+                engine.sendSignResponse(msg.flowId, vpToken = presented.joinToString("\n") { it.second }, messageId = msg.messageId)
+            }
         } catch (e: TransactionDataError) {
             // Only the reason code is logged or shown: the message may hold URLs, credential ids or payload text.
             Timber.w("Refused transaction_data (${e.reason.code}) for flow ${msg.flowId}")
@@ -7344,6 +7460,8 @@ class SirosWallet private constructor(
         // connections for the same user that kept evicting each other.
         engineStateJob?.cancel()
         engineSession?.disconnect()
+        // Flows of the replaced connection are abandoned: so are their response keys.
+        blindIssuance.clear()
 
         // Resolve engine URL: explicit config > discovery > same as backend
         val engineBaseUrl = config.engineUrl
@@ -7390,6 +7508,9 @@ class SirosWallet private constructor(
                         "generate_proof" -> {
                             val params = msg.params
                             val count = params?.count ?: 1
+                            // Before any proof is made (which can prompt the user): an issuer that requires an
+                            // encrypted response this wallet cannot open fails the issuance here.
+                            val responseKeyJwk = blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption)
                             val generated = generateProofsForRequest(
                                 audience = params?.audience ?: "",
                                 nonce = params?.nonce ?: "",
@@ -7420,6 +7541,7 @@ class SirosWallet private constructor(
                                 proofs = proofs,
                                 messageId = msg.messageId,
                                 credentialRequestExtras = zkIssuanceExtras(msg.flowId),
+                                credentialResponseEncryptionJwk = responseKeyJwk,
                             )
                             Timber.d("Sign response sent successfully for flow ${msg.flowId}")
                         }
@@ -7435,7 +7557,7 @@ class SirosWallet private constructor(
                             // Validate audience matches trusted verifier identity
                             validateAudience(msg.flowId, audience)
 
-                            val vpToken = if (!credsToInclude.isNullOrEmpty()) {
+                            val presented: List<Pair<String?, String>> = if (!credsToInclude.isNullOrEmpty()) {
                                 val allCreds = credentialStore.getAll()
                                 val storedMatchResults = pendingMatchResultsByFlow.remove(msg.flowId)
                                 Timber.d(
@@ -7443,6 +7565,7 @@ class SirosWallet private constructor(
                                         "${storedMatchResults?.map { "${it.queryId}:${it.format}" }}"
                                 )
                                 val vpParts = credsToInclude.mapNotNull { ref ->
+                                  val presentedToken: String? = run {
                                     // ref.credentialId arrives as a string over the WMP wire
                                     // protocol - see the CredentialMatch construction sites'
                                     // comments on that separate contract from privatedata-spec.
@@ -7560,27 +7683,56 @@ class SirosWallet private constructor(
                                             kid = cred.kid,
                                         )
                                     }
+                                  }
+                                  presentedToken?.let { ref.credentialQueryId to it }
                                 }
                                 // For single credential presentations (most common), return the token directly.
                                 // For multiple credentials, join with newline for WMP transport.
                                 // Note: The backend assembles the OID4VP-compliant vp_token JSON
                                 // object (keyed by credential query ID, §8.1) before submission
                                 // to the verifier.
-                                vpParts.joinToString("\n")
+                                vpParts
                             } else {
                                 // Fallback: legacy plain VP JWT (no credential data)
-                                keystore.signPresentation(
-                                    nonce = nonce,
-                                    audience = audience,
-                                    credentialIds = emptyList(),
+                                listOf(
+                                    null to keystore.signPresentation(
+                                        nonce = nonce,
+                                        audience = audience,
+                                        credentialIds = emptyList(),
+                                    ),
                                 )
                             }
                             Timber.d("Sending VP sign response for flow ${msg.flowId}, messageId=${msg.messageId}")
-                            engine.sendSignResponse(msg.flowId, vpToken = vpToken, messageId = msg.messageId)
+                            val responseEncryption = params?.responseEncryption
+                            if (responseEncryption != null) {
+                                // direct_post.jwt: the engine gets ciphertext only, never the vp_token.
+                                engine.sendSignResponse(
+                                    msg.flowId,
+                                    responseJwe = BlindPresentation.responseJwe(responseEncryption, jarmAudience(params?.verifiedRequest), params.state, presented),
+                                    messageId = msg.messageId,
+                                )
+                            } else {
+                                engine.sendSignResponse(msg.flowId, vpToken = presented.joinToString("\n") { it.second }, messageId = msg.messageId)
+                            }
                             Timber.d("VP sign response sent successfully for flow ${msg.flowId}")
                         }
                         "request_attestation" -> handleRequestAttestation(engine, msg)
                         "sign_client_auth" -> handleSignClientAuth(engine, msg)
+                        org.siros.sdk.transport.BlindEncryptionWire.ACTION_DECRYPT_CREDENTIAL_RESPONSE -> {
+                            // The engine hands over the issuer's JWE; only the control fields go back.
+                            val control = try {
+                                blindIssuance.open(msg.flowId, msg.params.jwe.orEmpty(), msg.params.deferred == true)
+                            } catch (e: BlindIssuanceException) {
+                                engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId, error = e.message)
+                                throw e
+                            }
+                            engine.sendSignResponse(
+                                flowId = msg.flowId,
+                                messageId = msg.messageId,
+                                transactionId = control.transactionId,
+                                interval = control.interval,
+                            )
+                        }
                         else -> {
                             // go-wallet-backend's RequestSign only unblocks on a
                             // sign_response carrying this message_id (there is no
@@ -7866,8 +8018,18 @@ class SirosWallet private constructor(
 
         // Observe flow completion → sync new credentials
         scope.launch {
-            engine.flowComplete().collect { msg ->
-                if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
+            engine.flowComplete().collect { completion ->
+                if (isAbandonedFlowEvent(engine, completion.flowId, completion.connectionGeneration)) return@collect
+                // An issuance whose response only this wallet could open completes with empty credentials: fill them
+                // from the response the wallet decrypted, or refuse. Taken before anything else can reset the state.
+                val filled = fillEncryptedCompletion(completion)
+                if (filled is EncryptedCompletion.Unavailable) {
+                    terminatedFlowIds.add(completion.flowId)
+                    rejectDeliveredMetadata(completion.flowId, filled.notificationIds, DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE)
+                    return@collect
+                }
+                val msg = (filled as EncryptedCompletion.Filled).message
+                val openedResponse: DeliveredResponseMetadata = filled.opened ?: PlainDeliveredResponse
                 noteFlowId(msg.flowId)
                 Timber.i("Flow ${msg.flowId} complete" + (flowContinuations?.get(msg.flowId)?.let { " (the resumption of flow $it)" } ?: ""))
                 terminatedFlowIds.add(msg.flowId)
@@ -7880,7 +8042,7 @@ class SirosWallet private constructor(
                 val canStoreDelivered = keystoreCanHoldCredentialMetadata()
                 var deliveredEntries: kotlinx.serialization.json.JsonArray? = null
                 val deliveredVerdict = DeliveredCredentialMetadata.check(
-                    response = msg,
+                    response = openedResponse,
                     credentials = msg.credentials.orEmpty().map { DeliveredCredential(it.format, it.credential, it.notificationId) },
                     secretNamespace = config.secretSeedNamespace,
                     canStoreSecret = canStoreDelivered,

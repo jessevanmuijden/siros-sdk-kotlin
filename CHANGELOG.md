@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING (unreleased): engine-blind encryption: the wallet, not the engine, holds the response-encryption keys.**
+  The engine now relays ciphertext and never sees an issued credential, a delivered `secret_seed` or a `vp_token`
+  (go-wallet-backend#463 had to state that the engine decrypted the seed in clear). No compatibility shim: engine and
+  wallet change together. Both transports (legacy engine WebSocket and WMP sign sub-flow) carry the same members.
+  - **Issuance.** A `generate_proof` request carrying `credential_response_encryption {alg, enc, required}` is answered with
+    the public JWK (`credential_response_encryption_jwk`) of a FRESH ephemeral P-256 key per request; the private key is held
+    in memory per flow (`BlindIssuance`) and forgotten at flow completion, error, cancel, logout and when the connection is
+    replaced. `required` with a pair the wallet cannot decrypt fails the issuance before any proof is made. The new sign action
+    `decrypt_credential_response {jwe, deferred}` opens the issuer's JWE (ECDH-ES and ECDH-ES+A128KW/A192KW/A256KW with
+    A128/A192/A256GCM and A128CBC-HS256/A192CBC-HS384/A256CBC-HS512; any other pair than the negotiated one is refused) and
+    answers with `transaction_id`/`interval` only, or `error`. An encrypted `flow_complete` (`credential_response_encrypted`)
+    lists its credentials without values: each is filled from the wallet's own decrypted response, entry by entry (a count
+    mismatch or a missing response refuses the issuance, `DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE`, nothing stored).
+    The delivered `credential_metadata` (and so the `secret_seed` receipt check) and the `notification_id` come from that
+    response, never from the engine. `FlowCompleteMessage.credentialMetadata`, `credentialMetadataEncryptedResponse` and the
+    `credential_metadata*` members of `redacted_members` (and `FlowCompleteResult`'s) are removed; `redacted_members` lists the
+    renewal material only.
+  - **Presentation.** A `direct_post.jwt` `sign_presentation` carrying `response_encryption {jwk, alg, enc}` is answered with
+    `response_jwe`, not `vp_token`: the wallet builds the `vp_token` (the DCQL `{queryId: [token]}` object, moved from the
+    engine), the JARM claims (`iss`, `aud`, `iat`, `exp` = `iat` + 300, `vp_token`, `state`) and the compact JWE (`kid` and
+    `cty: JWT` in the protected header; EC or RSA verifier keys). `aud` is the `client_id` of the engine's `verified_request`,
+    never the request's `audience`; without it nothing is built (fail closed). The engine alone POSTs. Other response modes are
+    unchanged and engine-visible by the verifier's choice.
+  - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
+    together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
+  - New public API: `CredentialResponseKey` and `AuthorizationResponseEncryption` (sdk:keystore), `VerifiedRequest`,
+    `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport), `SignRequestParams`/`SignSubFlowParams`
+    members `credential_response_encryption`, `jwe`, `deferred`, `response_encryption`, `state`, `verified_request`,
+    `SignResponseMessage`/`SignSubFlowResult` members `credential_response_encryption_jwk`, `transaction_id`, `interval`,
+    `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
+
 ### Added
 - **Holder-generated pseudonym commitment (`org.siros.psc`) in the OpenID4VCI
   proof JWT** (tracking issue https://github.com/SUNET/vc/issues/823). When the

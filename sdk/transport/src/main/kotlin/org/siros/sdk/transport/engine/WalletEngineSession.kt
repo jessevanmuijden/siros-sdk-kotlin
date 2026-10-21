@@ -597,6 +597,12 @@ class WalletEngineSession(
         clientAttestationPoP: String? = null,
         dpopKeyId: String? = null,
         dpopProof: String? = null,
+        credentialResponseEncryptionJwk: kotlinx.serialization.json.JsonObject? = null,
+        transactionId: String? = null,
+        interval: Int? = null,
+        responseJwe: String? = null,
+        error: String? = null,
+        errorCode: String? = null,
     ) {
         send(SignResponseMessage.serializer(), SignResponseMessage(
             flowId = flowId,
@@ -609,6 +615,12 @@ class WalletEngineSession(
             clientAttestationPoP = clientAttestationPoP,
             dpopKeyId = dpopKeyId,
             dpopProof = dpopProof,
+            credentialResponseEncryptionJwk = credentialResponseEncryptionJwk,
+            transactionId = transactionId,
+            interval = interval,
+            responseJwe = responseJwe,
+            error = error,
+            errorCode = errorCode,
         ))
     }
 
