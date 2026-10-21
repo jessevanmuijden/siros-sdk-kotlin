@@ -459,6 +459,8 @@ data class SignRequestParams(
     @SerialName("credentials_to_include") val credentialsToInclude: List<CredentialRef>? = null,
     @SerialName("response_uri") val responseUri: String? = null,
     @SerialName("verifier_jwk_thumbprint") val verifierJwkThumbprint: String? = null,
+    /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
+    @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
     // The verifier's own session id for this presentation (from the
     // request_uri's "sessionId" query param, forwarded by go-wallet-backend)
     // - a real ZK/PPID pseudonym's verifier_context binds to THIS specific
@@ -507,6 +509,12 @@ data class MatchRequestMessage(
     @SerialName("flow_id") val flowId: String,
     @SerialName("dcql_query") val dcqlQuery: JsonElement? = null,
     val timestamp: String? = null,
+    /**
+     * The verifier's `client_metadata` exactly as the request object carried it (verbatim, never narrowed), when the engine
+     * sends it. A `zkp_req` request needs its `vp_formats_supported.zkp_req` (`system_id_values`, `proof_system_values`):
+     * a request that offered nothing cannot be answered.
+     */
+    @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
 )
 
 @Serializable
