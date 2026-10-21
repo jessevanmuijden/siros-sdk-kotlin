@@ -4333,6 +4333,79 @@ class SirosWallet private constructor(
         if (results.isEmpty() || results.any { !CredentialUtils.isCircuitZkFormat(it.format) }) refuse("query-shape", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
         if (results.any { it.circuitZkPlan == null || it.candidates.isEmpty() }) refuse("no-match", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NO_MATCHING_CREDENTIAL)
 
+        var encryptionJwk: com.nimbusds.jose.jwk.JWK? = null
+        val answer = answerCircuitZkQueries(
+            results = results,
+            allCreds = allCreds,
+            selectedCredentialIds = selectedCredentialIds,
+            buildTranscript = {
+                encryptionJwk = if (request.responseMode == "dc_api.jwt") {
+                    findEncryptionJwk(request.clientMetadata) ?: refuse("no-encryption-key", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+                } else {
+                    null
+                }
+                MdocDeviceResponseBuilder.buildDCAPISessionTranscript(
+                    origin = origin,
+                    nonce = request.nonce,
+                    encryptionPublicJwkThumbprint = encryptionJwk?.computeThumbprint()?.toString(),
+                )
+            },
+            trust = trust,
+            verifierContext = VerifierIdContext(request, trust, origin),
+            verifiedClientIdDisplayName = request.clientId?.takeIf { request.keyMaterial != null }?.let { ClientIdScheme.parse(it).displayName },
+            attestedOrigin = origin,
+            requestSigned = request.keyMaterial != null,
+            support = support,
+            prover = prover,
+            registry = registry,
+            consentHandler = consentHandler,
+            refuse = ::refuse,
+        )
+        val tokensByQueryId = answer.tokensByQueryId
+        val usedIds = answer.usedIds
+
+        val finalResponseJson = buildDcApiResponseJson(request, tokensByQueryId, encryptionJwk)
+        recordPresentation(PresentationRecord(
+            id = randomUint32Id(),
+            flowId = "dc-api-${java.util.UUID.randomUUID()}",
+            verifierName = trust.entityName,
+            credentialIds = usedIds,
+            credentialNames = usedIds.mapNotNull { id -> allCreds.find { it.id == id }?.metadata?.name },
+            // No claim names and no pseudonym: nothing is disclosed but a proof.
+            requestedClaims = emptyList(),
+            zkProof = true,
+            timestamp = System.currentTimeMillis(),
+        ))
+        return DCAPIPresentationResult(responseJson = finalResponseJson, credentialIds = usedIds)
+    }
+
+    /** What [answerCircuitZkQueries] produced: the `vp_token` entries per query id (one presentation each) and the credentials used. */
+    private class CircuitZkAnswer(val tokensByQueryId: Map<String, List<kotlinx.serialization.json.JsonElement>>, val usedIds: List<Long>)
+
+    /**
+     * The transport-neutral core of answering `circuit_zk` / `zkp_req` queries, shared by the DC API path
+     * ([handleCircuitZkDcApi]) and the redirect / QR path through the engine ([handleCircuitZkEngineSignPresentation]): the
+     * user's pick, the local pre-check, the verifier identity (resolved ONCE), the merge rule, ONE consent for all queries and only
+     * then the secret seed, the signature and the proof, and the check of every response against its request. Every refusal goes through
+     * [refuse], which each transport turns into its own decline. [buildTranscript] is called after the pick has been checked, so the
+     * order of refusals does not depend on the transport.
+     */
+    private suspend fun answerCircuitZkQueries(
+        results: List<CredentialMatcher.MatchResult>,
+        allCreds: List<StoredCredential>,
+        selectedCredentialIds: List<Long>,
+        buildTranscript: () -> ByteArray,
+        trust: TrustResult,
+        verifierContext: VerifierIdContext,
+        verifiedClientIdDisplayName: String?,
+        attestedOrigin: String,
+        requestSigned: Boolean,
+        support: org.siros.sdk.credentials.CircuitZkSupport,
+        prover: org.siros.sdk.keystore.CircuitZkProver,
+        registry: VerifierIdRegistry,
+        consentHandler: PresentationConsentHandler,
+        refuse: (String, org.siros.sdk.wallet.dcapi.DCAPIRefusalReason) -> Nothing,
+    ): CircuitZkAnswer {
         // No silent first-eligible: the credential that is proved is the one the user picked, and the consent
         // screen names it. A call that names none is refused, never read as "any".
         if (selectedCredentialIds.isEmpty()) refuse("no-pick", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
@@ -4349,23 +4422,12 @@ class SirosWallet private constructor(
             refuse("selection-not-candidate", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
         }
 
-        val encryptionJwk = if (request.responseMode == "dc_api.jwt") {
-            findEncryptionJwk(request.clientMetadata) ?: refuse("no-encryption-key", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
-        } else {
-            null
-        }
-        val encryptionThumbprint = encryptionJwk?.computeThumbprint()?.toString()
-        val transcript = MdocDeviceResponseBuilder.buildDCAPISessionTranscript(
-            origin = origin,
-            nonce = request.nonce,
-            encryptionPublicJwkThumbprint = encryptionThumbprint,
-        )
+        val transcript = buildTranscript()
         // Every function the wallet declared (and so described to the user) can also be presented.
         val presenterHandlers = org.siros.sdk.keystore.PredicateFunctionHandler.handlersFor(config.circuitZkPredicateFunctions)
         val presenter = (keystore as? org.siros.sdk.keystore.HolderWitnessSource)
             ?.circuitZkPresenter(prover, support.circuits, support.validator, handlers = presenterHandlers, serving = support.serving)
             ?: org.siros.sdk.keystore.CircuitZkPresenter(prover, support.circuits, support.validator, NoWitnessProvider, handlers = presenterHandlers, serving = support.serving)
-        val verifierContext = VerifierIdContext(request, trust, origin)
         val today = java.time.LocalDate.now(java.time.ZoneOffset.UTC)
 
         // ── Phase 1: decide what would be presented. No secret is touched here: no seed, no signature, no proof. ──
@@ -4437,10 +4499,10 @@ class SirosWallet private constructor(
                 identifier = trust.identifier,
                 intermediaryRisk = (trust.context?.get("intermediary_risk") as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull == true,
             ),
-            verifiedClientIdDisplayName = request.clientId?.takeIf { request.keyMaterial != null }?.let { ClientIdScheme.parse(it).displayName },
-            attestedOrigin = origin,
+            verifiedClientIdDisplayName = verifiedClientIdDisplayName,
+            attestedOrigin = attestedOrigin,
             verifierIdType = resolvedVerifier?.type,
-            requestSigned = request.keyMaterial != null,
+            requestSigned = requestSigned,
             today = today,
             locale = java.util.Locale.getDefault().toLanguageTag(),
             predicates = config.circuitZkPredicateFunctions,
@@ -4494,20 +4556,7 @@ class SirosWallet private constructor(
             tokensByQueryId[p.queryId] = entry
             usedIds += cred.id
         }
-
-        val finalResponseJson = buildDcApiResponseJson(request, tokensByQueryId, encryptionJwk)
-        recordPresentation(PresentationRecord(
-            id = randomUint32Id(),
-            flowId = "dc-api-${java.util.UUID.randomUUID()}",
-            verifierName = trust.entityName,
-            credentialIds = usedIds,
-            credentialNames = usedIds.mapNotNull { id -> allCreds.find { it.id == id }?.metadata?.name },
-            // No claim names and no pseudonym: nothing is disclosed but a proof.
-            requestedClaims = emptyList(),
-            zkProof = true,
-            timestamp = System.currentTimeMillis(),
-        ))
-        return DCAPIPresentationResult(responseJson = finalResponseJson, credentialIds = usedIds)
+        return CircuitZkAnswer(tokensByQueryId, usedIds)
     }
 
     /**
