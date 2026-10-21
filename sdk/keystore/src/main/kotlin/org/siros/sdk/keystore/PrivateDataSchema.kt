@@ -32,7 +32,7 @@ internal object PrivateDataSchema {
         "save_credential_issuance_session", "delete_credential_issuance_session",
     )
 
-    /** Defined from version 4 and MUST carry schemaVersion 4 (spec 3.0 section 6). */
+    /** Defined from version 4. A reader accepts it stamped 3 or 4 (containers written before spec 3.0 carry 3); a writer emits 4 ([ExtensionEvents]). */
     private const val SET_EXTENSION = "set_extension"
 
     /**
@@ -65,7 +65,7 @@ internal object PrivateDataSchema {
                     Kind.EVENT_VERSION, v, type,
                 )
             }
-            val known = type != null && (type in EVENT_TYPES_V1_TO_V3 || (type == SET_EXTENSION && v == 4))
+            val known = type != null && (type in EVENT_TYPES_V1_TO_V3 || (type == SET_EXTENSION && v >= 3))
             if (!known) {
                 return UnsupportedSchemaVersionException(
                     "Private data holds an event of type ${type ?: "(none)"} (schemaVersion $v) that this SDK's schema versions do not define; " +

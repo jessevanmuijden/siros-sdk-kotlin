@@ -162,7 +162,7 @@ class PrivateDataSchemaV4Test {
     @Test
     fun vendoredFilesMatchTheDigestsInTheProvenanceFile() {
         val provenance = resource("vectors.PROVENANCE.txt").toString(Charsets.UTF_8)
-        assertTrue(provenance.contains("f393ccbb18731dabe776440b0a0dcafabcff2260"))
+        assertTrue(provenance.contains("64315a5eae50e08a93772488217bbc913c82dd56"))
         val files = listOf(
             "vectors.jsonl", "fixtures/legacy-v1-symmetric.json", "fixtures/metadata-preservation.json",
             "fixtures/multi-passkey-v3.json", "fixtures/single-credential-v3.json",
@@ -293,8 +293,43 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
-    fun aSetExtensionEventAtSchemaVersion3IsRefused() = runTest {
-        assertRefused(plaintext(events = listOf(event("set_extension", JsonPrimitive(3)))), Kind.EVENT_TYPE, 3, "set_extension")
+    fun aSetExtensionEventAtSchemaVersion3IsAcceptedAndKept() = runTest {
+        // Written before spec 3.0; a reader accepts it, a writer never emits one.
+        val p = plaintext(events = listOf(event("set_extension", JsonPrimitive(3))))
+        assertEquals(p["events"], decrypt(unlocked(p).exportEncryptedContainer())["events"])
+    }
+
+    @Test
+    fun eventHashMatchesTheSpecsParentHashChain() {
+        val events = inputsOf("schema-version-event-types-001")["plaintextState"]!!.jsonObject["events"]!!.jsonArray.map { it.jsonObject }
+        for (i in 1 until events.size) {
+            assertEquals("event $i", events[i]["parentHash"]!!.jsonPrimitive.content, ExtensionEvents.hash(events[i - 1]))
+        }
+    }
+
+    @Test
+    fun extensionChangesAppendChainedEventsOnceAndTombstonesRemovals() = runTest {
+        val chain = inputsOf("schema-version-event-types-001")["plaintextState"]!!.jsonObject
+        val k = unlocked(chain)
+        k.setExtensionEntry("org.siros.bbs", "k2", "v2")
+        k.setExtensionEntry("org.siros.bbs", "k1", "v1")
+        val first = decrypt(k.exportEncryptedContainer())
+        val orig = chain["events"]!!.jsonArray
+        val added = first["events"]!!.jsonArray.drop(orig.size).map { it.jsonObject }
+        assertEquals(orig.toList(), first["events"]!!.jsonArray.take(orig.size))
+        assertEquals(listOf("k1", "k2"), added.map { it["key"]!!.jsonPrimitive.content })
+        assertEquals(ExtensionEvents.hash(orig.last().jsonObject), added[0]["parentHash"]!!.jsonPrimitive.content)
+        assertEquals(ExtensionEvents.hash(added[0]), added[1]["parentHash"]!!.jsonPrimitive.content)
+        assertEquals(chain["lastEventHash"], first["lastEventHash"])
+        // Nothing changed: nothing appended. A removal is a tombstone.
+        assertEquals(first["events"], decrypt(k.exportEncryptedContainer())["events"])
+        k.removeExtensionEntry("org.siros.bbs", "k1")
+        val third = decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray
+        assertEquals(orig.size + 3, third.size)
+        val tomb = third.last().jsonObject
+        assertEquals(kotlinx.serialization.json.JsonNull, tomb["value"])
+        assertEquals("k1", tomb["key"]!!.jsonPrimitive.content)
+        assertEquals(ExtensionEvents.hash(third[third.size - 2].jsonObject), tomb["parentHash"]!!.jsonPrimitive.content)
     }
 
     @Test
@@ -320,8 +355,18 @@ class PrivateDataSchemaV4Test {
         )
         assertEquals(md["metadata"], state(out)["credentials"]!!.jsonArray[0].jsonObject["metadata"])
         assertNotNull(state(out)["extensions"])
-        // The SDK writes S.extensions directly and appends no set_extension event (see PR notes).
-        assertEquals(inputsOf("schema-version-v3-writer-001")["plaintextState"]!!.jsonObject["events"], out["events"])
+        // Spec 6.1.3: the change is also a set_extension event, schemaVersion 4, chained from lastEventHash.
+        val events = out["events"]!!.jsonArray
+        assertEquals(1, events.size)
+        val e = events[0].jsonObject
+        assertEquals("set_extension", e["type"]!!.jsonPrimitive.content)
+        assertEquals(
+            vector("schema-version-v3-writer-001")["expected"]!!.jsonObject["setExtensionEventSchemaVersion"],
+            e["schemaVersion"],
+        )
+        assertEquals(inputsOf("schema-version-v3-writer-001")["plaintextState"]!!.jsonObject["lastEventHash"], e["parentHash"])
+        assertEquals(ext["namespace"], e["namespace"]); assertEquals(ext["key"], e["key"]); assertEquals(ext["value"], e["value"])
+        assertEquals(out["lastEventHash"], inputsOf("schema-version-v3-writer-001")["plaintextState"]!!.jsonObject["lastEventHash"])
     }
 
     // ── version stamping and migration ────────────────────────────────

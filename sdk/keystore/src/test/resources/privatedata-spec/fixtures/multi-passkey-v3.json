@@ -33,49 +33,14 @@
       "lastEventHash": "sha256:multi-passkey-event-hash",
       "events": [
         {
-          "type": "new_credential",
+          "type": "alter_settings",
           "schemaVersion": 3,
           "eventId": 1,
-          "parentHash": "",
-          "timestampSeconds": 1750672800,
-          "credentialId": 1,
-          "format": "msomdoc",
-          "data": "<test-vector-placeholder-credential-payload-1>",
-          "batchId": 1,
-          "kid": "key-001",
-          "instanceId": 0,
-          "credentialIssuerIdentifier": "https://issuer1.example.com",
-          "credentialConfigurationId": "eu.europa.ec.eudi.pid.1"
-        },
-        {
-          "type": "new_credential",
-          "schemaVersion": 3,
-          "eventId": 2,
-          "parentHash": "",
-          "timestampSeconds": 1750672801,
-          "credentialId": 2,
-          "format": "msomdoc",
-          "data": "<test-vector-placeholder-credential-payload-2>",
-          "batchId": 2,
-          "kid": "key-002",
-          "instanceId": 0,
-          "credentialIssuerIdentifier": "https://issuer2.example.com",
-          "credentialConfigurationId": "eu.europa.ec.eudi.pid.1"
-        },
-        {
-          "type": "new_credential",
-          "schemaVersion": 3,
-          "eventId": 3,
-          "parentHash": "",
-          "timestampSeconds": 1750672802,
-          "credentialId": 3,
-          "format": "msomdoc",
-          "data": "<test-vector-placeholder-credential-payload-3>",
-          "batchId": 3,
-          "kid": "key-003",
-          "instanceId": 0,
-          "credentialIssuerIdentifier": "https://issuer3.example.com",
-          "credentialConfigurationId": "eu.europa.ec.eudi.pid.1"
+          "parentHash": "sha256:multi-passkey-event-hash",
+          "timestampSeconds": 1750000000,
+          "settings": {
+            "openidRefreshTokenMaxAgeInSeconds": "0"
+          }
         }
       ],
       "S": {
@@ -164,14 +129,9 @@
     "statePreservation": [
       "all three credentials preserved",
       "all three keypairs preserved",
-      "events array complete with all three new_credential events",
+      "events preserved as authored (one alter_settings event, schemaVersion 3)",
       "lastEventHash unchanged"
     ],
-    "roundTrip": [
-      "decrypt all three entries",
-      "modify credential-002",
-      "re-encrypt with all three",
-      "verify byte-for-byte match"
-    ]
+    "roundTrip": "decrypt -> migrate -> re-encrypt: a version 4 writer changes only S.schemaVersion 3 to 4 and nothing else (see expected.roundTripState of the vector with the same state)"
   }
 }

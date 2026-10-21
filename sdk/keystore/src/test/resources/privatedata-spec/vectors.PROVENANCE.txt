@@ -1,26 +1,26 @@
 vectors.jsonl, fixtures/ and edge-cases/ are VERBATIM copies of test-vectors/ of
-sirosfoundation/privatedata-spec pull request #10 (stacked on #9; SPEC 3.0 with vectors that match the spec):
+sirosfoundation/privatedata-spec main after the merge of pull requests #9 and #10 (SPEC 3.0):
 
-  source ref    : refs/pull/10/head
-  source commit : f393ccbb18731dabe776440b0a0dcafabcff2260
-  vectors.jsonl : all 32 lines, sha256 a06ec5a21c0b74aaae16595a685c38aa538fa65b46ece7dfe50f9286d839c0ba
+  source ref    : main (merge commit of #10)
+  source commit : 64315a5eae50e08a93772488217bbc913c82dd56
+  vectors.jsonl : all 32 lines, sha256 9505e976b4fd44b9ce645cec952506ccfcd823627f99c50c9023125c90519021
   fixtures/ and edge-cases/ (referenced by the vectors; see PrivateDataSchemaV4Test):
     eae8b4f24be6c3a9c2d66a43ebc9e7f639164163e8af0b28bd3f60da8602d2eb  fixtures/legacy-v1-symmetric.json
     9ec743c87c8f272a2dc8d824e7bba9ef1c6f5070cf6edac3e793ccc854ae2f56  fixtures/metadata-preservation.json
-    f44fa9834e26a07c2f9b736084add2bc6d2ac2be726e088c42fbdceef7c07331  fixtures/multi-passkey-v3.json
-    11076373c17d6212295b10c4111b7649ccfa23618b706ed5e3767cab80162ce3  fixtures/single-credential-v3.json
+    568b3a417f92b0f75fba05f44ee7731014876b48c419fec09987a5fa40fbad57  fixtures/multi-passkey-v3.json
+    2e6405efa73ed62a0841b1311fa07f55d0e4ef3119bb6fb754e1dd86fea93cd3  fixtures/single-credential-v3.json
     936ab6752300cdee3b8512cda83ec008b6d52f5155dfdd0883e0ea604b836f73  edge-cases/empty-presentations.json
     a52365664822002569de471c2fb37c0c1ab0608bbdc392c201185766864cb446  edge-cases/max-size-container.json
     b6e2cd2465435415c130b2753ce33e4f220269d1f48dafd27d6ac3126668081c  edge-cases/unicode-credentials.json
     a98b932fe7886924da6455383a7c9c586a83788e15a0bfd06650f66d78c0619f  edge-cases/unknown-credential-members.json
 
-Replace the SPEC 2.6 copy (8c4c865) it supersedes. When the PRs merge, re-copy from main, update the commit
+Replace the SPEC 2.6 copy (8c4c865) it supersedes. When the spec changes, re-copy from main, update the commit
 and every digest here AND in the tests that pin them (CredentialMetadataKeystoreTest, PrivateDataSchemaV4Test).
 
 derived-secrets.json is a VERBATIM copy of test-vectors/derived-secrets.json of the same repository at
 the merge commit of pull request #8 (SPEC 2.7, private_seed per issuer, label org.siros.private_seed/v2):
 
-  source commit : 1b796d2b9043fff890fd059f47c8b51382d37ff0 (main); unchanged at f393ccb
+  source commit : 1b796d2b9043fff890fd059f47c8b51382d37ff0 (main); unchanged at 64315a5
   sha256        : fdcdb5f01be080adaed1dc7a9f7c4bc9c9080322a92f764bc6a4b0a961209d2c
 
 PrivateSeedTest fails if the file no longer matches the hash above.

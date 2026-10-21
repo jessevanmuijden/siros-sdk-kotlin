@@ -154,6 +154,13 @@ class JweKeystore(
     // resolution is last-write-wins per (namespace, key), so one aggregate
     // entry per subsystem loses data whenever two devices write concurrently.
     private var extensions: MutableMap<String, MutableMap<String, String>> = mutableMapOf()
+
+    // The extension entries as loaded from the container or as last written; the difference to
+    // [extensions] is what [exportEncryptedContainer] appends as set_extension events.
+    private var extensionsAtLastSync: Map<String, Map<String, String>> = emptyMap()
+
+    // set_extension events appended since unlock, written after the container's own events.
+    private val appendedEvents: MutableList<kotlinx.serialization.json.JsonObject> = mutableListOf()
     // OID4VCI renewal (credential re-issuance/renewal plan, Phase 2) -
     // refresh_token + the DPoP key it's bound to, keyed by the credential
     // batch's batchId - see privatedata-spec SPEC.md §6.2
@@ -260,7 +267,9 @@ class JweKeystore(
             if (plaintextJson is kotlinx.serialization.json.JsonObject) {
                 preservedWalletState = plaintextJson
             }
+            appendedEvents.clear()
             loadWalletState(plaintextJson)
+            extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
 
             // Preserve container metadata for re-export
             containerMetadata = container
@@ -535,6 +544,8 @@ class JweKeystore(
         keyDids.clear()
         wscdCredentials.clear()
         extensions.clear()
+        extensionsAtLastSync = emptyMap()
+        appendedEvents.clear()
         credentialRefreshTokens.clear()
         mainKey = null
         containerMetadata = null
@@ -997,18 +1008,29 @@ class JweKeystore(
         // caller's stored container (and the backend's) stays exactly as it was.
         PrivateDataSchema.rewriteBlocker(preservedWalletState)?.let { throw it }
 
-        // Build the WalletStateContainer plaintext (S.schemaVersion 4)
-        val walletState = buildWalletStateV3()
-        val payload = json.encodeToString(
-            kotlinx.serialization.json.JsonObject.serializer(),
-            walletState
-        )
+        // Spec 3.0 section 6.1.3: every change to S.extensions is also a set_extension event
+        // appended to `events`. `lastEventHash` stays as authored (it is the parent of events[0]).
+        val newEvents = pendingExtensionEvents()
+        appendedEvents.addAll(newEvents)
 
-        // Encrypt the JWE with A256GCMKW / A256GCM using the main key
-        val header = JWEHeader(JWEAlgorithm.A256GCMKW, EncryptionMethod.A256GCM)
-        val jweObject = JWEObject(header, Payload(payload))
-        jweObject.encrypt(AESEncrypter(currentMainKey))
-        val jweString = jweObject.serialize()
+        val jweString = try {
+            // Build the WalletStateContainer plaintext (S.schemaVersion 4)
+            val walletState = buildWalletStateV3()
+            val payload = json.encodeToString(
+                kotlinx.serialization.json.JsonObject.serializer(),
+                walletState
+            )
+
+            // Encrypt the JWE with A256GCMKW / A256GCM using the main key
+            val header = JWEHeader(JWEAlgorithm.A256GCMKW, EncryptionMethod.A256GCM)
+            val jweObject = JWEObject(header, Payload(payload))
+            jweObject.encrypt(AESEncrypter(currentMainKey))
+            jweObject.serialize()
+        } catch (e: Exception) {
+            repeat(newEvents.size) { appendedEvents.removeAt(appendedEvents.lastIndex) }
+            throw e
+        }
+        extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
 
         // Build the full container with the updated JWE
         val meta = containerMetadata ?: throw KeystoreException("No container metadata")
@@ -1017,6 +1039,26 @@ class JweKeystore(
 
         EncryptedContainer.serialize(updatedContainer)
     }
+
+    /** The events for the extension changes since the container was loaded or last exported. */
+    private fun pendingExtensionEvents(): List<kotlinx.serialization.json.JsonObject> {
+        val original = (preservedWalletState?.get("events") as? kotlinx.serialization.json.JsonArray).orEmpty() + appendedEvents
+        val last = original.lastOrNull() as? kotlinx.serialization.json.JsonObject
+        val parent = if (last != null) {
+            ExtensionEvents.hash(last)
+        } else {
+            (preservedWalletState?.get("lastEventHash") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: ""
+        }
+        val used = original.mapNotNull {
+            ((it as? kotlinx.serialization.json.JsonObject)?.get("eventId") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+        }.toSet()
+        val random = SecureRandom()
+        return ExtensionEvents.diff(
+            extensionsAtLastSync, extensions, parent, used, System.currentTimeMillis() / 1000,
+        ) { random.nextInt().toLong().and(0xFFFFFFFFL).let { if (it == 0L) 1L else it } }
+    }
+
+    private fun kotlinx.serialization.json.JsonArray?.orEmpty(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()
 
     private fun buildWalletStateV3(): kotlinx.serialization.json.JsonObject {
         // Preserve existing state if available, otherwise initialize fresh.
@@ -1033,7 +1075,7 @@ class JweKeystore(
             put("lastEventHash", kotlinx.serialization.json.JsonPrimitive(lastEventHash))
             val events = existingState?.get("events") as? kotlinx.serialization.json.JsonArray
                 ?: kotlinx.serialization.json.JsonArray(emptyList())
-            put("events", events)
+            put("events", if (appendedEvents.isEmpty()) events else kotlinx.serialization.json.JsonArray(events + appendedEvents))
             put("S", kotlinx.serialization.json.buildJsonObject {
                 // Always the current version. A version 3 container this SDK rewrites is
                 // thereby migrated (the spec's migration only sets this number), which is
