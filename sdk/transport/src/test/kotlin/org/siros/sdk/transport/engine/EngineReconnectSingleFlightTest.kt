@@ -103,8 +103,10 @@ class EngineReconnectSingleFlightTest {
         listeners[0].onOpen(sockets[0], response)
         listeners[0].onFailure(sockets[0], IOException("ping timeout"), null) // schedules the backoff attempt
         runBlocking {
-            val forced = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Default) { s.forceReconnect() }
-            Thread.sleep(200)
+            // UNDISPATCHED: the forced reconnect runs on this thread up to its first suspension, which is inside tokenProvider,
+            // so the cancellation below cannot race the coroutine's start.
+            val forced = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Default, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { s.forceReconnect() }
+            assertEquals("the forced refresh is parked in tokenProvider", 1, calls)
             forced.cancelAndJoin() // the caller goes away while tokenProvider is suspended
         }
         settle()
@@ -112,19 +114,50 @@ class EngineReconnectSingleFlightTest {
     }
 
     @Test
-    fun `an old attempt that resumes after a newer socket was installed publishes nothing`() {
+    fun `a forced reconnect cancels an automatic attempt that is parked in the token refresh`() {
         val s = session()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
         val gate = kotlinx.coroutines.CompletableDeferred<String>()
         var calls = 0
-        s.connect("tok", tokenProvider = { if (calls++ == 0) gate.await() else "fresh" })
+        s.connect("tok", tokenProvider = { if (calls++ == 0) { entered.complete(Unit); gate.await() } else "fresh" })
         listeners[0].onOpen(sockets[0], response)
-        listeners[0].onFailure(sockets[0], IOException("ping timeout"), null) // backoff job parks in the refresh (after 1 s)
-        Thread.sleep(1300)
-        runBlocking { s.forceReconnect() } // installs socket 1
+        listeners[0].onFailure(sockets[0], IOException("ping timeout"), null) // the backoff attempt parks in the refresh after 1 s
+        runBlocking {
+            // The attempt signals that it is inside the refresh; no sleep decides the order.
+            assertEquals(Unit, kotlinx.coroutines.withTimeout(10_000) { entered.await() })
+            s.forceReconnect() // replaces the parked attempt: installs socket 1
+        }
         assertEquals(2, sockets.size)
         gate.complete("late")
         settle()
-        assertEquals("the late attempt did not add or replace a socket", 2, sockets.size)
+        assertEquals("the cancelled attempt did not add or replace a socket", 2, sockets.size)
+    }
+
+    private fun field(name: String) = WalletEngineSession::class.java.getDeclaredField(name).apply { isAccessible = true }
+
+    @Test
+    fun `an automatic attempt past its state check does not publish or cancel a replacement installed before it takes the lock`() {
+        val s = session()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        s.connect("tok", tokenProvider = { entered.complete(Unit); "fresh" })
+        listeners[0].onOpen(sockets[0], response)
+        val replacement = mockk<WebSocket>(relaxed = true)
+        val connLock = field("connLock").get(s)!!
+        synchronized(connLock) {
+            // Hold the lock BEFORE the attempt can reach doConnect: it passes its state check, then has to wait for the lock.
+            listeners[0].onFailure(sockets[0], IOException("ping timeout"), null) // schedules the attempt (RECONNECTING)
+            runBlocking { kotlinx.coroutines.withTimeout(10_000) { entered.await() } }
+            // While the old attempt is held back, a replacement becomes the live socket (what forceReconnect does under this lock).
+            (field("liveGeneration").get(s) as java.util.concurrent.atomic.AtomicInteger).set(99)
+            field("webSocket").set(s, replacement)
+        }
+        runBlocking {
+            val job = field("pendingReconnect").get(s) as kotlinx.coroutines.Job
+            kotlinx.coroutines.withTimeout(10_000) { job.join() }
+        }
+        assertEquals("the stale attempt opened no socket", 1, sockets.size)
+        io.mockk.verify(exactly = 0) { replacement.cancel() }
+        assertEquals("the replacement is still the live socket", replacement, field("webSocket").get(s))
     }
 
     @Test
