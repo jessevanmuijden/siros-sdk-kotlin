@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `S.keypairs[]` entries the SDK cannot read (non-objects, legacy shapes, no parseable private key) and
   unknown members of readable entries are now written back verbatim and in place (spec 3.0 section 6);
   they used to be dropped on rewrite. Keys generated in a session are appended after them.
+  Likewise `S.presentations[]` entries are written back verbatim (`transactionId`, `data`, unknown
+  members) unless their record changed, and entries this SDK cannot read are kept in place.
 - **Known gap (spec section 6.1.3):** the SDK keeps no event log. `setExtensionEntry` writes
   `S.extensions` directly and appends no `set_extension` event, which the spec requires. Existing
   `events` and `lastEventHash` are carried through unchanged. Closing the gap needs event construction

@@ -233,6 +233,32 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun presentationsAreWrittenBackVerbatimUnlessTheirRecordChanged() = runTest {
+        fun pres(id: Long, tx: Long, data: String) = buildJsonObject {
+            put("presentationId", JsonPrimitive(id)); put("transactionId", JsonPrimitive(tx)); put("data", JsonPrimitive(data))
+            put("usedCredentialIds", buildJsonArray { add(JsonPrimitive(1)) })
+            put("presentationTimestampSeconds", JsonPrimitive(1750673400)); put("audience", JsonPrimitive("https://v.example"))
+            put("x-unknown", buildJsonObject { put("a", JsonPrimitive(true)) })
+        }
+        val unreadable = JsonPrimitive("not-an-object")
+        val p1 = pres(1, 99, "vp-data"); val p2 = pres(2, 98, "vp-data-2"); val p3 = pres(3, 97, "gone")
+        val p = plaintext(extraS = mapOf("presentations" to buildJsonArray { add(p1); add(unreadable); add(p2); add(p3) }))
+        val k = unlocked(p)
+        k.savePresentationRecord(2L, """{"id":2,"flow_id":"","credential_ids":[1,5],"timestamp":1000,"verifier_name":"v"}""")
+        k.savePresentationRecord(4L, """{"id":4,"flow_id":"","credential_ids":[1],"timestamp":2000,"verifier_name":"w"}""")
+        // record 3 is gone: it is deleted. (clear + re-save of 1 and 2 would be a change; here only 3 is removed.)
+        val keep = k.getAllPresentationRecords() - 3L
+        k.clearPresentationRecords()
+        for ((id, rec) in keep) k.savePresentationRecord(id, rec)
+        val out = state(decrypt(k.exportEncryptedContainer()))["presentations"]!!.jsonArray
+        assertEquals(p1, out[0]); assertEquals(unreadable, out[1])
+        val rebuilt2 = out[2].jsonObject
+        assertEquals(JsonPrimitive(2), rebuilt2["presentationId"]); assertFalse("x-unknown" in rebuilt2)
+        assertEquals(4, out.size)
+        assertEquals(JsonPrimitive(4), out[3].jsonObject["presentationId"])
+    }
+
+    @Test
     fun aSetExtensionEventAtSchemaVersion3IsRefused() = runTest {
         assertRefused(plaintext(events = listOf(event("set_extension", JsonPrimitive(3)))), Kind.EVENT_TYPE, 3, "set_extension")
     }

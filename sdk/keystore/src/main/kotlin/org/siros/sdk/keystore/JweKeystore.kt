@@ -428,6 +428,7 @@ class JweKeystore(
         // counterpart (see PresentationRecord's KDoc) and are intentionally
         // dropped on reload, not round-tripped.
         val presentationsArray = state["presentations"]
+        loadedPresentations.clear()
         if (presentationsArray is kotlinx.serialization.json.JsonArray) {
             for (entry in presentationsArray) {
                 val presObj = entry as? kotlinx.serialization.json.JsonObject ?: continue
@@ -452,6 +453,7 @@ class JweKeystore(
                     }
                 }
                 presentationRecords[presId] = recordJson.toString()
+                loadedPresentations[presId] = presObj to recordJson.toString()
             }
         }
 
@@ -529,6 +531,7 @@ class JweKeystore(
         credentials.clear()
         credentialMetadata.clear()
         presentationRecords.clear()
+        loadedPresentations.clear()
         keyDids.clear()
         wscdCredentials.clear()
         extensions.clear()
@@ -1100,7 +1103,7 @@ class JweKeystore(
                 // before the VP is actually signed) - written as "" rather than
                 // restructuring that flow, a known, deliberate gap.
                 put("presentations", kotlinx.serialization.json.JsonArray(
-                    presentationRecords.map { (id, data) ->
+                    carriedPresentationEntries(existingState) + presentationRecords.filterKeys { it !in carriedPresentationIds }.map { (id, data) ->
                         val parsed = try {
                             json.parseToJsonElement(data) as? kotlinx.serialization.json.JsonObject
                         } catch (_: Exception) { null }
@@ -1196,6 +1199,37 @@ class JweKeystore(
                 }
             }
         }
+    }
+
+    // presentationId -> (the original S.presentations[] entry, the record string derived from it
+    // at load). An unchanged record writes its original entry back, so `transactionId`, `data`
+    // and unknown members survive (spec 3.0 section 6: presentations MUST be preserved).
+    private val loadedPresentations: MutableMap<Long, Pair<kotlinx.serialization.json.JsonObject, String>> = mutableMapOf()
+
+    /** Ids written by the last [carriedPresentationEntries] call; the rest are built from records. */
+    private var carriedPresentationIds: Set<Long> = emptySet()
+
+    /**
+     * `S.presentations[]` entries of the unlocked container to write back as they were: entries this
+     * build cannot read (kept in place), and readable ones whose record is unchanged. A readable one
+     * whose record was changed is rebuilt from the record; one whose record is gone was deleted.
+     */
+    private fun carriedPresentationEntries(
+        existingState: kotlinx.serialization.json.JsonObject?,
+    ): List<kotlinx.serialization.json.JsonElement> {
+        val original = ((existingState?.get("S") as? kotlinx.serialization.json.JsonObject)
+            ?.get("presentations") as? kotlinx.serialization.json.JsonArray) ?: run { carriedPresentationIds = emptySet(); return emptyList() }
+        val out = ArrayList<kotlinx.serialization.json.JsonElement>()
+        val ids = HashSet<Long>()
+        for (entry in original) {
+            val id = ((entry as? kotlinx.serialization.json.JsonObject)?.get("presentationId") as? kotlinx.serialization.json.JsonPrimitive)
+                ?.content?.toLongOrNull()
+            if (id == null) { out.add(entry); continue }
+            val loaded = loadedPresentations[id]
+            if (loaded != null && presentationRecords[id] == loaded.second && ids.add(id)) out.add(loaded.first)
+        }
+        carriedPresentationIds = ids
+        return out
     }
 
     /**
