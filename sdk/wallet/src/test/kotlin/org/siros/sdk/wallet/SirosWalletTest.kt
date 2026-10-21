@@ -411,6 +411,41 @@ class SirosWalletTest {
     }
 
     @Test
+    fun handleTrustEvaluation_resourceIdEqualsSubjectId_forEveryVerifierIdentityShape() = runTest(dispatcher) {
+        // go-trust refuses a full evaluation whose resource.id differs from subject.id (a 502 from the backend proxy), so the
+        // verifier-trust request the zkp_req redirect route depends on must carry the SAME id in both, prefixed or not.
+        for (subject in listOf("x509_san_dns:rp.example", "decentralized_identifier:did:web:rp.example", "https://rp.example/verifier", "verifier-123")) {
+            val engine = mockk<WalletEngineSession>(relaxed = true)
+            val apiClient = mockk<BackendApiClient>()
+            val request = slot<JsonObject>()
+            coEvery { apiClient.evaluateTrust(capture(request)) } returns buildJsonObject { put("decision", true) }
+            val wallet = newWallet(
+                "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+                "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+                "apiClient" to apiClient,
+                "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            )
+            invokeHandleTrustEvaluation(
+                wallet, engine, "flow-id",
+                buildJsonObject {
+                    putJsonObject("request") {
+                        put("subject_id", subject)
+                        put("subject_type", "credential_verifier")
+                        putJsonObject("key_material") {
+                            put("type", "x5c")
+                            putJsonArray("x5c") { add(JsonPrimitive("cert-1")) }
+                        }
+                    }
+                },
+            )
+            advanceUntilIdle()
+            val sid = request.captured["subject"]!!.jsonObject["id"]?.jsonPrimitive?.content
+            assertEquals(subject, sid)
+            assertEquals(subject, sid?.let { request.captured["resource"]!!.jsonObject["id"]?.jsonPrimitive?.content })
+        }
+    }
+
+    @Test
     fun handleTrustEvaluation_returns_failure_reason_when_backend_throws() = runTest(dispatcher) {
         val engine = mockk<WalletEngineSession>(relaxed = true)
         val apiClient = mockk<BackendApiClient>()
