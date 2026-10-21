@@ -167,6 +167,10 @@ data class FlowCompleteResult(
     @SerialName("credential_response_encrypted")
     @Serializable(with = org.siros.sdk.transport.EncryptedResponseFlagSerializer::class)
     val credentialResponseEncrypted: Boolean = false,
+    /** See [org.siros.sdk.transport.engine.FlowCompleteMessage.credentialMetadata]: display-only members of a plain response. */
+    @SerialName("credential_metadata")
+    @Serializable(with = org.siros.sdk.transport.DisplayOnlyCredentialMetadataSerializer::class)
+    val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
     /** `redacted_members`: what a replayed completion withheld (the renewal material); see [org.siros.sdk.transport.engine.FlowCompleteMessage.redactedMembers]. */
     @SerialName("redacted_members")
     @Serializable(with = org.siros.sdk.transport.RedactedMembersSerializer::class)

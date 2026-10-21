@@ -41,6 +41,27 @@ class ResponseCredentialMetadata(
     override fun hashCode() = members.hashCode() * 31 + malformed.hashCode()
 }
 
+/**
+ * Decodes the response-level `credential_metadata` a PLAIN issuer response relays on `flow_complete`, keeping only the
+ * display-only members [DISPLAY_MEMBERS] (`display`, `claims`) and ignoring every other member. An extension member (a
+ * `org.siros.secret_seed`, say) is never taken from the engine's frame: it is read only from a response the wallet
+ * decrypted itself. Anything but a JSON object is the malformed placeholder, as in [ResponseCredentialMetadataSerializer].
+ */
+internal object DisplayOnlyCredentialMetadataSerializer : KSerializer<ResponseCredentialMetadata> {
+    val DISPLAY_MEMBERS: Set<String> = setOf("display", "claims")
+
+    override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor
+
+    override fun deserialize(decoder: Decoder): ResponseCredentialMetadata {
+        val element = (decoder as? JsonDecoder ?: throw SerializationException("credential metadata decodes from JSON only"))
+            .decodeJsonElement()
+        val obj = element as? JsonObject ?: return ResponseCredentialMetadata(malformed = true)
+        return ResponseCredentialMetadata(JsonObject(obj.filterKeys { it in DISPLAY_MEMBERS }))
+    }
+
+    override fun serialize(encoder: Encoder, value: ResponseCredentialMetadata) = ResponseCredentialMetadataSerializer.serialize(encoder, value)
+}
+
 /** Decodes the response-level object without ever throwing for its content: anything but an object is the malformed placeholder. */
 internal object ResponseCredentialMetadataSerializer : KSerializer<ResponseCredentialMetadata> {
     override val descriptor: SerialDescriptor = JsonObject.serializer().descriptor

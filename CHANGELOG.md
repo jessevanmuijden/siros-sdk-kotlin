@@ -24,7 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     The delivered `credential_metadata` (and so the `secret_seed` receipt check) and the `notification_id` come from that
     response, never from the engine. `FlowCompleteMessage.credentialMetadata`, `credentialMetadataEncryptedResponse` and the
     `credential_metadata*` members of `redacted_members` (and `FlowCompleteResult`'s) are removed; `redacted_members` lists the
-    renewal material only.
+    renewal material only. A PLAIN (unencrypted) issuer response may still relay the display-only members of its
+    response-level `credential_metadata` on `flow_complete`: `FlowCompleteMessage.credentialMetadata` and
+    `FlowCompleteResult.credentialMetadata` are decoded through an allowlist (`display`, `claims`), every other member is
+    dropped on decoding (an extension such as `org.siros.secret_seed` is never taken from the engine's frame and is never
+    stored or merged), and the member is ignored when `credential_response_encrypted` is true, where only the wallet's own
+    decrypted object is read.
   - **Presentation.** A `direct_post.jwt` `sign_presentation` carrying `response_encryption {jwk, alg, enc}` is answered with
     `response_jwe`, not `vp_token`: the wallet builds the `vp_token` (the DCQL `{queryId: [token]}` object, moved from the
     engine), the JARM claims (`iss`, `aud`, `iat`, `exp` = `iat` + 300, `vp_token`, `state`) and the compact JWE (`kid` and

@@ -5807,7 +5807,7 @@ class SirosWallet private constructor(
             engineCreds.mapIndexed { i, c -> c.copy(credential = opened.credentials[i], notificationId = c.notificationId ?: opened.notificationId) }
         }
         val verdict = DeliveredCredentialMetadata.check(
-            response = opened ?: PlainDeliveredResponse,
+            response = opened ?: PlainDeliveredResponse(decoded.credentialMetadata),
             credentials = creds.map { DeliveredCredential(it.format, it.credential, it.notificationId) },
             secretNamespace = config.secretSeedNamespace,
             canStoreSecret = keystoreCanHoldCredentialMetadata(),
@@ -5825,9 +5825,13 @@ class SirosWallet private constructor(
         class Unavailable(val notificationIds: List<String>) : EncryptedCompletion()
     }
 
-    /** The response of a plain issuance: no delivered metadata the engine could have relayed, nothing encrypted. */
-    private object PlainDeliveredResponse : DeliveredResponseMetadata {
-        override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null
+    /**
+     * The response of a plain issuance: nothing encrypted, and only the display-only members (`display`, `claims`) the engine
+     * relayed, which the frame decoder already restricted to that allowlist. Never a seed.
+     */
+    private class PlainDeliveredResponse(
+        override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
+    ) : DeliveredResponseMetadata {
         override val credentialMetadataEncryptedResponse: Boolean = false
     }
 
@@ -8029,7 +8033,8 @@ class SirosWallet private constructor(
                     return@collect
                 }
                 val msg = (filled as EncryptedCompletion.Filled).message
-                val openedResponse: DeliveredResponseMetadata = filled.opened ?: PlainDeliveredResponse
+                // An encrypted response is read only from what the wallet decrypted; a plain one may relay display-only members.
+                val openedResponse: DeliveredResponseMetadata = filled.opened ?: PlainDeliveredResponse(msg.credentialMetadata)
                 noteFlowId(msg.flowId)
                 Timber.i("Flow ${msg.flowId} complete" + (flowContinuations?.get(msg.flowId)?.let { " (the resumption of flow $it)" } ?: ""))
                 terminatedFlowIds.add(msg.flowId)

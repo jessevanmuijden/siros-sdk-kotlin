@@ -11283,6 +11283,8 @@ class SirosWalletTest {
         lostResponse: Boolean = false,
         /** The number of credential entries the engine's completion lists, when it is not [results]'s size. */
         engineEntries: Int? = null,
+        /** The raw `credential_metadata` member of the engine's completion frame (decoded by the real allowlist). */
+        wireMetadata: String? = null,
         refreshToken: String? = null,
         preexisting: List<StoredCredential> = emptyList(),
         renewalSourceBatchId: Long? = null,
@@ -11357,6 +11359,9 @@ class SirosWalletTest {
                 flowId = flowId, credentials = completionResults,
                 credentialIssuer = "https://issuer.example", selectedCredentialConfigurationId = "nym",
                 credentialResponseEncrypted = encrypted,
+                credentialMetadata = wireMetadata?.let {
+                    Json.decodeFromString(FlowCompleteMessage.serializer(), """{"flow_id":"$flowId","credential_metadata":$it}""").credentialMetadata
+                },
                 redactedMembers = redactedMembers, refreshToken = refreshToken, dpopKeyId = refreshToken?.let { "key-1" },
                 issuerTrust = issuerTrust,
             ),
@@ -11639,6 +11644,13 @@ class SirosWalletTest {
         ).jsonObject
         val advertisedWallet = walletHolding(null, advertised = true)
         assertEquals(null, advertisedWallet.wmpDeliveredMetadataRefusal("other-flow", plain))
+        // A plain completion's relayed metadata is read (display-only): one that is not an object is refused as malformed,
+        // while a seed in the frame is dropped and so neither refused nor taken.
+        fun plainWith(md: String) = Json.parseToJsonElement(
+            """{"credentials":[{"format":"dc+sd-jwt","credential":${JsonPrimitive(NymTestCredentials.sdJwt(sscValues = emptyList()))},"notification_id":"n9"}],"credential_metadata":$md}""",
+        ).jsonObject
+        assertEquals(DeliveredMetadataRefusal.MALFORMED, advertisedWallet.wmpDeliveredMetadataRefusal("p", plainWith("\"text\""))!!.first)
+        assertEquals(null, advertisedWallet.wmpDeliveredMetadataRefusal("p", plainWith(seedBody.toString())))
         // An encrypted completion with no response held for the flow cannot be completed, and nothing is invented.
         val lost = advertisedWallet.wmpDeliveredMetadataRefusal("unknown-flow", encrypted)
         assertEquals(DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE, lost!!.first)
@@ -12103,6 +12115,48 @@ class SirosWalletTest {
         assertEquals("client-id-1", claims["aud"]!!.jsonPrimitive.content)
         assertEquals("st-9", claims["state"]!!.jsonPrimitive.content)
         assertEquals("secret-vp-token", claims["vp_token"]!!.jsonObject["pid"]!!.jsonArray[0].jsonPrimitive.content)
+    }
+
+    @Test
+    fun aPlainCompletion_storesTheRelayedDisplayMetadata_butNeverASeedTheEngineFrameCarries() = runTest(dispatcher) {
+        val wire = """{"display":[{"name":"Nym"}],"org.siros.secret_seed":{"$deliveredNamespace":"${NymTestCredentials.seedHex}"},"claims":[{"path":["a"]}]}"""
+        // The credential carries no commitment, so no seed is needed and the response is plain.
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            encrypted = false, wireMetadata = wire,
+        )
+        val stored = s.keystore.getCredentialMetadata(s.store.getAll().single().id)!!
+        assertEquals(listOf("display", "claims"), stored.map { it.jsonObject["type"]!!.jsonPrimitive.content })
+        assertNoSecretIn(stored.toString())
+        assertNoSecretIn(s.keystore.getCredential(s.store.getAll().single().id))
+    }
+
+    @Test
+    fun aPlainCompletionCarryingOnlyASeed_deliversNoSeedAndIsRefusedWhenTheConfigurationAdvertisedOne() = runTest(dispatcher) {
+        val wire = """{"org.siros.secret_seed":{"$deliveredNamespace":"${NymTestCredentials.seedHex}"}}"""
+        // Advertised: the response had to be encrypted, and the frame's seed is not taken either way.
+        val advertised = deliveredScenario(listOf(deliveredResult()), encrypted = false, advertised = true, wireMetadata = wire)
+        assertNothingStored(advertised)
+        // Not advertised: the credential needs a seed it never receives, so nothing is verified against a seed and no seed is kept.
+        val plain = deliveredScenario(listOf(deliveredResult()), encrypted = false, wireMetadata = wire)
+        for (c in plain.store.getAll()) {
+            assertTrue(plain.keystore.getCredentialMetadata(c.id).orEmpty().isEmpty())
+            assertNoSecretIn(plain.keystore.getCredential(c.id))
+        }
+    }
+
+    @Test
+    fun anEncryptedCompletion_ignoresAnyCredentialMetadataTheEngineFrameCarries() = runTest(dispatcher) {
+        // The wallet decrypted {example.other}; the frame claims a different object, including a seed.
+        val md = org.siros.sdk.transport.ResponseCredentialMetadata(buildJsonObject { put("example.other", JsonPrimitive("from-the-wallet")) })
+        val wire = """{"display":[{"name":"from-the-engine"}],"org.siros.secret_seed":{"$deliveredNamespace":"${NymTestCredentials.seedHex}"}}"""
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            metadata = md, wireMetadata = wire,
+        )
+        val stored = s.keystore.getCredentialMetadata(s.store.getAll().single().id)!!
+        assertEquals(listOf("example.other"), stored.map { it.jsonObject["type"]!!.jsonPrimitive.content })
+        assertNoSecretIn(stored.toString())
     }
 
     @Test

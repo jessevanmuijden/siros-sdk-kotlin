@@ -329,6 +329,22 @@ class OpenID4xProfileTest {
     }
 
     @Test
+    fun flowCompleteResultKeepsOnlyTheDisplayMembersOfAPlainResponsesMetadata() {
+        val result = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"credentials":[{"format":"dc+sd-jwt","credential":"x"}],"credential_metadata":{"display":[{"name":"N"}],""" +
+                """"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},"claims":[],"ext":1}}""",
+        ) as JsonObject
+        val metadata = FlowCompleteResult.decode(result)!!.credentialMetadata!!
+        assertEquals(listOf("display", "claims"), metadata.members.keys.toList())
+        assertTrue(!metadata.members.toString().contains("00112233445566778899aabbccddeeff"))
+        assertNull(FlowCompleteResult.decode(JsonObject(emptyMap()))!!.credentialMetadata)
+        val malformed = kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"credentials":[{"format":"dc+sd-jwt","credential":"x","notification_id":"n1"}],"credential_metadata":"text"}""",
+        ) as JsonObject
+        assertTrue(FlowCompleteResult.decode(malformed)!!.credentialMetadata!!.malformed)
+    }
+
+    @Test
     fun flowCompleteResultWithANonBooleanEncryptedMarkerReadsItAsFalse() {
         listOf(""""true"""", "1", "null", "{}").forEach { flag ->
             val result = kotlinx.serialization.json.Json.parseToJsonElement(

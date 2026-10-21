@@ -262,7 +262,47 @@ class WalletEngineSessionTest {
     }
 
     @Test
-    fun the_engine_no_longer_relays_credential_metadata_so_a_stray_member_is_ignored() = runTest {
+    fun a_plain_completion_keeps_only_the_display_members_of_the_relayed_credential_metadata_in_order() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        session.flowComplete().test {
+            listener.onMessage(
+                webSocket,
+                """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j"}],""" +
+                    """"credential_metadata":{"claims":[{"path":["a"]}],"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},""" +
+                    """"display":[{"name":"Nym","logo":{"uri":"data:x"}}],"other.extension":{"k":1}}}""",
+            )
+            val metadata = awaitItem().credentialMetadata!!
+            assertEquals(false, metadata.malformed)
+            assertEquals(listOf("claims", "display"), metadata.members.keys.toList())
+            assertTrue(!metadata.members.toString().contains("00112233445566778899aabbccddeeff"))
+            assertEquals("ResponseCredentialMetadata(redacted)", metadata.toString())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun a_relayed_credential_metadata_that_is_not_an_object_is_the_malformed_placeholder_and_an_absent_one_is_null() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        session.flowComplete().test {
+            listOf("""[{"type":"other"}]""", """"text"""", "5").forEach { md ->
+                listener.onMessage(
+                    webSocket,
+                    """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j","notification_id":"n1"}],"credential_metadata":$md}""",
+                )
+                val m = awaitItem()
+                assertTrue(md, m.credentialMetadata!!.malformed)
+                assertEquals(md, "n1", m.credentials!!.single().notificationId)
+            }
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j"}]}""")
+            assertEquals(null, awaitItem().credentialMetadata)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun the_engine_relays_no_extension_members_so_a_stray_seed_is_ignored() = runTest {
         val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
         session.connect("app-token")
         session.flowComplete().test {
@@ -272,7 +312,8 @@ class WalletEngineSessionTest {
                     """"credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}""",
             )
             val message = awaitItem()
-            // Not decoded, so it is in no string form of the frame either.
+            // Dropped by the allowlist, so it is in no string form of the frame either.
+            assertEquals(emptySet<String>(), message.credentialMetadata!!.members.keys)
             assertTrue(!message.toString().contains("00112233445566778899aabbccddeeff"))
             assertTrue(!message.credentials.toString().contains("secret-credential"))
             cancelAndIgnoreRemainingEvents()

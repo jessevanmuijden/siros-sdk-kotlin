@@ -368,6 +368,15 @@ data class FlowCompleteMessage(
     @Serializable(with = org.siros.sdk.transport.EncryptedResponseFlagSerializer::class)
     val credentialResponseEncrypted: Boolean = false,
     /**
+     * The display-only members (`display`, `claims`) of the response-level `credential_metadata` of a PLAIN (unencrypted)
+     * issuer response, as the engine relays them. Every other member is dropped on decoding and extension content (a seed)
+     * is never carried here; it is read only from a response the wallet decrypted itself. Ignored when
+     * [credentialResponseEncrypted]. Not printed.
+     */
+    @SerialName("credential_metadata")
+    @Serializable(with = org.siros.sdk.transport.DisplayOnlyCredentialMetadataSerializer::class)
+    val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
+    /**
      * `redacted_members`: on a REPLAYED or resumed completion, the members that were present and withheld (from
      * [refreshToken], [dpopJwk], [dpopKeyId]); the credentials are kept. A listed member is NOT RECOVERABLE: never invented or reused from an earlier flow, and renewal
      * of that issuance is unavailable (the client re-issues).
