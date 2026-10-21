@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A refusal at the sign step is answered with `sign_response` `error_code` SIGN_REFUSED
   (`WalletEngineSession.sendSignRefusal`, wmp spec 3.2.6): the engine ends signing at once and
   tells the verifier `access_denied` with no description.
+  The engine's own trust decision (`verifier_trust_evaluated` progress) is ingested; a request is
+  answered only for the signed client-id schemes (x509_san_dns, x509_san_uri, x509_hash); what is
+  proved is the store's current credential, and a cancelled or ended flow stops a pending signing.
   The circuit catalog's `proofSystem` field is the identity offered to verifiers
   (`ZkCircuitDescriptor.proofSystem`); entries without it are not offered for `zkp_req`.
 - **Holder-generated pseudonym commitment (`org.siros.psc`) in the OpenID4VCI

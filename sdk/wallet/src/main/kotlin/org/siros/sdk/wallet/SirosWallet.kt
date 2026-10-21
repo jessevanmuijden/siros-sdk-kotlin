@@ -4852,6 +4852,7 @@ class SirosWallet private constructor(
                 // Whatever this flow still sends (typically its cancellation error)
                 // must not act on a retry that starts before the socket is replaced.
                 abandonedFlowIds.add(current.flowId)
+                stopZkSigning(current.flowId, refuse = true)
                 try {
                     engineSession?.cancelFlow(current.flowId)
                 } catch (e: Exception) {
@@ -6175,6 +6176,27 @@ class SirosWallet private constructor(
         val session: WalletEngineSession,
         val generation: Int,
     )
+    /** The zkp_req signing of a flow that waits on the user (consent), so a cancelled or ended flow can stop it. */
+    private class ZkSignJob(val job: kotlinx.coroutines.Job, val messageId: String?)
+    private val zkSignJobsByFlow = java.util.concurrent.ConcurrentHashMap<String, ZkSignJob>()
+
+    /**
+     * Ends a flow's pending zkp_req signing: nothing is proved or sent for it afterwards, and (when [refuse]) the sign request it
+     * was answering is refused, which ends the engine's signing wait instead of leaving it to its timeout.
+     */
+    private fun stopZkSigning(flowId: String, refuse: Boolean) {
+        val pending = zkSignJobsByFlow.remove(flowId) ?: return
+        if (!pending.job.isActive) return
+        pending.job.cancel()
+        if (refuse) {
+            try {
+                engineSession?.sendSignRefusal(flowId, pending.messageId, "cancelled")
+            } catch (e: Exception) {
+                Timber.w("Failed to send the sign refusal for a cancelled flow (${e.javaClass.simpleName})")
+            }
+        }
+    }
+
     private val abandonedFlowIds: MutableSet<String> =
         java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
 
@@ -7185,6 +7207,12 @@ class SirosWallet private constructor(
             // The trust the engine had evaluated (read before validateAudience consumes it); the audience must be the trusted verifier.
             val trust = lastTrustResults[flowId] ?: refuse("no-trust", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.TRUST_UNAVAILABLE)
             if (!trust.trusted) refuse("trust", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NOT_TRUSTED)
+            // A trusted identity is not proof that the request was SIGNED: only the schemes whose request object is signed with the
+            // identified certificate (and which the engine verifies) are answered; redirect_uri, pre-registered and the like are not.
+            when (ClientIdScheme.parse(audience)) {
+                is ClientIdScheme.X509SanDns, is ClientIdScheme.X509SanUri, is ClientIdScheme.X509Hash -> Unit
+                else -> refuse("unsigned-scheme", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NOT_TRUSTED)
+            }
             try {
                 validateAudience(flowId, audience)
             } catch (e: WalletException) {
@@ -7224,8 +7252,11 @@ class SirosWallet private constructor(
                 state = null,
             )
             val allCreds = credentialStore.getAll()
+            // The match step cached its candidates; what is proved is what the store holds NOW: a credential deleted (or replaced) since
+            // is dropped / re-read, and a query left without a candidate is refused by the shared core.
+            val currentResults = results.map { r -> r.copy(candidates = r.candidates.mapNotNull { c -> allCreds.firstOrNull { it.id == c.id } }) }
             val answer = answerCircuitZkQueries(
-                results = results,
+                results = currentResults,
                 allCreds = allCreds,
                 selectedCredentialIds = picked,
                 buildTranscript = {
@@ -7248,6 +7279,8 @@ class SirosWallet private constructor(
                 refuse = ::refuse,
                 selectionByQuery = selectionByQuery,
             )
+            // The flow may have ended while the user was asked: nothing is recorded or sent for it then.
+            if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
             val vpToken = JsonObject(answer.tokensByQueryId.mapValues { (_, tokens) -> kotlinx.serialization.json.JsonArray(tokens) }).toString()
             recordPresentation(PresentationRecord(
                 id = randomUint32Id(),
@@ -7261,6 +7294,7 @@ class SirosWallet private constructor(
             ))
             engine.sendSignResponse(flowId, vpToken = vpToken, messageId = msg.messageId)
         } catch (e: CircuitZkEngineRefusal) {
+            if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
             // Only the step and the coarse reason are logged: never a request content, an id or a value.
             Timber.w("zkp_req request refused on the engine transport (step=${e.step}, reason=${e.reason}) for flow $flowId")
             circuitZkClientMetadataByFlow.remove(flowId)
@@ -7271,6 +7305,7 @@ class SirosWallet private constructor(
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
+            if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
             Timber.e("zkp_req presentation failed on the engine transport (${e.javaClass.simpleName}) for flow $flowId")
             circuitZkClientMetadataByFlow.remove(flowId)
             reportSignFailure(flowId, "Request not completed")
@@ -7572,7 +7607,10 @@ class SirosWallet private constructor(
                 // auth, attestation), so it is handled in its own coroutine.
                 // A zkp_req presentation (QR / same-device redirect) is answered by its own handler: the stored match results say so.
                 if (msg.action == "sign_presentation" && pendingMatchResultsByFlow[msg.flowId]?.any { CredentialUtils.isCircuitZkFormat(it.format) } == true) {
-                    scope.launch { handleCircuitZkEngineSignPresentation(engine, msg) }
+                    val job = scope.launch { handleCircuitZkEngineSignPresentation(engine, msg) }
+                    val entry = ZkSignJob(job, msg.messageId)
+                    zkSignJobsByFlow[msg.flowId] = entry
+                    job.invokeOnCompletion { zkSignJobsByFlow.remove(msg.flowId, entry) }
                     return@collect
                 }
                 if (msg.action == "sign_presentation" && !msg.params?.transactionData.isNullOrEmpty()) {
@@ -7985,6 +8023,12 @@ class SirosWallet private constructor(
                     handleTrustEvaluation(engine, msg.flowId, msg.payload!!.jsonObject)
                 }
 
+                // A trust decision the ENGINE made itself (a verifier PDP is configured, or a cached verdict): there is no handshake, so
+                // it is ingested here for the sign step. A decision the SDK evaluated for this flow (the handshake) is never replaced.
+                if (msg.payload?.jsonObject?.get("verifier_trust_evaluated")?.jsonPrimitive?.booleanOrNull == true) {
+                    ingestServerTrustDecision(msg.flowId, msg.payload!!.jsonObject)
+                }
+
                 // The server-side issuer trust report is NOT handled here: this
                 // collector and the completion collector are separate channels,
                 // so the engine session attaches the report to the flow's
@@ -8086,6 +8130,7 @@ class SirosWallet private constructor(
                 noteFlowId(msg.flowId)
                 Timber.i("Flow ${msg.flowId} complete" + (flowContinuations?.get(msg.flowId)?.let { " (the resumption of flow $it)" } ?: ""))
                 terminatedFlowIds.add(msg.flowId)
+                stopZkSigning(msg.flowId, refuse = false)
                 clearFlowMatchState(msg.flowId)
 
                 // The issuer's response-level credential_metadata (a secret_seed, say) is checked once for the
@@ -8537,6 +8582,7 @@ class SirosWallet private constructor(
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
                 terminatedFlowIds.add(fid)
+                stopZkSigning(fid, refuse = false)
                 clearFlowMatchState(fid)
                 pscIssuerByFlow.remove(fid)
                 val redirectUri = msg.error.details?.get("redirect_uri")?.jsonPrimitive?.contentOrNull
@@ -9600,6 +9646,25 @@ class SirosWallet private constructor(
             out += r to id
         }
         return out
+    }
+
+    /**
+     * Records the engine's own verifier-trust decision (`verifier_trust_evaluated` progress) as the flow's trust result: the verdict,
+     * the identity it is about (the client id the sign step's audience must equal) and the PDP's `context` when the engine relays it
+     * (the verifier ids a pseudonym needs; without it the verifier id stays unresolved and a request needing one is refused).
+     */
+    private fun ingestServerTrustDecision(flowId: String, payload: JsonObject) {
+        if (lastTrustResults.containsKey(flowId)) return
+        val trusted = payload["trusted"]?.jsonPrimitive?.booleanOrNull ?: return
+        val verifier = payload["verifier"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return
+        lastTrustResults[flowId] = TrustResult(
+            trusted = trusted,
+            framework = payload["framework"]?.jsonPrimitive?.contentOrNull,
+            reason = payload["reason"]?.jsonPrimitive?.contentOrNull,
+            entityName = payload["entity_name"]?.jsonPrimitive?.contentOrNull,
+            identifier = verifier,
+            context = payload["context"] as? JsonObject,
+        )
     }
 
     /** Drops what a flow's match step left for its sign step; called wherever a flow ends. */

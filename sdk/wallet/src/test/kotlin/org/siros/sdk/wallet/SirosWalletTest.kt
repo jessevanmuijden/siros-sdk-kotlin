@@ -6588,6 +6588,7 @@ class SirosWalletTest {
         val sign: MutableSharedFlow<SignRequestMessage>,
         val progress: MutableSharedFlow<FlowProgressMessage>,
         val complete: MutableSharedFlow<FlowCompleteMessage>,
+        val errors: MutableSharedFlow<FlowErrorMessage>,
         val metadataSeen: MutableList<JsonObject?>,
     )
 
@@ -6597,12 +6598,16 @@ class SirosWalletTest {
         flagOn: Boolean = true,
         offersCircuit: Boolean = true,
         credentials: List<StoredCredential>? = null,
+        /** False: nothing is put into the wallet's private state; the engine's own trust progress has to do it. */
+        seedTrust: Boolean = true,
+        clientId: String = redirectClientId,
     ): EngineCzk {
         val match = MutableSharedFlow<MatchRequestMessage>()
         val sign = MutableSharedFlow<SignRequestMessage>()
         val progress = MutableSharedFlow<FlowProgressMessage>()
         val complete = MutableSharedFlow<FlowCompleteMessage>()
-        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete)
+        val errors = MutableSharedFlow<FlowErrorMessage>()
+        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete, flowErrors = errors)
         every { engine.cancelFlow(any()) } just runs
         every { engine.sendSignRefusal(any(), any(), any()) } just runs
         every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
@@ -6612,12 +6617,14 @@ class SirosWalletTest {
         invokeConnectEngine(s.wallet, "app-token")
         advanceUntilIdle()
         // What the engine's trust step left for this flow.
-        @Suppress("UNCHECKED_CAST")
-        (getField(s.wallet, "lastTrustResults") as MutableMap<String, TrustResult>)["f1"] = TrustResult(
-            trusted = trusted, identifier = redirectClientId, entityName = "Example RP",
-            context = buildJsonObject { putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId) }) } },
-        )
-        return EngineCzk(s, engine, match, sign, progress, complete, seen)
+        if (seedTrust) {
+            @Suppress("UNCHECKED_CAST")
+            (getField(s.wallet, "lastTrustResults") as MutableMap<String, TrustResult>)["f1"] = TrustResult(
+                trusted = trusted, identifier = clientId, entityName = "Example RP",
+                context = buildJsonObject { putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId) }) } },
+            )
+        }
+        return EngineCzk(s, engine, match, sign, progress, complete, errors, seen)
     }
 
     private val redirectQuery = Json.parseToJsonElement(
@@ -6803,6 +6810,120 @@ class SirosWalletTest {
         val matches = slot<List<CredentialMatch>>()
         verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
         assertEquals(listOf("q1" to "1", "q2" to "2"), matches.captured.map { it.credentialQueryId to it.credentialId })
+    }
+
+    private fun serverTrust(trusted: Boolean, withContext: Boolean = true) = FlowProgressMessage(
+        flowId = "f1", step = "trust_evaluated",
+        payload = buildJsonObject {
+            put("verifier_trust_evaluated", true)
+            put("verifier", redirectClientId)
+            put("trusted", trusted)
+            put("framework", "etsi-tl")
+            if (withContext) putJsonObject("context") {
+                putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId) }) }
+            }
+        },
+    )
+
+    @Test
+    fun circuitZkRedirect_aTrustDecisionTheEngineMadeItself_isIngestedAndAnswered_withoutSeedingPrivateState() = runTest(dispatcher) {
+        val e = engineCzk(seedTrust = false)
+        e.progress.emit(serverTrust(trusted = true))
+        advanceUntilIdle()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        assertEquals(1, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_anEngineDecisionThatDistrustsTheVerifier_orCarriesNoVerifierIds_isNeverProved() = runTest(dispatcher) {
+        for ((name, msg) in listOf("untrusted" to serverTrust(trusted = false), "no verifier ids" to serverTrust(trusted = true, withContext = false))) {
+            val e = engineCzk(seedTrust = false)
+            e.progress.emit(msg)
+            advanceUntilIdle()
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(redirectSign())
+            advanceUntilIdle()
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+            assertEquals(name, 0, e.s.prover.calls)
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_aTrustedIdentityOfAnUnsignedScheme_isRefused() = runTest(dispatcher) {
+        val client = "redirect_uri:https://rp.example/"
+        val e = engineCzk(clientId = client)
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign(audience = client))
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        assertEquals(0, e.s.prover.calls)
+        assertTrue(e.s.consents.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aCredentialDeletedBetweenMatchAndSign_isNeverProved() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.matchOnce()
+        advanceUntilIdle()
+        val store = getField(e.s.wallet, "credentialStore") as CredentialStore
+        store.delete(1L)
+        store.delete(2L)
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aFlowThatEndsWhileConsentIsPending_provesNothingAndSendsNothing() = runTest(dispatcher) {
+        for (ending in listOf("error", "complete")) {
+            val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            val e = engineCzk(consent = { gate.await() })
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(redirectSign())
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            assertEquals(1, e.s.consents.size)   // the user is being asked
+            if (ending == "error") e.errors.emit(FlowErrorMessage(flowId = "f1", error = FlowError(code = "FLOW_TIMEOUT", message = "timeout")))
+            else e.complete.emit(FlowCompleteMessage(flowId = "f1"))
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            gate.complete(true)   // a late approval
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            assertEquals(ending, 0, e.s.prover.calls)
+            assertTrue(ending, e.s.history.isEmpty())
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_cancellingTheFlowWhileConsentIsPending_refusesTheSignRequestOnceAndProvesNothing() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        @Suppress("UNCHECKED_CAST")
+        (getField(e.s.wallet, "_state") as MutableStateFlow<WalletState>).value = WalletState.FlowActive(
+            userId = "u", displayName = null, flowId = "f1", flowType = "presentation", status = "sign", credentials = emptyList(),
+        )
+        e.s.wallet.cancelCurrentFlow()
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        gate.complete(true)
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        // The pending sign request is refused (not left to the engine's timeout), and the late approval does nothing.
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
     }
 
     @Test
@@ -10588,6 +10709,9 @@ class SirosWalletTest {
         // now discards this flow's ZK issuance preparation, so a null map
         // NPEs there.
         // Disabled by default so cache behaviour never leaks into other tests.
+        if ("zkSignJobsByFlow" !in values) {
+            values["zkSignJobsByFlow"] = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        }
         if ("lastTrustResults" !in values) {
             values["lastTrustResults"] = mutableMapOf<String, TrustResult>()
         }
