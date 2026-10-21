@@ -269,21 +269,40 @@ internal object CircuitZkMatching {
         clientMetadata: JsonObject?,
         credentials: List<StoredCredential>,
         support: CircuitZkSupport,
-    ): Pair<CircuitZkPlan?, List<StoredCredential>> {
+    ): Pair<CircuitZkPlan?, List<StoredCredential>> = evaluate(query, clientMetadata, credentials, support).let { it.plan to it.matched }
+
+    /** What matching one query found: the plan, the matching credentials, and (when none match) the stable [refusal] code. */
+    internal class Evaluation(val plan: CircuitZkPlan?, val matched: List<StoredCredential>, val refusal: String?)
+
+    /** Stable, content-free reasons a `zkp_req` query matches nothing; see [Evaluation.refusal]. */
+    internal object Refusal {
+        const val INVALID_REQUEST = "invalid-request"
+        const val REQUEST_REJECTED = "request-rejected"
+        const val NO_CIRCUIT = "no-circuit"
+        const val SOURCE_FORMAT = "source-format"
+        const val NO_CREDENTIAL = "no-credential"
+    }
+
+    fun evaluate(
+        query: JsonObject,
+        clientMetadata: JsonObject?,
+        credentials: List<StoredCredential>,
+        support: CircuitZkSupport,
+    ): Evaluation {
         val plan = try {
             when (val r = support.planner.plan(query, clientMetadata)) {
                 is CircuitZkPlanResult.Plan -> r.plan
-                CircuitZkPlanResult.InvalidRequest -> return null to emptyList()
+                CircuitZkPlanResult.InvalidRequest -> return Evaluation(null, emptyList(), Refusal.INVALID_REQUEST)
             }
         } catch (e: Exception) {
-            return null to emptyList()
+            return Evaluation(null, emptyList(), Refusal.INVALID_REQUEST)
         }
         val verdict = try {
             support.validator.validate(plan)
         } catch (e: Exception) {
-            return plan to emptyList()
+            return Evaluation(plan, emptyList(), Refusal.REQUEST_REJECTED)
         }
-        if (verdict !is CircuitZkVerdict.Ok) return plan to emptyList()
+        if (verdict !is CircuitZkVerdict.Ok) return Evaluation(plan, emptyList(), Refusal.REQUEST_REJECTED)
 
         // A doctype is served when some circuit fits the plan for it; a circuit the matcher
         // constrains is asked per doctype (never assumed unrestricted).
@@ -296,14 +315,16 @@ internal object CircuitZkMatching {
         // The attestation a proof is made over must be of the request's `source_format`. Only `mso_mdoc` attestations are
         // stored here (`bbs_cd` is held), so a request for any other source format is not offered, never answered with a
         // credential of another format.
-        if (plan.sourceFormat != "mso_mdoc") return plan to emptyList()
+        if (plan.sourceFormat != "mso_mdoc") return Evaluation(plan, emptyList(), Refusal.SOURCE_FORMAT)
         val matched = credentials.filter { cred ->
             cred.format.equals("mso_mdoc", ignoreCase = true) && run {
                 val docType = CredentialUtils.parseMdocDocument(cred)?.docType ?: cred.metadata?.doctype
                 docType != null && docType in docTypes && (wantedDoctype == null || wantedDoctype == docType)
             }
         }
-        return plan to matched
+        val wanted = wantedDoctype
+        val circuitServes = if (wanted == null) docTypes.isNotEmpty() else wanted in docTypes
+        return Evaluation(plan, matched, if (matched.isNotEmpty()) null else if (!circuitServes) Refusal.NO_CIRCUIT else Refusal.NO_CREDENTIAL)
     }
 
     /**

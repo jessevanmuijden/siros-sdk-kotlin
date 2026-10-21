@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zkp_req presentations run one at a time (a consumed copy is never presented twice), and a flow, connection or session that ends while the user is asked proves nothing.
   The PDP's verifier ids are mapped in ONE place (`AuthZENSource`) for every trust path: `semantic` (must carry `semantic_id:`)
   verbatim, `x509_san_dns` (go-trust returns the bare A-label) as `x509_san_dns:<dns>`; any other type is never used.
+  A `zkp_req` request the wallet cannot answer is refused with its own stable, content-free code (logged) and a reason the user may
+  be shown: `disabled`, `no-circuit`, `no-credential`, `predicate-unsatisfied`, `no-verifier-id` (checked at match time from the
+  flow's trust result), and the generic ones for an unreadable, mixed or unsupported request.
   The engine's own trust decision (`verifier_trust_evaluated` progress) is ingested; a request is
   answered only for the signed client-id schemes (x509_san_dns, x509_san_uri, x509_hash); what is
   proved is the store's current credential, and a cancelled or ended flow stops a pending signing.

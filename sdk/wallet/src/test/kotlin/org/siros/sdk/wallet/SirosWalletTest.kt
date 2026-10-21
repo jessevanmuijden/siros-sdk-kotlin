@@ -7085,6 +7085,38 @@ class SirosWalletTest {
         }
     }
 
+    private fun queryForDoctype(doctype: String) = Json.parseToJsonElement(
+        """{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"$doctype"},"_req":[{"fn_id":"pseudonym","return":"n","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
+    )
+
+    @Test
+    fun circuitZkRedirect_eachWayARequestCannotBeAnswered_hasItsOwnCodeAndUserMeaningfulReason() = runTest(dispatcher) {
+        timber.log.Timber.plant(czkTree)
+        try {
+            val cases = listOf<Triple<String, String, suspend () -> Pair<EngineCzk, kotlinx.serialization.json.JsonElement>>>(
+                Triple("disabled", "not enabled") { engineCzk(flagOn = false) to redirectQuery },
+                Triple("no-circuit", "no proof circuit") { engineCzk() to queryForDoctype("org.example.other") },
+                Triple("no-credential", "holds no credential") { engineCzk(credentials = emptyList()) to redirectQuery },
+                Triple("no-verifier-id", "did not identify itself") { engineCzk(seedTrust = false).also { it.progress.emit(serverTrust(trusted = true, withContext = false)) } to redirectQuery },
+            )
+            for ((code, text, make) in cases) {
+                czkLogs.clear()
+                val (e, query) = make()
+                advanceUntilIdle()
+                e.matchOnce(query)
+                advanceUntilIdle()
+                val reason = slot<String>()
+                verify(exactly = 1) { e.engine.sendCredentialsMatched("f1", emptyList(), capture(reason)) }
+                assertTrue("$code: ${reason.captured}", reason.captured.contains(text))
+                // The code is logged (and only the code: nothing of the request).
+                assertTrue(code, czkLogs.any { it.contains("code=$code") })
+                verify(exactly = 0) { e.engine.sendFlowAction("f1", "consent", any()) }
+            }
+        } finally {
+            timber.log.Timber.uproot(czkTree)
+        }
+    }
+
     @Test
     fun circuitZkRedirect_aReferenceToAnUnknownQuery_isRefused() = runTest(dispatcher) {
         val e = engineCzk()

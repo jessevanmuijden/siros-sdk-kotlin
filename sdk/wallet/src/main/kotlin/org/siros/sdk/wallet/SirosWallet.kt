@@ -7930,9 +7930,9 @@ class SirosWallet private constructor(
                     // did, when this transport could not prove - would
                     // silently turn every engine-relayed ZK request into "no
                     // matching credential".
-                    val zkPlan = planCircuitZkMatches(msg.flowId, dcqlOutput, clientMetadata)
+                    val zkPlan = planCircuitZkMatches(msg.flowId, dcqlOutput, clientMetadata, lastTrustResults[msg.flowId]?.identifier)
                     if (zkPlan?.refusal != null) {
-                        Timber.i("Match request for flow ${msg.flowId}: a zkp_req request that cannot be answered; not answered")
+                        Timber.i("Match request for flow ${msg.flowId}: a zkp_req request that cannot be answered; not answered (code=${zkPlan.code})")
                         engine.sendMatchResponse(msg.flowId, emptyList(), zkPlan.refusal)
                         engine.sendCredentialsMatched(msg.flowId, emptyList(), zkPlan.refusal)
                         return@collect
@@ -9660,43 +9660,65 @@ class SirosWallet private constructor(
     private fun sha256Hex(bytes: ByteArray): String =
         java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-    /** The outcome of planning a request's `zkp_req` queries: the pre-checked results, or the reason the whole request is refused. */
-    private class CircuitZkMatchPlan(val matchResults: List<CredentialMatcher.MatchResult>?, val refusal: String?)
+    /**
+     * The outcome of planning a request's `zkp_req` queries: the pre-checked results, or why the whole request is refused: a stable,
+     * content-free [code] (logged; never a request content) and the [refusal] text the user may be shown.
+     */
+    private class CircuitZkMatchPlan(val matchResults: List<CredentialMatcher.MatchResult>?, val code: String?, val refusal: String?)
+
+    private fun zkRefused(code: String): CircuitZkMatchPlan = CircuitZkMatchPlan(null, code, when (code) {
+        "disabled" -> "Zero-knowledge presentations are not enabled in this wallet"
+        "no-circuit" -> "This wallet has no proof circuit this verifier accepts"
+        "no-credential" -> "This wallet holds no credential for this request"
+        "predicate-unsatisfied" -> "No credential satisfies this request"
+        "no-verifier-id" -> "The verifier did not identify itself in a form this wallet can use"
+        else -> "This request cannot be answered by this wallet"
+    })
 
     /**
      * Shared by both engine collectors that match a request (`credential_selection` progress and `match_request`): null for a request
      * with no `zkp_req` query. A `zkp_req` request is answered whole or refused whole, never partly by its ordinary queries: it must
-     * be only `zkp_req` queries, every one readable and planned, with the circuit_zk support turned on, and every one answerable by
-     * a credential whose predicates definitely hold (the local pre-check). The verifier's `client_metadata` is cached for the
-     * sign step only when the request is accepted, and dropped with the flow's other match state ([clearFlowMatchState]).
+     * be only `zkp_req` queries, every one readable and planned, with the circuit_zk support turned on, every one answerable by a
+     * credential whose predicates definitely hold (the local pre-check), and, when the plan needs a verifier id, with one the wallet
+     * can resolve from the flow's trust result. Each refusal has its own stable code (`disabled`, `unreadable-query`,
+     * `mixed-request`, `invalid-request`, `request-rejected`, `source-format`, `no-circuit`, `no-credential`,
+     * `predicate-unsatisfied`, `no-verifier-id`). The verifier's `client_metadata` is cached for the sign step only when the request
+     * is accepted, and dropped with the flow's other match state ([clearFlowMatchState]).
      */
-    private fun planCircuitZkMatches(flowId: String, output: CredentialMatcher.DcqlMatchOutput, clientMetadata: JsonObject?): CircuitZkMatchPlan? {
+    private suspend fun planCircuitZkMatches(
+        flowId: String,
+        output: CredentialMatcher.DcqlMatchOutput,
+        clientMetadata: JsonObject?,
+        verifierClientId: String? = null,
+    ): CircuitZkMatchPlan? {
         if (!output.hasCircuitZkQuery) return null
-        val shapeOk = circuitZkSupport != null && output.unparsedQueryCount == 0 && output.queryResults.isNotEmpty() &&
-            output.queryResults.all { CredentialUtils.isCircuitZkFormat(it.format) && it.circuitZkPlan != null }
-        if (!shapeOk) return CircuitZkMatchPlan(null, "This request cannot be answered by this wallet")
+        if (circuitZkSupport == null) return zkRefused("disabled")
+        if (output.unparsedQueryCount != 0 || output.queryResults.isEmpty()) return zkRefused("unreadable-query")
+        if (output.queryResults.any { !CredentialUtils.isCircuitZkFormat(it.format) }) return zkRefused("mixed-request")
+        output.queryResults.firstOrNull { it.circuitZkPlan == null }?.let { return zkRefused(it.circuitZkRefusal ?: "invalid-request") }
+        output.queryResults.firstOrNull { it.candidates.isEmpty() }?.let { return zkRefused(it.circuitZkRefusal ?: "no-credential") }
         val results = output.queryResults.map { r ->
             val plan = r.circuitZkPlan
             if (plan == null) r else r.copy(candidates = r.candidates.filter { circuitZkPredicatesHold(plan, it) })
         }
-        if (results.any { it.candidates.isEmpty() }) return CircuitZkMatchPlan(null, "No credential satisfies this request")
-        clientMetadata?.let { circuitZkClientMetadataByFlow[flowId] = it }
-        return CircuitZkMatchPlan(results, null)
-    }
-
-    /**
-     * The credential for EACH query of a zkp_req request, from the credentials the user picked (the picker reports plain ids): a pick that
-     * is a candidate of the query answers it, preferring the pick at the query's own position, and one credential may answer several
-     * queries. Null when some query has no pick: the request is then not answerable and no selection is sent.
-     */
-    private fun circuitZkSelectionByQuery(results: List<CredentialMatcher.MatchResult>, selectedIds: List<Long>): List<Pair<CredentialMatcher.MatchResult, Long>>? {
-        val out = ArrayList<Pair<CredentialMatcher.MatchResult, Long>>()
-        for ((i, r) in results.withIndex()) {
-            val own = selectedIds.filter { id -> r.candidates.any { it.id == id } }
-            val id = (if (selectedIds.size == results.size && selectedIds[i] in own) selectedIds[i] else own.firstOrNull()) ?: return null
-            out += r to id
+        if (results.any { it.candidates.isEmpty() }) return zkRefused("predicate-unsatisfied")
+        // A plan that needs a verifier id (asked of its function handlers, as at the sign step) must have one the wallet can resolve
+        // from what the engine's trust step reported; unknown trust (none yet) is left to the sign step.
+        val trust = lastTrustResults[flowId]
+        val registry = verifierIdRegistry
+        if (trust != null && registry != null && verifierClientId != null) {
+            val needsId = results.any { r -> r.circuitZkPlan?.functions.orEmpty().any { f -> circuitZkHandlers[f.id]?.needsVerifierId(f) == true } }
+            if (needsId) {
+                val request = org.siros.sdk.wallet.dcapi.DCAPIRequest(
+                    clientId = verifierClientId, responseMode = "direct_post.jwt", nonce = "", dcqlQuery = null,
+                    clientMetadata = clientMetadata, protocol = "openid4vp-redirect", state = null,
+                )
+                val resolved = try { registry.resolve(VerifierIdContext(request, trust, "")) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { null }
+                if (resolved == null) return zkRefused("no-verifier-id")
+            }
         }
-        return out
+        clientMetadata?.let { circuitZkClientMetadataByFlow[flowId] = it }
+        return CircuitZkMatchPlan(results, null, null)
     }
 
     /**
@@ -9717,6 +9739,21 @@ class SirosWallet private constructor(
             identifier = verifier,
             context = payload["context"] as? JsonObject,
         )
+    }
+
+    /**
+     * The credential for EACH query of a zkp_req request, from the credentials the user picked (the picker reports plain ids): a pick that
+     * is a candidate of the query answers it, preferring the pick at the query's own position, and one credential may answer several
+     * queries. Null when some query has no pick: the request is then not answerable and no selection is sent.
+     */
+    private fun circuitZkSelectionByQuery(results: List<CredentialMatcher.MatchResult>, selectedIds: List<Long>): List<Pair<CredentialMatcher.MatchResult, Long>>? {
+        val out = ArrayList<Pair<CredentialMatcher.MatchResult, Long>>()
+        for ((i, r) in results.withIndex()) {
+            val own = selectedIds.filter { id -> r.candidates.any { it.id == id } }
+            val id = (if (selectedIds.size == results.size && selectedIds[i] in own) selectedIds[i] else own.firstOrNull()) ?: return null
+            out += r to id
+        }
+        return out
     }
 
     /** Drops what a flow's match step left for its sign step; called wherever a flow ends. */
@@ -9774,7 +9811,7 @@ class SirosWallet private constructor(
                 val zkPlan: CircuitZkMatchPlan?
                 val matchResults = if (dcqlQuery != null) {
                     val output = CredentialMatcher.matchDcql(dcqlQuery, allCreds, zkSystemIds, circuitZkSupport, clientMetadata)
-                    zkPlan = planCircuitZkMatches(flowId, output, clientMetadata)
+                    zkPlan = planCircuitZkMatches(flowId, output, clientMetadata, verifierInfo?.get("client_id")?.jsonPrimitive?.contentOrNull)
                     zkPlan?.matchResults ?: output.queryResults
                 } else {
                     zkPlan = null
@@ -9816,7 +9853,7 @@ class SirosWallet private constructor(
                 // declining, and is reported as one below.
                 if (zkPlan?.refusal != null) {
                     // A zkp_req request is answered whole or not at all; the verifier gets the engine's no-match answer.
-                    Timber.i("Credential selection for flow $flowId: a zkp_req request that cannot be answered; not answered")
+                    Timber.i("Credential selection for flow $flowId: a zkp_req request that cannot be answered; not answered (code=${zkPlan.code})")
                     engine.sendCredentialsMatched(flowId, emptyList(), zkPlan.refusal)
                     return@launch
                 }
