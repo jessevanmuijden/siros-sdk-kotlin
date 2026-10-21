@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`).** The engine
+  session now matches, proves and answers `zkp_req` requests: the verifier's `client_metadata`
+  (new optional field of `match_request` and `sign_request` params) reaches the matcher, and the
+  proof is bound to the redirect OpenID4VPHandover over `[client id, nonce, JWK thumbprint,
+  response_uri]`. A missing thumbprint, response_uri, trust result or consent handler, an
+  untrusted verifier, a mismatched audience or `transaction_data` is refused and the flow
+  cancelled. The answering core is shared with the DC API path (`answerCircuitZkQueries`).
+  The circuit catalog's `proofSystem` field is the identity offered to verifiers
+  (`ZkCircuitDescriptor.proofSystem`); entries without it are not offered for `zkp_req`.
 - **User consent for `circuit_zk` presentations.** One `PresentationConsentHandler`
   (a sibling of `TransactionConsentHandler`, not coupled to `transactionDataEnabled`;
   wallet-level `SirosWallet.presentationConsentHandler`, per request through a new

@@ -7850,7 +7850,8 @@ class SirosWallet private constructor(
                                 credentialId = cred.id.toString(),
                                 format = cred.format,
                                 vct = CredentialUtils.vctOf(cred),
-                                availableClaims = extractAvailableClaims(cred),
+                                // A zkp_req query discloses no claims (the engine's consent check would refuse any): offer none.
+                                availableClaims = if (matchResultByCredentialId[id]?.format?.let { CredentialUtils.isCircuitZkFormat(it) } == true) null else extractAvailableClaims(cred),
                             )
                         }
                     }

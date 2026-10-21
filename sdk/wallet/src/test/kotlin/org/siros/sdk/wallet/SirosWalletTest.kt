@@ -6369,6 +6369,8 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
         assertEquals(listOf("1"), matches.captured.map { it.credentialId })
         assertEquals(listOf("q"), matches.captured.map { it.credentialQueryId })
+        // A zkp_req match advertises no claim names (the engine would authorize none, and a consent check would refuse any).
+        assertEquals(listOf<List<String>?>(null), matches.captured.map { it.availableClaims })
 
         e.sign.emit(redirectSign())
         advanceUntilIdle()
