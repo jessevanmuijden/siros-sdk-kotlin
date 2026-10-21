@@ -7,7 +7,7 @@ import org.siros.sdk.credentials.UnsupportedSchemaVersionException
 import org.siros.sdk.credentials.UnsupportedSchemaVersionException.Kind
 
 /**
- * The WalletStateContainer schema versions this SDK implements (privatedata-spec 2.8, section 6).
+ * The WalletStateContainer schema versions this SDK implements (privatedata-spec 3.0, section 6).
  *
  * The SDK holds `S` as a snapshot and carries `events` through untouched; it neither folds nor
  * merges events and emits none. What it must do is know when it is about to rewrite something it

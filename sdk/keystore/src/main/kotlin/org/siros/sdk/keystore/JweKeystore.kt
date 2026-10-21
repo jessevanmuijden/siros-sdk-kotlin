@@ -989,7 +989,7 @@ class JweKeystore(
         requireUnlocked()
         val currentMainKey = mainKey!!
 
-        // privatedata-spec 2.8 section 6: never rewrite a version or event type this
+        // privatedata-spec 3.0 section 6: never rewrite a version or event type this
         // SDK does not implement. Thrown BEFORE anything is built or stored, so the
         // caller's stored container (and the backend's) stays exactly as it was.
         PrivateDataSchema.rewriteBlocker(preservedWalletState)?.let { throw it }

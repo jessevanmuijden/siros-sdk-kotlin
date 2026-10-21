@@ -7,7 +7,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 
 /**
- * The privatedata-spec 2.8 round-trip vectors carry placeholder events
+ * The privatedata-spec 2.8/3.0 round-trip vectors carry placeholder events
  * (`{"type":"credential-added","credentialId":"..."}`: no `schemaVersion`, a type no schema version defines),
  * yet expect an unchanged rewrite. Spec 2.8 section 6 requires a reader to REFUSE to rewrite such a
  * container, so the two cannot both hold (see PrivateDataSchemaV4Test.vectorPlaceholderEventsAreRefused).
@@ -28,6 +28,10 @@ internal fun JsonObject.withRealEvents(): JsonObject {
         )
         return JsonObject(plaintext + ("events" to real))
     }
+    // Only the older round-trip vectors have placeholder events; the schema-version-* and extensions-*
+    // vectors use real events and some of them test exactly the refusal of those.
+    val id = (this["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+    if (id.startsWith("schema-version-") || id.startsWith("extensions-")) return this
     var out = this
     (out["inputs"] as? JsonObject)?.let { inputs ->
         (inputs["plaintextState"] as? JsonObject)?.let { out = JsonObject(out + ("inputs" to JsonObject(inputs + ("plaintextState" to fix(it))))) }

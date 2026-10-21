@@ -1,9 +1,9 @@
 vectors.jsonl, fixtures/ and edge-cases/ are VERBATIM copies of test-vectors/ of
-sirosfoundation/privatedata-spec pull request #9 (SPEC 2.8, S.schemaVersion 4, extensions and set_extension):
+sirosfoundation/privatedata-spec pull request #9 (SPEC 3.0, S.schemaVersion 4, extensions and set_extension):
 
   source ref    : refs/pull/9/head
-  source commit : 901a9a132c27471e8b89467667c3221fa3e91d28
-  vectors.jsonl : all 23 lines, sha256 50e8f8bd53372ea3e6339a5a3c92609a71407c6e979c2392b5bed60641f73faf
+  source commit : 8ca88606d44b1f580781d3c5bfd20bfba8b4d9c8
+  vectors.jsonl : all 29 lines, sha256 45baed8e08b8643c6bd427bedbbe8fbea6e67ebe181383eee19b17584a02b4e4
   fixtures/ and edge-cases/ (referenced by the vectors; see PrivateDataSchemaV4Test):
     eae8b4f24be6c3a9c2d66a43ebc9e7f639164163e8af0b28bd3f60da8602d2eb  fixtures/legacy-v1-symmetric.json
     9ec743c87c8f272a2dc8d824e7bba9ef1c6f5070cf6edac3e793ccc854ae2f56  fixtures/metadata-preservation.json
@@ -20,7 +20,7 @@ and every digest here AND in the tests that pin them (CredentialMetadataKeystore
 derived-secrets.json is a VERBATIM copy of test-vectors/derived-secrets.json of the same repository at
 the merge commit of pull request #8 (SPEC 2.7, private_seed per issuer, label org.siros.private_seed/v2):
 
-  source commit : 1b796d2b9043fff890fd059f47c8b51382d37ff0 (main); unchanged at 901a9a1
+  source commit : 1b796d2b9043fff890fd059f47c8b51382d37ff0 (main); unchanged at 8ca8860
   sha256        : fdcdb5f01be080adaed1dc7a9f7c4bc9c9080322a92f764bc6a4b0a961209d2c
 
 PrivateSeedTest fails if the file no longer matches the hash above.

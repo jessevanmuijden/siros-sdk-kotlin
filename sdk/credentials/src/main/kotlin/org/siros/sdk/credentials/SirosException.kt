@@ -110,7 +110,7 @@ class KeystoreException(
 
 /**
  * Raised when the private-data container carries a version this SDK does not implement, so it
- * REFUSES to rewrite it (privatedata-spec 2.8, section 6): rewriting would drop or corrupt what a
+ * REFUSES to rewrite it (privatedata-spec 3.0, section 6): rewriting would drop or corrupt what a
  * newer (or older, unmigrated) client wrote. It is not a failed merge and not a corrupt container;
  * nothing was changed, nothing was uploaded, and the remedy is to update the SDK (or, for
  * [Kind.STATE_VERSION] below 3, to open the wallet once in a client that migrates it).

@@ -8,8 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Private data: `S.schemaVersion` 4** (privatedata-spec 2.8,
-  https://github.com/sirosfoundation/privatedata-spec/pull/9 at 901a9a1). `JweKeystore`
+- **Private data: `S.schemaVersion` 4** (privatedata-spec 3.0,
+  https://github.com/sirosfoundation/privatedata-spec/pull/9 at 8ca8860). `JweKeystore`
   now writes `S.schemaVersion` 4 (it wrote 3). A version 3 container it rewrites is
   migrated by that number alone; everything else is carried through unchanged, including
   unknown members of `S`, of credential entries and of `metadata` entries. `S.credentials[].metadata`
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so event stamping and the ETag/`If-Match` handling are unchanged.
 - **Breaking for clients still on version 3 only:** wallet-frontend (and older SDKs) that do not
   implement version 4 will refuse to rewrite a container this SDK has rewritten, until updated.
-- The vendored privatedata-spec vectors are re-copied verbatim from 901a9a1 (with the fixtures
+- The vendored privatedata-spec vectors are re-copied verbatim from 8ca8860 (with the fixtures
   they reference); `vectors.PROVENANCE.txt` records the commit and digests.
 
 ### Added

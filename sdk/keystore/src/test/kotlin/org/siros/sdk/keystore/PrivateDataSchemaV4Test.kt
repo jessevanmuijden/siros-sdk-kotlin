@@ -30,7 +30,7 @@ import org.siros.sdk.credentials.UnsupportedSchemaVersionException.Kind
 import java.security.MessageDigest
 
 /**
- * privatedata-spec 2.8 (S.schemaVersion 4), section 6: version stamping, migration, and the
+ * privatedata-spec 3.0 (S.schemaVersion 4), section 6: version stamping, migration, and the
  * refusal to rewrite what this SDK does not implement. The vectors have no cases for these
  * rules, so they are constructed here. Also pins the vendored vector files to the digests in
  * `vectors.PROVENANCE.txt`.
@@ -162,7 +162,7 @@ class PrivateDataSchemaV4Test {
     @Test
     fun vendoredFilesMatchTheDigestsInTheProvenanceFile() {
         val provenance = resource("vectors.PROVENANCE.txt").toString(Charsets.UTF_8)
-        assertTrue(provenance.contains("901a9a132c27471e8b89467667c3221fa3e91d28"))
+        assertTrue(provenance.contains("8ca88606d44b1f580781d3c5bfd20bfba8b4d9c8"))
         val files = listOf(
             "vectors.jsonl", "fixtures/legacy-v1-symmetric.json", "fixtures/metadata-preservation.json",
             "fixtures/multi-passkey-v3.json", "fixtures/single-credential-v3.json",
@@ -174,25 +174,66 @@ class PrivateDataSchemaV4Test {
         }
     }
 
+    // ── the spec's schema-version vectors ─────────────────────────────
+
+    private fun inputsOf(id: String) = vector(id)["inputs"]!!.jsonObject
+    private fun expectedState(id: String) = vector(id)["expected"]!!.jsonObject["roundTripState"]!!.jsonObject
+
+    @Test
+    fun vector_unknownState() = runTest {
+        assertRefused(inputsOf("schema-version-unknown-state-001")["plaintextState"]!!.jsonObject, Kind.STATE_VERSION, 5)
+    }
+
+    @Test
+    fun vector_unknownEventVersion() = runTest {
+        assertRefused(inputsOf("schema-version-unknown-event-version-001")["plaintextState"]!!.jsonObject, Kind.EVENT_VERSION, 5, "alter_settings")
+    }
+
+    @Test
+    fun vector_unknownEventType() = runTest {
+        assertRefused(
+            inputsOf("schema-version-unknown-event-type-001")["plaintextState"]!!.jsonObject,
+            Kind.EVENT_TYPE, 4, "a_type_this_reader_does_not_know",
+        )
+        // extensions-unknown-event-001 (the merge companion): both histories' events, as one container.
+        val h = inputsOf("extensions-unknown-event-001")
+        val events = (h["historyA"]!!.jsonArray + h["historyB"]!!.jsonArray).map { it.jsonObject }
+        assertRefused(plaintext(events = events), Kind.EVENT_TYPE, 4, "a_type_this_reader_does_not_know")
+    }
+
+    @Test
+    fun vector_migrateV3() = runTest {
+        for (id in listOf("schema-version-migrate-v3-001", "schema-version-v3-legacy-members-001")) {
+            val out = decrypt(unlocked(inputsOf(id)["plaintextState"]!!.jsonObject).exportEncryptedContainer())
+            assertEquals(id, expectedState(id), out)
+        }
+    }
+
+    @Test
+    fun vector_v3WriterWritesVersion4() = runTest {
+        val v = inputsOf("schema-version-v3-writer-001")
+        val k = unlocked(v["plaintextState"]!!.jsonObject)
+        val md = v["write"]!!.jsonObject["credentialMetadata"]!!.jsonObject
+        val ext = v["write"]!!.jsonObject["setExtension"]!!.jsonObject
+        k.setCredentialMetadata(md["credentialId"]!!.jsonPrimitive.content.toLong(), md["metadata"]!!.jsonArray)
+        k.setExtensionEntry(ext["namespace"]!!.jsonPrimitive.content, ext["key"]!!.jsonPrimitive.content, ext["value"]!!.jsonPrimitive.content)
+        val out = decrypt(k.exportEncryptedContainer())
+        assertEquals(
+            vector("schema-version-v3-writer-001")["expected"]!!.jsonObject["writtenSchemaVersion"],
+            state(out)["schemaVersion"],
+        )
+        assertEquals(md["metadata"], state(out)["credentials"]!!.jsonArray[0].jsonObject["metadata"])
+        assertNotNull(state(out)["extensions"])
+        // The SDK writes S.extensions directly and appends no set_extension event (see PR notes).
+        assertEquals(inputsOf("schema-version-v3-writer-001")["plaintextState"]!!.jsonObject["events"], out["events"])
+    }
+
     // ── version stamping and migration ────────────────────────────────
 
     @Test
     fun newStateIsWrittenAtVersion4() = runTest {
         val k = JweKeystore().also { it.unlock(prf, ByteArray(0), salt, info) }
         assertEquals(JsonPrimitive(4), state(decrypt(k.exportEncryptedContainer()))["schemaVersion"])
-    }
-
-    @Test
-    fun migratingVersion3ToVersion4OnlyChangesSchemaVersion() = runTest {
-        // single-credential-v3-001 is a version 3 container as wallet-frontend writes it.
-        val v3 = plaintextOf("single-credential-v3-001")
-        assertEquals(JsonPrimitive(3), state(v3)["schemaVersion"])
-        val out = decrypt(unlocked(v3).exportEncryptedContainer())
-        // The vector's keypairs are placeholders without key material, which this SDK cannot read and
-        // does not write back (pre-existing, unrelated to versions); everything else is identical.
-        fun comparable(p: JsonObject) = JsonObject(p + ("S" to JsonObject(state(p) - "keypairs")))
-        val expected = JsonObject(v3 + ("S" to JsonObject(state(v3) + ("schemaVersion" to JsonPrimitive(4)))))
-        assertEquals(comparable(expected), comparable(out))
     }
 
     @Test
@@ -225,20 +266,6 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
-    fun metadataAndExtensionsAreOnlyEverWrittenIntoAVersion4Container() = runTest {
-        // The SDK always rewrites at version 4, so a rewrite of ANY container that holds
-        // metadata or extensions must carry schemaVersion 4 with them.
-        val k = JweKeystore().also { it.unlock(prf, ByteArray(0), salt, info) }
-        k.saveCredential(7L, """{"id":7,"format":"dc+sd-jwt","raw":"h.p.s","kid":"k1","batch_id":9,"instance_id":0}""")
-        k.setCredentialMetadata(7L, buildJsonArray { add(buildJsonObject { put("type", JsonPrimitive("t")); put("value", JsonPrimitive(1)) }) })
-        k.setExtensionEntry("org.siros.bbs", "k", "v")
-        val s = state(decrypt(k.exportEncryptedContainer()))
-        assertNotNull(s["credentials"]!!.jsonArray[0].jsonObject["metadata"])
-        assertNotNull(s["extensions"])
-        assertEquals(JsonPrimitive(4), s["schemaVersion"])
-    }
-
-    @Test
     fun vectorPlaceholderEventsAreRefused() = runTest {
         // The spec's own round-trip vectors carry events no schema version defines and no schemaVersion
         // (see SpecVectorEvents.kt); section 6 says refuse, so the verbatim vector is refused.
@@ -249,9 +276,8 @@ class PrivateDataSchemaV4Test {
     // ── refusal ───────────────────────────────────────────────────────
 
     @Test
-    fun refusesToRewriteStateVersion5ButStillReadsIt() = runTest {
+    fun aRefusedContainerCanStillBeRead() = runTest {
         val p = plaintext(version = JsonPrimitive(5), credentials = JsonArray(listOf(cred(1))))
-        assertRefused(p, Kind.STATE_VERSION, 5)
         assertEquals("data-1", unlocked(p).getAllCredentials().getValue(1L).let { json.parseToJsonElement(it).jsonObject["raw"]!!.jsonPrimitive.content })
     }
 
@@ -265,21 +291,9 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
-    fun refusesAnEventWithSchemaVersion5() = runTest {
-        assertRefused(
-            plaintext(events = listOf(event("alter_settings", JsonPrimitive(4)), event("alter_settings", JsonPrimitive(5)))),
-            Kind.EVENT_VERSION, 5, "alter_settings",
-        )
+    fun refusesAnEventWithoutASchemaVersion() = runTest {
+        // (version 5 is schema-version-unknown-event-version-001)
         assertRefused(plaintext(events = listOf(event("alter_settings", null))), Kind.EVENT_VERSION, null, "alter_settings")
-    }
-
-    @Test
-    fun refusesAnUnknownEventType() = runTest {
-        // The event of extensions-unknown-event-001's history A.
-        val unknown = vector("extensions-unknown-event-001")["inputs"]!!.jsonObject["historyA"]!!.jsonArray[0].jsonObject
-        assertRefused(plaintext(events = listOf(unknown)), Kind.EVENT_TYPE, 4, "a_type_this_reader_does_not_know")
-        // A version 4 event type spelled like a v3 one is not a way round it, nor is a missing type.
-        assertRefused(plaintext(events = listOf(JsonObject(event("x") - "type"))), Kind.EVENT_TYPE, 4, null)
     }
 
     @Test
