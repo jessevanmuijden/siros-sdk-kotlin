@@ -603,6 +603,7 @@ class WalletEngineSession(
         responseJwe: String? = null,
         error: String? = null,
         errorCode: String? = null,
+        credentialCount: Int? = null,
     ) {
         send(SignResponseMessage.serializer(), SignResponseMessage(
             flowId = flowId,
@@ -621,6 +622,7 @@ class WalletEngineSession(
             responseJwe = responseJwe,
             error = error,
             errorCode = errorCode,
+            credentialCount = credentialCount,
         ))
     }
 

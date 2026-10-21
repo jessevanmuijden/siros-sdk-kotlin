@@ -9,16 +9,27 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import org.siros.sdk.keystore.CredentialResponseKey
 import org.siros.sdk.transport.CredentialResponseEncryptionRequest
 import org.siros.sdk.transport.DeliveredResponseMetadata
 import org.siros.sdk.transport.ResponseCredentialMetadata
 
-/** The wallet could not do what the engine asked for an encrypted issuance. The message names no content. */
-internal class BlindIssuanceException(message: String) : Exception(message)
+/**
+ * The wallet could not do what the engine asked for an encrypted issuance. The message names no content.
+ * [notificationId] is the `notification_id` of a response the wallet DID decrypt but rejected, so the issuer can still be told
+ * (`credential_failure`); null when nothing could be read.
+ */
+internal class BlindIssuanceException(message: String, val notificationId: String? = null) : Exception(message)
 
-/** The only members of an opened Credential Response the engine may learn, because it must act on them. */
-internal class BlindIssuanceControl(val transactionId: String?, val interval: Int?)
+/**
+ * The only members of an opened Credential Response the engine may learn, because it must act on them: EXACTLY ONE of
+ * [credentialCount] (1..[MAX_CREDENTIAL_COUNT], credentials issued) or [transactionId] (deferred, with the optional [interval]).
+ */
+internal class BlindIssuanceControl(val credentialCount: Int?, val transactionId: String?, val interval: Int?) {
+    companion object {
+        /** The engine refuses a larger `credential_count`. */
+        const val MAX_CREDENTIAL_COUNT = 256
+    }
+}
 
 /**
  * The Credential Response(s) of one issuance as the wallet opened them: the credentials, the response-level
@@ -107,12 +118,27 @@ internal class BlindIssuance {
             (it as? JsonObject)?.let { obj -> ResponseCredentialMetadata(obj) } ?: ResponseCredentialMetadata(malformed = true)
         }
         val notificationId = (body["notification_id"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotEmpty() }
+        val transactionId = (body["transaction_id"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotEmpty() }
+        val interval = (body["interval"] as? JsonPrimitive)?.intOrNull
+        // Exactly one of credentials issued or deferred: both or neither is not a Credential Response the engine can act on.
+        // Nothing is kept for a response that is refused, and its notification_id (if any) lets the issuer be told.
+        if (transactionId != null && credentials.isNotEmpty()) {
+            throw BlindIssuanceException("The credential response carries both credentials and a transaction_id", notificationId)
+        }
+        if (transactionId == null && credentials.isEmpty()) {
+            throw BlindIssuanceException("The credential response carries neither credentials nor a transaction_id", notificationId)
+        }
+        if (credentials.size > BlindIssuanceControl.MAX_CREDENTIAL_COUNT) {
+            throw BlindIssuanceException("The credential response carries more than ${BlindIssuanceControl.MAX_CREDENTIAL_COUNT} credentials", notificationId)
+        }
         synchronized(state.opened) {
             state.opened += OpenedIssuance(credentials, metadata, notificationId, deferred)
         }
-        val transactionId = (body["transaction_id"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotEmpty() }
-        val interval = (body["interval"] as? JsonPrimitive)?.intOrNull
-        return BlindIssuanceControl(transactionId, interval)
+        return if (transactionId != null) {
+            BlindIssuanceControl(credentialCount = null, transactionId = transactionId, interval = interval)
+        } else {
+            BlindIssuanceControl(credentialCount = credentials.size, transactionId = null, interval = null)
+        }
     }
 
     /**

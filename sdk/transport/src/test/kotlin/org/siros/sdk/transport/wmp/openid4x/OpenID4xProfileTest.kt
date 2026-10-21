@@ -467,6 +467,25 @@ class OpenID4xProfileTest {
     }
 
     @Test
+    fun aDecryptAnswerCarriesExactlyOneOfCountTransactionIdOrError() = runBlocking {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { SignSubFlowResult(credentialCount = 1, transactionId = "tx") }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { SignSubFlowResult(credentialCount = 1, error = "x") }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { SignSubFlowResult(transactionId = "tx", error = "x") }
+        val profile = OpenID4xProfile(OpenID4xConfig(onSignRequest = { _, _ -> SignSubFlowResult(credentialCount = 3) }))
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+        profile.handleProgress(FlowProgressParams(wmp = WmpMeta(), flowId = "f9", step = "sign_request", payload = buildSignPayload()))
+        val params = ctx.notifications.single().second!!
+        assertEquals(JsonPrimitive(3), params["credential_count"])
+        assertNull(params["transaction_id"])
+    }
+
+    @Test
+    fun aSignResultNeverCarriesAResponseJweTogetherWithAVpToken() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { SignSubFlowResult(responseJwe = "a.b.c.d.e", vpToken = "t") }
+    }
+
+    @Test
     fun aSignResultWithAnErrorCannotCarryAResponseJwe() {
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { SignSubFlowResult(responseJwe = "h.k.i.c.t", error = "nope") }
     }

@@ -1,5 +1,5 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
-package org.siros.sdk.keystore
+package org.siros.sdk.wallet
 
 import com.nimbusds.jose.EncryptionMethod
 import com.nimbusds.jose.JWEAlgorithm
@@ -202,4 +202,76 @@ class BlindResponseEncryptionTest {
         val jwe = AuthorizationResponseEncryption.encrypt(JsonPrimitive("very-secret-vp-token"), "aud", null, publicJwk(verifier), "ECDH-ES", "A128GCM")
         assertFalse(jwe.contains("very-secret-vp-token"))
     }
+
+    @Test
+    fun theAdvertisedJwkHasExactlyTheMembersTheEngineAccepts() {
+        for (alg in algs) {
+            val jwk = CredentialResponseKey.generate(alg, "A128GCM")!!.publicJwk
+            assertEquals(setOf("kty", "crv", "x", "y", "use", "alg"), jwk.keys)
+            assertEquals(alg, jwk["alg"]!!.jsonPrimitive.content)
+        }
+    }
+
+    // ---- the engine's conformance rules for response_jwe (go-wallet-backend#471) ----
+
+    private fun jarm(alg: String, enc: String, key: JsonObject = publicJwk(verifier), vp: kotlinx.serialization.json.JsonElement = JsonPrimitive("t")) =
+        AuthorizationResponseEncryption.encrypt(vp, "aud", "s", key, alg, enc)
+
+    @Test
+    fun everyJarmResponseIsFiveNonEmptySegmentsWithTheRequestedAlgEncAndTheJwksKid() {
+        for (alg in algs) for (enc in encs) {
+            val jwe = jarm(alg, enc)
+            val seg = jwe.split(".")
+            assertEquals("$alg/$enc", 5, seg.size)
+            // The encrypted-key segment is empty only for direct ECDH-ES.
+            seg.forEachIndexed { i, v -> if (!(i == 1 && alg == "ECDH-ES")) assertTrue("$alg/$enc segment $i", v.isNotEmpty()) }
+            assertEquals("$alg/$enc", alg == "ECDH-ES", seg[1].isEmpty())
+            val header = JWEObject.parse(jwe).header
+            assertEquals(alg, header.algorithm.name)
+            assertEquals(enc, header.encryptionMethod.name)
+            assertEquals("verifier-key-1", header.keyID)
+            assertTrue(AuthorizationResponseEncryption.isConformant(jwe, alg, enc, "verifier-key-1"))
+        }
+    }
+
+    @Test
+    fun aJwkWithoutAKidYieldsAHeaderWithoutOne() {
+        val noKid = ECKeyGenerator(Curve.P_256).keyUse(KeyUse.ENCRYPTION).generate()
+        val jwe = jarm("ECDH-ES", "A128GCM", Json.parseToJsonElement(noKid.toPublicJWK().toJSONString()).jsonObject)
+        assertNull(JWEObject.parse(jwe).header.keyID)
+        assertTrue(AuthorizationResponseEncryption.isConformant(jwe, "ECDH-ES", "A128GCM", null))
+        assertFalse(AuthorizationResponseEncryption.isConformant(jwe, "ECDH-ES", "A128GCM", "invented"))
+    }
+
+    @Test
+    fun theConformanceCheckRefusesWhatTheEngineRefuses() {
+        val good = jarm("ECDH-ES+A256KW", "A128GCM")
+        fun ok(jwe: String, alg: String = "ECDH-ES+A256KW", enc: String = "A128GCM", kid: String? = "verifier-key-1") =
+            AuthorizationResponseEncryption.isConformant(jwe, alg, enc, kid)
+        assertTrue(ok(good))
+        // header alg / enc / kid differ from the request's
+        assertFalse(ok(good, alg = "ECDH-ES"))
+        assertFalse(ok(good, enc = "A256GCM"))
+        assertFalse(ok(good, kid = "another-kid"))
+        assertFalse(ok(good, kid = null))
+        // not five segments, or an empty one (the key segment is only allowed empty for direct ECDH-ES)
+        val seg = good.split(".")
+        assertFalse(ok(seg.take(4).joinToString(".")))
+        assertFalse(ok((seg + "x").joinToString(".")))
+        for (i in 0..4) assertFalse("empty segment $i", ok(seg.mapIndexed { j, v -> if (j == i) "" else v }.joinToString(".")))
+        assertFalse(ok(""))
+        assertFalse(ok(seg.mapIndexed { j, v -> if (j == 3) "$v!" else v }.joinToString(".")))
+        // direct ECDH-ES may leave the key segment empty, and only that one
+        val direct = jarm("ECDH-ES", "A128GCM")
+        assertTrue(ok(direct, alg = "ECDH-ES"))
+        // over 4 MiB
+        assertFalse(ok(good + "A".repeat(AuthorizationResponseEncryption.MAX_RESPONSE_JWE_BYTES)))
+    }
+
+    @Test
+    fun aResponseOverFourMebibytesIsNeverBuilt() {
+        val huge = JsonPrimitive("x".repeat(AuthorizationResponseEncryption.MAX_RESPONSE_JWE_BYTES))
+        assertThrows(IllegalArgumentException::class.java) { jarm("ECDH-ES", "A128GCM", vp = huge) }
+    }
 }
+

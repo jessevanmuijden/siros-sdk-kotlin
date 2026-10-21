@@ -141,8 +141,8 @@ container was sealed with - see the account registry pattern in
 - **The engine conversation and OID4VCI/OID4VP orchestration.** That is the
   `flow` module, and taking it means taking the facade. (The facade also holds the
   response-encryption keys of an issuance and builds the encrypted `direct_post.jwt` response itself, so the engine
-  never sees a credential, a delivered seed or a `vp_token`; the primitives, `CredentialResponseKey` and
-  `AuthorizationResponseEncryption` in `sdk:keystore`, are usable without it.) If a native WMP engine
+  never sees a credential, a delivered seed or a `vp_token`. That machinery is internal to `sdk:wallet`: a low-level
+  host that runs the flows itself holds its own keys.) If a native WMP engine
   ever exists it will be advertised as one more bridge capability, not bolted
   onto the low-level API.
 - **Private-data sync with go-wallet-backend.** `SirosWallet.fetchPrivateData`

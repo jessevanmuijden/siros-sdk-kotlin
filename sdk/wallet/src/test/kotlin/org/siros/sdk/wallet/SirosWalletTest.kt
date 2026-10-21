@@ -11786,6 +11786,7 @@ class SirosWalletTest {
                 action = "generate_proof",
                 params = SignRequestParams(
                     audience = "aud-1", nonce = "nonce-1",
+                    proofTypesSupported = buildJsonObject { putJsonObject("jwt") {} },
                     credentialResponseEncryption = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES+A256KW", "A128GCM", required = true),
                 ),
             )
@@ -11873,6 +11874,281 @@ class SirosWalletTest {
 
         verify(exactly = 1) {
             engine.sendSignResponse(flowId = "flow-d", messageId = "msg-d", transactionId = "tx-77", interval = 5)
+        }
+    }
+
+    @Test
+    fun legacyGenerateProof_keyOnly_returnsTheKeyAndNoProofsAndMakesNoProof() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val keystore = mockk<KeystoreManager>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to keystore,
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-key", messageId = "msg-key", action = "generate_proof",
+                // A configuration with no proof_types_supported that still wants an encrypted response.
+                params = SignRequestParams(credentialResponseEncryption = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", required = true)),
+            )
+        )
+        advanceUntilIdle()
+
+        val jwk = slot<JsonObject>()
+        verify(exactly = 1) { engine.sendSignResponse("flow-key", messageId = "msg-key", credentialResponseEncryptionJwk = capture(jwk)) }
+        assertEquals(setOf("kty", "crv", "x", "y", "use", "alg"), jwk.captured.keys)
+        assertTrue(blind.holdsKey("flow-key"))
+        // The strict keystore mock would have thrown had a proof been attempted.
+    }
+
+    @Test
+    fun legacyDecryptCredentialResponse_ofIssuedCredentials_answersWithTheCountOnly() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val jwk = blind.offer("flow-d", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-d", messageId = "msg-d", action = "decrypt_credential_response",
+                params = SignRequestParams(jwe = issuerEncrypt(jwk, "ECDH-ES", "A256GCM", issuerBody("c1", "c2").toString()), deferred = false),
+            )
+        )
+        advanceUntilIdle()
+        verify(exactly = 1) { engine.sendSignResponse(flowId = "flow-d", messageId = "msg-d", credentialCount = 2) }
+    }
+
+    @Test
+    fun legacyDecryptCredentialResponse_aResponseTheWalletReadButRejects_isReportedToTheIssuerBeforeTheErrorAnswer() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val jwk = blind.offer("flow-d", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
+        // Decrypts, but carries neither credentials nor a transaction_id: refused, with its notification_id.
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-d", messageId = "msg-d", action = "decrypt_credential_response",
+                params = SignRequestParams(
+                    jwe = issuerEncrypt(jwk, "ECDH-ES", "A256GCM", buildJsonObject { put("notification_id", JsonPrimitive("n-r")) }.toString()),
+                    deferred = false,
+                ),
+            )
+        )
+        advanceUntilIdle()
+        io.mockk.verifyOrder {
+            engine.sendCredentialNotification("flow-d", "n-r", CredentialNotificationEvent.FAILURE, "credential_response_rejected")
+            engine.sendSignResponse(flowId = "flow-d", messageId = "msg-d", error = any())
+        }
+        verify(exactly = 0) { engine.sendSignResponse(flowId = "flow-d", messageId = "msg-d", credentialCount = any()) }
+    }
+
+    @Test
+    fun legacyDecryptCredentialResponse_aDeferredAnswerThatAgainReportsATransactionId_isAnsweredWithItAgain() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val jwk = blind.offer("flow-d", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
+        for ((n, deferred) in listOf("tx-1" to false, "tx-2" to true)) {
+            signFlow.emit(
+                SignRequestMessage(
+                    flowId = "flow-d", messageId = "msg-$n", action = "decrypt_credential_response",
+                    params = SignRequestParams(
+                        jwe = issuerEncrypt(jwk, "ECDH-ES", "A256GCM", buildJsonObject { put("transaction_id", JsonPrimitive(n)); put("interval", JsonPrimitive(3)) }.toString()),
+                        deferred = deferred,
+                    ),
+                )
+            )
+            advanceUntilIdle()
+            verify(exactly = 1) { engine.sendSignResponse(flowId = "flow-d", messageId = "msg-$n", transactionId = n, interval = 3) }
+        }
+    }
+
+    @Test
+    fun wmpGenerateProof_keyOnly_returnsTheKeyAndNoProofs() = runTest(dispatcher) {
+        val keystore = mockk<KeystoreManager>() // strict: a proof attempt would throw
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "keystore" to keystore,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "blindIssuance" to blind,
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        val result = runBlocking {
+            method.callSuspend(
+                wallet, "flow-w",
+                org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+                    action = "generate_proof",
+                    credentialResponseEncryption = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", true),
+                ),
+            )
+        } as org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult
+        assertEquals(null, result.proofs)
+        assertEquals(setOf("kty", "crv", "x", "y", "use", "alg"), result.credentialResponseEncryptionJwk!!.keys)
+        assertTrue(blind.holdsKey("flow-w"))
+    }
+
+    @Test
+    fun wmpDecryptCredentialResponse_answersWithTheCount_andAResponseItRejectsIsReportedToTheIssuer() = runTest(dispatcher) {
+        val blind = BlindIssuance()
+        val peer = mockk<org.siros.sdk.transport.wmp.WmpPeer>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "wmpPeer" to peer,
+            "blindIssuance" to blind,
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        val jwk = blind.offer("flow-w", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
+        val counted = runBlocking {
+            method.callSuspend(
+                wallet, "flow-w",
+                org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+                    action = "decrypt_credential_response", deferred = false,
+                    jwe = issuerEncrypt(jwk, "ECDH-ES", "A256GCM", issuerBody("c1", "c2", "c3").toString()),
+                ),
+            )
+        } as org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult
+        assertEquals(3, counted.credentialCount)
+        assertEquals(null, counted.transactionId)
+
+        val thrown = runCatching {
+            runBlocking {
+                method.callSuspend(
+                    wallet, "flow-w",
+                    org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+                        action = "decrypt_credential_response", deferred = true,
+                        jwe = issuerEncrypt(jwk, "ECDH-ES", "A256GCM", buildJsonObject { put("notification_id", JsonPrimitive("n-r")) }.toString()),
+                    ),
+                )
+            }
+        }.exceptionOrNull()
+        assertTrue(unwrapped(thrown ?: throw AssertionError("expected a refusal")) is BlindIssuanceException)
+        coVerify(exactly = 1) {
+            peer.sendCredentialNotification(flowId = "flow-w", notificationId = "n-r", event = CredentialNotificationEvent.FAILURE, eventDescription = "credential_response_rejected")
+        }
+    }
+
+    @Test
+    fun aPlainDirectPostPresentation_isUnchangedOnBothTransports_evenWithAVerifiedRequest() = runTest(dispatcher) {
+        val verifiedPlain = org.siros.sdk.transport.VerifiedRequest(clientId = "client-id-1", responseMode = "direct_post", responseUri = "https://v.example/r")
+        // Legacy transport.
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.signVpToken(any(), any(), any(), any(), any()) } returns "plain-vp-token"
+        coEvery { keystore.signPresentation(any(), any(), any()) } returns "plain-vp-token"
+        val cred = StoredCredential(id = 7L, format = "dc+sd-jwt", raw = "raw-sd-jwt", batchId = 1L, instanceId = 0)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to keystore,
+            "credentialStore" to FakeCredentialStore(mutableListOf(cred)),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-plain", messageId = "msg-plain", action = "sign_presentation",
+                params = SignRequestParams(
+                    audience = "admin", nonce = "n",
+                    credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pid", credentialId = "7")),
+                    verifiedRequest = verifiedPlain,
+                ),
+            )
+        )
+        repeat(5) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            advanceUntilIdle()
+        }
+        verify(exactly = 1) { engine.sendSignResponse(flowId = "flow-plain", vpToken = "plain-vp-token", messageId = "msg-plain") }
+        verify(exactly = 0) { engine.sendSignResponse(flowId = any(), responseJwe = any()) }
+        // WMP transport.
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        val result = runBlocking {
+            method.callSuspend(
+                wallet, "flow-w",
+                org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(action = "sign_presentation", nonce = "n", audience = "admin", verifiedRequest = verifiedPlain),
+            )
+        } as org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult
+        assertEquals("plain-vp-token", result.vpToken)
+        assertEquals(null, result.responseJwe)
+    }
+
+    @Test
+    fun anEncryptedResponseForAModeThatIsNotDirectPostJwt_isRefusedOnBothTransports() = runTest(dispatcher) {
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.signPresentation(any(), any(), any()) } returns "vp"
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "keystore" to keystore,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        for (mode in listOf("direct_post", "query", "fragment")) {
+            val thrown = runCatching {
+                runBlocking {
+                    method.callSuspend(
+                        wallet, "flow-w",
+                        org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(
+                            action = "sign_presentation", nonce = "n", audience = "admin",
+                            responseEncryption = blindResponseEncryption(),
+                            verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "c", responseMode = mode),
+                        ),
+                    )
+                }
+            }.exceptionOrNull()
+            assertTrue(mode, unwrapped(thrown ?: throw AssertionError("expected a refusal for $mode")).message.orEmpty().contains("not direct_post.jwt"))
         }
     }
 

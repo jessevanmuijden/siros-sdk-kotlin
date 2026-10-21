@@ -390,6 +390,24 @@ class WalletEngineSessionTest {
     }
 
     @Test
+    fun a_decrypt_answer_carries_exactly_one_of_credential_count_transaction_id_or_error() {
+        val json = kotlinx.serialization.json.Json { encodeDefaults = false }
+        val count = json.encodeToJsonElement(SignResponseMessage.serializer(), SignResponseMessage(flowId = "f", credentialCount = 2)) as kotlinx.serialization.json.JsonObject
+        assertEquals(2, (count["credential_count"] as kotlinx.serialization.json.JsonPrimitive).content.toInt())
+        assertEquals(null, count["transaction_id"])
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", credentialCount = 1, transactionId = "tx") }
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", credentialCount = 1, error = "x") }
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", transactionId = "tx", error = "x") }
+    }
+
+    @Test
+    fun a_sign_response_never_carries_a_response_jwe_together_with_a_vp_token() {
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", responseJwe = "a.b.c.d.e", vpToken = "t") }
+        SignResponseMessage(flowId = "f", vpToken = "t")
+        SignResponseMessage(flowId = "f", responseJwe = "a.b.c.d.e")
+    }
+
+    @Test
     fun a_sign_response_carries_the_blind_encryption_members_under_their_wire_names() {
         val json = kotlinx.serialization.json.Json { encodeDefaults = false }
         val jwk = kotlinx.serialization.json.buildJsonObject { put("kty", kotlinx.serialization.json.JsonPrimitive("EC")) }

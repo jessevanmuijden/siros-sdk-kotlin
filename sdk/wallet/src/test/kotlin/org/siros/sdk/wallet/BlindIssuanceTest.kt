@@ -99,6 +99,7 @@ class BlindIssuanceTest {
             issuer(jwk, response("cred-1", "cred-2") { mapOf("notification_id" to JsonPrimitive("n-1")) }),
             deferred = false,
         )
+        assertEquals(2, control.credentialCount)
         assertNull(control.transactionId)
         assertNull(control.interval)
         val taken = b.take("f")!!
@@ -210,5 +211,57 @@ class BlindIssuanceTest {
         b.open("f", issuer(jwk, response("secret-credential") { mapOf("notification_id" to JsonPrimitive("n")) }), deferred = false)
         val taken = b.take("f")!!
         assertFalse(taken.toString().contains("secret-credential"))
+    }
+
+    @Test
+    fun aDeferredAnswerIsATransactionIdWithNoCountAndAnIssuedOneACountWithNoTransactionId() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        val pending = b.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx")); put("interval", JsonPrimitive(7)) }), deferred = false)
+        assertNull(pending.credentialCount)
+        assertEquals("tx", pending.transactionId)
+        assertEquals(7, pending.interval)
+        // A deferred answer that again reports a transaction_id is answered the same way.
+        val again = b.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx2")) }), deferred = true)
+        assertEquals("tx2", again.transactionId)
+        assertNull(again.interval)
+        val issued = b.open("f", issuer(jwk, response("a", "b", "c")), deferred = true)
+        assertEquals(3, issued.credentialCount)
+        assertNull(issued.transactionId)
+        assertNull(issued.interval)
+    }
+
+    @Test
+    fun aResponseWithBothOrNeitherIsRefusedKeepsNothingAndCarriesItsNotificationIdForTheReport() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        val both = response("c") { mapOf("transaction_id" to JsonPrimitive("tx"), "notification_id" to JsonPrimitive("n-both")) }
+        val e1 = assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(jwk, both), deferred = false) }
+        assertEquals("n-both", e1.notificationId)
+        val neither = buildJsonObject { put("notification_id", JsonPrimitive("n-none")) }
+        val e2 = assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(jwk, neither), deferred = false) }
+        assertEquals("n-none", e2.notificationId)
+        assertNull("a refused response is not kept", b.take("f"))
+    }
+
+    @Test
+    fun theCountIsCappedAt256AndTheCapItselfIsAccepted() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        val atCap = b.open("f", issuer(jwk, response(*Array(256) { "c$it" })), deferred = false)
+        assertEquals(256, atCap.credentialCount)
+        b.drop("f")
+        val jwk2 = b.offer("f", request)!!
+        val e = assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(jwk2, response(*Array(257) { "c$it" })), deferred = false) }
+        assertNull("no notification_id was in the response", e.notificationId)
+        assertNull(b.take("f"))
+    }
+
+    @Test
+    fun aJweThatDoesNotOpenCarriesNoNotificationId() {
+        val b = BlindIssuance()
+        b.offer("f", request)
+        val e = assertThrows(BlindIssuanceException::class.java) { b.open("f", "a.b.c.d.e", deferred = false) }
+        assertNull(e.notificationId)
     }
 }

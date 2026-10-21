@@ -230,6 +230,12 @@ data class SignResponseMessage(
     @SerialName("transaction_id") val transactionId: String? = null,
     val interval: Int? = null,
     /**
+     * Answer to `decrypt_credential_response` for ISSUED credentials: how many credentials the decrypted response carries
+     * (1..256). EXACTLY ONE of [credentialCount], [transactionId] (deferred) or [error] answers a decrypt request; the engine
+     * fails the issuance on both or neither, so a message carrying two of them is refused here.
+     */
+    @SerialName("credential_count") val credentialCount: Int? = null,
+    /**
      * Answer to a `direct_post.jwt` `sign_presentation` that carried [SignRequestParams.responseEncryption]: the
      * compact JWE of the whole authorization response. Replaces [vpToken], which the engine then never sees.
      */
@@ -250,6 +256,10 @@ data class SignResponseMessage(
     init {
         require(responseJwe == null || (error == null && errorCode == null)) {
             "A sign_response that carries an error or error_code carries no response_jwe"
+        }
+        require(responseJwe == null || vpToken == null) { "A sign_response carries response_jwe or vp_token, never both" }
+        require(listOfNotNull(credentialCount, transactionId, error).size <= 1) {
+            "A decrypt_credential_response answer carries exactly one of credential_count, transaction_id or error"
         }
     }
 

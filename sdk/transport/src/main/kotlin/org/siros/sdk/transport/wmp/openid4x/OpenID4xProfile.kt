@@ -374,8 +374,14 @@ data class SignSubFlowResult(
     val interval: Int? = null,
     val responseJwe: String? = null,
     val error: String? = null,
+    /** `decrypt_credential_response` for ISSUED credentials: how many the decrypted response carries (1..256). */
+    val credentialCount: Int? = null,
 ) {
     init {
+        require(responseJwe == null || vpToken == null) { "A sign result carries response_jwe or vp_token, never both" }
+        require(listOfNotNull(credentialCount, transactionId, error).size <= 1) {
+            "A decrypt_credential_response answer carries exactly one of credential_count, transaction_id or error"
+        }
         // A refusal on this transport is a flow error, never a result; an error here carries no response either.
         require(responseJwe == null || error == null) { "A sign result that carries an error carries no response_jwe" }
     }
@@ -579,6 +585,7 @@ class OpenID4xProfile(
             result.credentialResponseEncryptionJwk?.let { put("credential_response_encryption_jwk", it) }
             result.transactionId?.let { put("transaction_id", JsonPrimitive(it)) }
             result.interval?.let { put("interval", JsonPrimitive(it)) }
+            result.credentialCount?.let { put("credential_count", JsonPrimitive(it)) }
             result.responseJwe?.let { put("response_jwe", JsonPrimitive(it)) }
             result.error?.let { put("error", JsonPrimitive(it)) }
         }

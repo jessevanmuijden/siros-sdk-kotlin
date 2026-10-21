@@ -6993,9 +6993,14 @@ class SirosWallet private constructor(
      * The `aud` of an encrypted (`direct_post.jwt`) response: the `client_id` the ENGINE validated, from `verified_request`,
      * never the sign request's `audience`. Without it nothing is built (fail closed): the engine owns that validation.
      */
-    private fun jarmAudience(verified: org.siros.sdk.transport.VerifiedRequest?): String =
-        verified?.clientId?.takeIf { it.isNotEmpty() }
+    private fun jarmAudience(verified: org.siros.sdk.transport.VerifiedRequest?): String {
+        // An encrypted response belongs to direct_post.jwt only; the engine refuses one for any other mode.
+        if (verified?.responseMode != null && verified.responseMode != "direct_post.jwt") {
+            throw WalletException("The engine asked for an encrypted response in a mode that is not direct_post.jwt")
+        }
+        return verified?.clientId?.takeIf { it.isNotEmpty() }
             ?: throw WalletException("The engine sent no verified client_id for an encrypted presentation response")
+    }
 
     /**
      * The WMP `sign_presentation` answer: `response_jwe` (the engine then never sees the `vp_token`) when the
@@ -7021,6 +7026,13 @@ class SirosWallet private constructor(
                 val count = params.count ?: 1
                 // Before any proof is made (which can prompt the user): see the legacy handler's identical step.
                 val responseKeyJwk = blindIssuance.offer(flowId, params.credentialResponseEncryption)
+                // A key-only request (encryption wanted, a configuration with no proof types): the key and NO proofs.
+                if (params.credentialResponseEncryption != null && params.proofTypesSupported.isNullOrEmpty()) {
+                    return org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
+                        credentialRequestExtras = zkIssuanceExtras(flowId),
+                        credentialResponseEncryptionJwk = responseKeyJwk,
+                    )
+                }
                 val generated = generateProofsForRequest(
                     audience = params.audience,
                     nonce = params.nonce,
@@ -7054,10 +7066,20 @@ class SirosWallet private constructor(
                 try {
                     val control = blindIssuance.open(flowId, params.jwe.orEmpty(), params.deferred == true)
                     org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
+                        credentialCount = control.credentialCount,
                         transactionId = control.transactionId,
                         interval = control.interval,
                     )
                 } catch (e: BlindIssuanceException) {
+                    // A response the wallet read but rejected is still reported to the issuer, before the flow ends.
+                    e.notificationId?.let {
+                        wmpPeer?.sendCredentialNotification(
+                            flowId = flowId,
+                            notificationId = it,
+                            event = CredentialNotificationEvent.FAILURE,
+                            eventDescription = "credential_response_rejected",
+                        )
+                    }
                     // The profile turns this into a flow error for the engine; the issuance also ends here.
                     reportSignFailure(flowId, e.message ?: SIGNING_FAILED_MESSAGE)
                     throw e
@@ -7515,6 +7537,16 @@ class SirosWallet private constructor(
                             // Before any proof is made (which can prompt the user): an issuer that requires an
                             // encrypted response this wallet cannot open fails the issuance here.
                             val responseKeyJwk = blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption)
+                            // A key-only request (encryption wanted, a configuration with no proof types): the key and NO proofs.
+                            if (params?.credentialResponseEncryption != null && params.proofTypesSupported.isNullOrEmpty()) {
+                                engine.sendSignResponse(
+                                    msg.flowId,
+                                    messageId = msg.messageId,
+                                    credentialRequestExtras = zkIssuanceExtras(msg.flowId),
+                                    credentialResponseEncryptionJwk = responseKeyJwk,
+                                )
+                                return@collect
+                            }
                             val generated = generateProofsForRequest(
                                 audience = params?.audience ?: "",
                                 nonce = params?.nonce ?: "",
@@ -7727,12 +7759,17 @@ class SirosWallet private constructor(
                             val control = try {
                                 blindIssuance.open(msg.flowId, msg.params.jwe.orEmpty(), msg.params.deferred == true)
                             } catch (e: BlindIssuanceException) {
+                                // A response the wallet read but rejected is still reported to the issuer, before the flow ends.
+                                e.notificationId?.let {
+                                    engine.sendCredentialNotification(msg.flowId, it, CredentialNotificationEvent.FAILURE, "credential_response_rejected")
+                                }
                                 engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId, error = e.message)
                                 throw e
                             }
                             engine.sendSignResponse(
                                 flowId = msg.flowId,
                                 messageId = msg.messageId,
+                                credentialCount = control.credentialCount,
                                 transactionId = control.transactionId,
                                 interval = control.interval,
                             )

@@ -36,10 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `cty: JWT` in the protected header; EC or RSA verifier keys). `aud` is the `client_id` of the engine's `verified_request`,
     never the request's `audience`; without it nothing is built (fail closed). The engine alone POSTs. Other response modes are
     unchanged and engine-visible by the verifier's choice.
+  - **Final engine shapes (go-wallet-backend #469 / #471).** `decrypt_credential_response` answers EXACTLY ONE of
+    `credential_count` (1..256, credentials issued; new `SignResponseMessage`/`SignSubFlowResult` member), `transaction_id`
+    with an OPTIONAL `interval` (deferred; no client-side default, a deferred answer may report a `transaction_id` again) or
+    `error`; a response with both or neither, or more than 256 credentials, is refused and, when it decrypted and carried a
+    `notification_id`, reported to the issuer (`credential_failure`) BEFORE the error answer. A `generate_proof` with
+    `credential_response_encryption` and no `proof_types_supported` is key-only: the key and no proofs, on both transports.
+    The advertised JWK has exactly `kty, crv, x, y, use, alg`. The encrypted presentation response is checked against the
+    engine's rules before it is sent (five base64url segments, none empty except the encrypted-key segment of direct
+    `ECDH-ES`; at most 4 MiB; protected header `alg`/`enc` equal to the request's and `kid` equal to the JWK's, none when the
+    JWK has none) and is never sent with a `vp_token`; it is built only when `response_encryption` is present and only for
+    `direct_post.jwt` (plain `direct_post`/`query`/`fragment` keep returning `vp_token`). `CredentialResponseKey` and
+    `AuthorizationResponseEncryption` are `internal` to sdk:wallet (no new public API for them).
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
-  - New public API: `CredentialResponseKey` and `AuthorizationResponseEncryption` (sdk:keystore), `VerifiedRequest`,
-    `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport), `SignRequestParams`/`SignSubFlowParams`
+  - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the
+    key and JWE machinery, `CredentialResponseKey` and `AuthorizationResponseEncryption`, is `internal` to sdk:wallet), `SignRequestParams`/`SignSubFlowParams`
     members `credential_response_encryption`, `jwe`, `deferred`, `response_encryption`, `state`, `verified_request`,
     `SignResponseMessage`/`SignSubFlowResult` members `credential_response_encryption_jwk`, `transaction_id`, `interval`,
     `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
