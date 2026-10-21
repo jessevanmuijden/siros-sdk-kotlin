@@ -8105,10 +8105,12 @@ class SirosWallet private constructor(
                         )
                         if (txCode != null) {
                             Timber.i("Providing tx_code for flow ${msg.flowId}")
-                            engine.sendFlowAction(msg.flowId, "provide_pin",
-                                kotlinx.serialization.json.buildJsonObject {
-                                    put("tx_code", kotlinx.serialization.json.JsonPrimitive(txCode))
-                                })
+                            sendEngineBestEffort("tx_code", msg.flowId) {
+                                engine.sendFlowAction(msg.flowId, "provide_pin",
+                                    kotlinx.serialization.json.buildJsonObject {
+                                        put("tx_code", kotlinx.serialization.json.JsonPrimitive(txCode))
+                                    })
+                            }
                         } else {
                             Timber.w("No tx_code provided for flow ${msg.flowId}")
                         }
@@ -8738,7 +8740,7 @@ class SirosWallet private constructor(
 
                 if (subjectId.isNullOrBlank()) {
                     Timber.e("Trust evaluation request missing subject_id")
-                    engine.sendTrustResult(flowId, false, "Missing subject_id")
+                    sendEngineBestEffort("trust result", flowId) { engine.sendTrustResult(flowId, false, "Missing subject_id") }
                     return@launch
                 }
 
@@ -8825,7 +8827,7 @@ class SirosWallet private constructor(
                 // stands in for an unreachable backend, not for one that
                 // refused us, and not when this wallet asked for remote-only.
                 Timber.e(e, "Trust evaluation failed closed - not consulting the trust cache")
-                engine.sendTrustResult(flowId, false, e.message ?: "Trust evaluation failed closed")
+                sendEngineBestEffort("trust result", flowId) { engine.sendTrustResult(flowId, false, e.message ?: "Trust evaluation failed closed") }
             } catch (e: Exception) {
                 Timber.e(e, "Trust evaluation failed")
 
@@ -8833,8 +8835,21 @@ class SirosWallet private constructor(
                 // answer never stands in for an unreachable backend (only a
                 // still-fresh TrustDecisionCache entry answers, and that is
                 // consulted before the call, not after its failure).
-                engine.sendTrustResult(flowId, false, e.message ?: "Trust evaluation failed")
+                sendEngineBestEffort("trust result", flowId) { engine.sendTrustResult(flowId, false, e.message ?: "Trust evaluation failed") }
             }
+        }
+    }
+
+    /**
+     * Runs an engine reply that has no better recovery than the engine's own flow timeout: a socket that refuses the frame
+     * ([WalletEngineSession] throws [IllegalStateException]) is logged, never thrown, because these run in `scope.launch` blocks
+     * with no handler of their own.
+     */
+    private inline fun sendEngineBestEffort(what: String, flowId: String, send: () -> Unit) {
+        try {
+            send()
+        } catch (e: IllegalStateException) {
+            Timber.w("Engine reply ($what) for flow $flowId not sent (${e.message})")
         }
     }
 
@@ -9999,12 +10014,21 @@ class SirosWallet private constructor(
                     })
                 }
                 engine.sendFlowAction(flowId, "consent", consentPayload)
-            } catch (e: Exception) {
-                Timber.e(e, "Error handling credential selection")
+            } catch (e: Throwable) {
+                // Not only Exception: a native matcher/prover linkage Error would otherwise kill this coroutine with no log and no
+                // answer, leaving the flow (and the app's spinner) waiting for a reply that never comes.
+                if (e is VirtualMachineError || e is kotlinx.coroutines.CancellationException) throw e
+                Timber.e(e, "Error handling credential selection (code=credential_selection_failed, flow $flowId)")
                 val declinePayload = kotlinx.serialization.json.buildJsonObject {
                     put("reason", kotlinx.serialization.json.JsonPrimitive("error: ${e.message}"))
                 }
-                engine.sendFlowAction(flowId, "decline", declinePayload)
+                // Best effort: when the failure was the socket refusing a frame, the decline fails the same way, and an exception
+                // escaping this launch has no handler.
+                try {
+                    engine.sendFlowAction(flowId, "decline", declinePayload)
+                } catch (sendFailure: Exception) {
+                    Timber.w("Decline for flow $flowId not sent (${sendFailure.javaClass.simpleName}: ${sendFailure.message})")
+                }
             }
         }
     }

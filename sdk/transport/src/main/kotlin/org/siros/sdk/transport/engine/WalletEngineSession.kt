@@ -145,6 +145,9 @@ class WalletEngineSession(
      */
     private val generationCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
+    /** The generation allowed to act (its callbacks count); [NO_LIVE_SOCKET] while a replacement is being made. */
+    private val liveGeneration = java.util.concurrent.atomic.AtomicInteger(NO_LIVE_SOCKET)
+
     /** Generation of the most recently opened socket. */
     val connectionGeneration: Int get() = generationCounter.get()
 
@@ -243,7 +246,16 @@ class WalletEngineSession(
         doConnect(appToken)
     }
 
-    private fun doConnect(appToken: String) {
+    /**
+     * Guards every change of which socket is current: the generation check, publishing the socket, cancelling the previous one
+     * and the pending backoff, and scheduling a backoff are one atomic step, so a stale automatic attempt cannot publish an older
+     * socket after [forceReconnect] installed a newer one, and a late callback of an old socket cannot schedule a retry that
+     * would replace the new socket's.
+     */
+    private val connLock = Any()
+
+    /** [onlyIfLive]: connect only while that generation is still the live one (an automatic attempt superseded meanwhile does nothing). */
+    private fun doConnect(appToken: String, onlyIfLive: Int? = null) {
         val wsUrl = baseUrl
             .replace("https://", "wss://")
             .replace("http://", "ws://")
@@ -263,37 +275,75 @@ class WalletEngineSession(
         // and overrides only the interval, rather than constructing an
         // unrelated OkHttpClient from scratch.
         val connectionClient = client.newBuilder()
-            .pingInterval(pingIntervalMs, TimeUnit.MILLISECONDS)
+            .pingInterval(livenessIntervalMs(pingIntervalMs), TimeUnit.MILLISECONDS)
             .build()
 
-        val generation = generationCounter.incrementAndGet()
-        webSocket = connectionClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(ws: WebSocket, response: Response) {
-                Timber.d("Engine WebSocket connected, sending handshake")
-                reconnectAttempts = 0
-                val handshake = json.encodeToString(
-                    HandshakeMessage.serializer(),
-                    HandshakeMessage(appToken = appToken),
-                )
-                ws.send(handshake)
+        // Single-flight: at most one socket is ever live. Opening a new one supersedes (and cancels) the previous, and a
+        // callback from a superseded socket (the failure its own cancel() raises, a late ping timeout) is ignored: it must
+        // not schedule yet another connection, which is how two sockets ended up killing each other in a reconnect storm.
+        synchronized(connLock) {
+            if (onlyIfLive != null && liveGeneration.get() != onlyIfLive) {
+                Timber.d("Engine WebSocket: a superseded reconnect attempt did nothing")
+                return
             }
+            val generation = generationCounter.incrementAndGet()
+            liveGeneration.set(generation)
+            pendingReconnect?.cancel()
+            pendingReconnect = null
+            val previous = webSocket
+            webSocket = null
+            previous?.cancel()
+            webSocket = connectionClient.newWebSocket(request, object : WebSocketListener() {
+                private fun stale() = liveGeneration.get() != generation
 
-            override fun onMessage(ws: WebSocket, text: String) {
-                rawMessageChannel.trySend(RawFrame(generation, text))
-            }
+                override fun onOpen(ws: WebSocket, response: Response) {
+                    if (stale()) { ws.cancel(); return }
+                    Timber.d("Engine WebSocket connected, sending handshake")
+                    reconnectAttempts = 0
+                    val handshake = json.encodeToString(
+                        HandshakeMessage.serializer(),
+                        HandshakeMessage(appToken = appToken),
+                    )
+                    ws.send(handshake)
+                }
 
-            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                Timber.d("Engine WebSocket closing: $code $reason")
-                ws.close(1000, null)
-                scheduleReconnect()
-            }
+                override fun onMessage(ws: WebSocket, text: String) {
+                    if (stale()) return
+                    rawMessageChannel.trySend(RawFrame(generation, text))
+                }
 
-            override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Timber.e(t, "Engine WebSocket failure")
-                scheduleReconnect()
-            }
-        })
+                override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                    Timber.d("Engine WebSocket closing: $code $reason")
+                    ws.close(1000, null)
+                    socketEnded(generation, ws)
+                }
+
+                override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                    synchronized(connLock) {
+                        if (stale()) {
+                            Timber.d("Engine WebSocket: failure of a superseded socket ignored (${t.javaClass.simpleName})")
+                            return
+                        }
+                        Timber.e(t, "Engine WebSocket failure")
+                    }
+                    socketEnded(generation, ws)
+                }
+            })
+        }
     }
+
+    /** The current socket ended: it is no longer a usable socket, and one backoff attempt is scheduled; a stale socket does nothing. */
+    private fun socketEnded(generation: Int, ws: WebSocket) {
+        synchronized(connLock) {
+            if (liveGeneration.get() != generation) return
+            if (webSocket === ws) webSocket = null // isConnected/send() must not claim a dead socket during the backoff
+            scheduleReconnect()
+        }
+    }
+
+    /** The one pending backoff-then-connect attempt, if any; a new schedule or any connect replaces it. */
+    @Volatile
+    private var pendingReconnect: kotlinx.coroutines.Job? = null
 
     private fun scheduleReconnect() {
         if (lastAppToken == null) {
@@ -302,6 +352,8 @@ class WalletEngineSession(
             // we just closed on purpose. Don't clobber that with FAILED.
             return
         }
+        // One attempt in flight: a second failure/closing of the same socket must not queue another (or inflate the backoff).
+        if (pendingReconnect?.isActive == true) return
         if (reconnectAttempts >= maxReconnectAttempts) {
             Timber.w("WebSocket reconnection exhausted ($reconnectAttempts attempts)")
             _state.value = State.FAILED
@@ -311,12 +363,13 @@ class WalletEngineSession(
         reconnectAttempts++
         val delayMs = baseReconnectDelayMs * (1L shl (reconnectAttempts - 1).coerceAtMost(4))
         Timber.i("Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$maxReconnectAttempts)")
-        scope.launch {
+        val scheduledFor = liveGeneration.get()
+        pendingReconnect = scope.launch {
             kotlinx.coroutines.delay(delayMs)
             if (_state.value != State.RECONNECTING) return@launch
             val token = refreshTokenOrSignalReauth() ?: return@launch
             if (_state.value == State.RECONNECTING) {
-                doConnect(token)
+                doConnect(token, onlyIfLive = scheduledFor)
             }
         }
     }
@@ -707,13 +760,18 @@ class WalletEngineSession(
         eventDescription: String?,
     ) {
         if (!isConnected) return
-        send(CredentialNotificationMessage.serializer(), CredentialNotificationMessage(
-            flowId = flowId,
-            notificationId = notificationId,
-            event = event,
-            eventDescription = eventDescription,
-            timestamp = java.time.Instant.now().toString(),
-        ))
+        // Best effort: a notification the socket refuses must not interrupt the credential processing that sent it.
+        try {
+            send(CredentialNotificationMessage.serializer(), CredentialNotificationMessage(
+                flowId = flowId,
+                notificationId = notificationId,
+                event = event,
+                eventDescription = eventDescription,
+                timestamp = java.time.Instant.now().toString(),
+            ))
+        } catch (e: IllegalStateException) {
+            Timber.w("Credential notification not sent (${e.message})")
+        }
     }
 
     /**
@@ -759,23 +817,31 @@ class WalletEngineSession(
         }
         Timber.i("Engine WebSocket: forced reconnect (was ${_state.value}); the old socket is dropped, it may be a zombie after the browser gap")
         val request = reconnectRequests.incrementAndGet()
+        // The pending backoff attempt is NOT cancelled yet: this caller may be cancelled while the token refresh is suspended, and
+        // recovery is the session's, not the caller's. The attempt is replaced below, atomically with installing the new socket.
         val token = refreshTokenOrSignalReauth(request)
         // A newer forceReconnect began while this one was refreshing its token
         // (the caller moved on - e.g. a cancelled start that was retried). It
         // owns the socket now; replacing it again would close the newer
         // caller's connection and drop its replies.
         if (reconnectRequests.get() != request) return
-        // Clear the (possibly zombie) socket unconditionally, even if refresh was
-        // rejected below - otherwise isConnected stays true and send() would keep
-        // appearing usable on a session that's actually no longer valid.
-        webSocket?.cancel() // ungraceful - the connection may already be dead
-        webSocket = null
-        sessionId = null
-        rawMessageChannel.trySend(RawFrame(0, null))
-        if (token == null) return // refreshTokenOrSignalReauth already set State.REAUTH_REQUIRED
-        _state.value = State.CONNECTING
-        reconnectAttempts = 0
-        doConnect(token)
+        synchronized(connLock) {
+            if (reconnectRequests.get() != request) return
+            // Clear the (possibly zombie) socket unconditionally, even if refresh was rejected below - otherwise isConnected
+            // stays true and send() would keep appearing usable on a session that's actually no longer valid. The old socket is
+            // superseded BEFORE it is cancelled, so the failure its cancel() raises is recognised as stale.
+            liveGeneration.set(NO_LIVE_SOCKET)
+            pendingReconnect?.cancel()
+            pendingReconnect = null
+            webSocket?.cancel() // ungraceful - the connection may already be dead
+            webSocket = null
+            sessionId = null
+            rawMessageChannel.trySend(RawFrame(0, null))
+            if (token == null) return // refreshTokenOrSignalReauth already set State.REAUTH_REQUIRED
+            _state.value = State.CONNECTING
+            reconnectAttempts = 0
+            doConnect(token)
+        }
         Timber.i("Engine WebSocket: new connection requested")
     }
 
@@ -802,8 +868,13 @@ class WalletEngineSession(
         lastAppToken = null  // prevent reconnection
         tokenProvider = null
         onAuthRejected = null
-        webSocket?.close(1000, "client disconnect")
-        webSocket = null
+        synchronized(connLock) {
+            liveGeneration.set(NO_LIVE_SOCKET)
+            pendingReconnect?.cancel()
+            pendingReconnect = null
+            webSocket?.close(1000, "client disconnect")
+            webSocket = null
+        }
         sessionId = null
         _state.value = State.DISCONNECTED
         // Close all channels to release consumers
@@ -821,10 +892,13 @@ class WalletEngineSession(
     private fun <T> send(serializer: kotlinx.serialization.KSerializer<T>, message: T) {
         val ws = webSocket ?: throw IllegalStateException("Not connected")
         val text = json.encodeToString(serializer, message)
-        ws.send(text)
+        // A frame the socket refuses (closed or cancelled) must not vanish: the flow would wait for a reply forever.
+        if (!ws.send(text)) throw IllegalStateException("Not connected (the engine socket refused the message)")
     }
 
     companion object {
+        private const val NO_LIVE_SOCKET = -1
+
         /**
          * Used until (and unless) the server tells us otherwise via
          * [HandshakeCompleteMessage.config] - see [pingIntervalMs]'s doc
@@ -837,6 +911,16 @@ class WalletEngineSession(
          * go-wallet-backend's own default (config.ServerConfig.EngineWSPingInterval).
          */
         const val DEFAULT_PING_INTERVAL_MS = 3000L
+
+        /**
+         * Floor of the client's own liveness ping (OkHttp fails the socket when a pong does not arrive within one interval, so
+         * this is also the pong wait). The engine pings every 3 s itself, which keeps Fly's edge from dropping the idle
+         * connection and which OkHttp answers automatically; the client's ping is only a dead-peer detector, and 3 s was so tight
+         * that a flaky mobile network, or a socket the engine closed as superseded, produced a 1-2 s reconnect loop.
+         */
+        private const val MIN_LIVENESS_INTERVAL_MS = 10_000L
+
+        internal fun livenessIntervalMs(configured: Long): Long = maxOf(configured, MIN_LIVENESS_INTERVAL_MS)
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .pingInterval(DEFAULT_PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
