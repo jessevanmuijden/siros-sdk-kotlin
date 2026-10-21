@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A refusal at the sign step is answered with `sign_response` `error_code` SIGN_REFUSED
   (`WalletEngineSession.sendSignRefusal`, wmp spec 3.2.6): the engine ends signing at once and
   tells the verifier `access_denied` with no description.
+  zkp_req presentations run one at a time (a consumed copy is never presented twice), and a flow, connection or session that ends while the user is asked proves nothing.
   The engine's own trust decision (`verifier_trust_evaluated` progress) is ingested; a request is
   answered only for the signed client-id schemes (x509_san_dns, x509_san_uri, x509_hash); what is
   proved is the store's current credential, and a cancelled or ended flow stops a pending signing.

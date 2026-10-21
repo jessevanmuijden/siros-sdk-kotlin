@@ -4433,6 +4433,8 @@ class SirosWallet private constructor(
          * other, so a credential may answer several queries. Null for the DC API, whose picker reports plain ids (positional preference).
          */
         selectionByQuery: Map<String, Long>? = null,
+        /** Asked right after the user answered: false (the flow, connection or session ended meanwhile) refuses before anything is proved. */
+        stillValid: () -> Boolean = { true },
     ): CircuitZkAnswer {
         // No silent first-eligible: the credential that is proved is the one the user picked, and the consent
         // screen names it. A call that names none is refused, never read as "any".
@@ -4548,6 +4550,7 @@ class SirosWallet private constructor(
             predicates = config.circuitZkPredicateFunctions,
         ) ?: refuse("consent-items", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
         if (!askPresentationConsent(consentHandler, consentRequest)) refuse("consent-declined", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
+        if (!stillValid()) refuse("ended", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
 
         // ── Phase 2: the user agreed. Only now is the secret seed fetched and anything signed or proved. ──
         val tokensByQueryId = linkedMapOf<String, List<kotlinx.serialization.json.JsonElement>>()
@@ -6181,8 +6184,9 @@ class SirosWallet private constructor(
         val generation: Int,
     )
     /** The zkp_req signing of a flow that waits on the user (consent), so a cancelled or ended flow can stop it. */
-    private class ZkSignJob(val job: kotlinx.coroutines.Job, val messageId: String?)
+    private class ZkSignJob(val job: kotlinx.coroutines.Job, val messageId: String?, val connection: Int)
     private val zkSignJobsByFlow = java.util.concurrent.ConcurrentHashMap<String, ZkSignJob>()
+    private val zkSigningMutex = kotlinx.coroutines.sync.Mutex()
 
     /** Ends every pending zkp_req signing without refusing (the engine session is gone): used when the session ends. */
     private fun stopAllZkSigning() {
@@ -7201,8 +7205,13 @@ class SirosWallet private constructor(
         val flowId = msg.flowId
         // The session this request belongs to: a result that comes back after it ended (a logout, a new login) acts on nothing.
         val generation = sessionGeneration
-        fun ended() = flowId in terminatedFlowIds || flowId in abandonedFlowIds || sessionGeneration != generation
+        val connection = msg.connectionGeneration
+        fun ended() = flowId in terminatedFlowIds || flowId in abandonedFlowIds || sessionGeneration != generation || engine.connectionGeneration != connection
         try {
+            // One zkp_req presentation at a time: eligibility (a consumed copy) is checked and its use recorded under this lock, so two
+            // overlapping requests can never present the same credential instance. A request waiting here that ended is dropped.
+            zkSigningMutex.withLock {
+            if (ended()) return
             fun refuse(step: String, reason: org.siros.sdk.wallet.dcapi.DCAPIRefusalReason): Nothing = throw CircuitZkEngineRefusal(step, reason)
             val params = msg.params
             val audience = params.audience.orEmpty()
@@ -7292,6 +7301,7 @@ class SirosWallet private constructor(
                 consentHandler = consentHandler,
                 refuse = ::refuse,
                 selectionByQuery = selectionByQuery,
+                stillValid = { !ended() },
             )
             // The flow may have ended while the user was asked: nothing is recorded or sent for it then.
             if (ended()) return
@@ -7307,6 +7317,7 @@ class SirosWallet private constructor(
                 timestamp = System.currentTimeMillis(),
             ))
             engine.sendSignResponse(flowId, vpToken = vpToken, messageId = msg.messageId)
+            }
         } catch (e: CircuitZkEngineRefusal) {
             if (ended()) return
             // Only the step and the coarse reason are logged: never a request content, an id or a value.
@@ -7621,8 +7632,13 @@ class SirosWallet private constructor(
                 // auth, attestation), so it is handled in its own coroutine.
                 // A zkp_req presentation (QR / same-device redirect) is answered by its own handler: the stored match results say so.
                 if (msg.action == "sign_presentation" && pendingMatchResultsByFlow[msg.flowId]?.any { CredentialUtils.isCircuitZkFormat(it.format) } == true) {
+                    // A signing still waiting on the user from an EARLIER connection (the socket was replaced) is stale: its flow is
+                    // gone with that connection, and it must neither act on this one nor hold up the new request.
+                    zkSignJobsByFlow.entries.filter { it.value.connection != msg.connectionGeneration }.forEach { (flow, old) ->
+                        if (zkSignJobsByFlow.remove(flow, old)) old.job.cancel()
+                    }
                     val job = scope.launch { handleCircuitZkEngineSignPresentation(engine, msg) }
-                    val entry = ZkSignJob(job, msg.messageId)
+                    val entry = ZkSignJob(job, msg.messageId, msg.connectionGeneration)
                     zkSignJobsByFlow[msg.flowId] = entry
                     job.invokeOnCompletion { zkSignJobsByFlow.remove(msg.flowId, entry) }
                     return@collect
@@ -9665,7 +9681,8 @@ class SirosWallet private constructor(
     /**
      * Records the engine's own verifier-trust decision (`verifier_trust_evaluated` progress) as the flow's trust result: the verdict,
      * the identity it is about (the client id the sign step's audience must equal) and the PDP's `context` when the engine relays it
-     * (the verifier ids a pseudonym needs; without it the verifier id stays unresolved and a request needing one is refused).
+     * (the verifier ids a pseudonym needs; without it the verifier id stays unresolved and a request needing one is refused). The
+     * context is kept VERBATIM, like the DC API path's: one contract for every trust path, the PDP's value is the verifier id.
      */
     private fun ingestServerTrustDecision(flowId: String, payload: JsonObject) {
         if (lastTrustResults.containsKey(flowId)) return
@@ -9677,26 +9694,8 @@ class SirosWallet private constructor(
             reason = payload["reason"]?.jsonPrimitive?.contentOrNull,
             entityName = payload["entity_name"]?.jsonPrimitive?.contentOrNull,
             identifier = verifier,
-            context = (payload["context"] as? JsonObject)?.let(::withPrefixedVerifierIds),
+            context = payload["context"] as? JsonObject,
         )
-    }
-
-    /**
-     * The engine relays the PDP's `verifier_ids` with an `x509_san_dns` value as the BARE lower-case A-label; the verifier id the
-     * rulebook hashes is the prefixed `x509_san_dns:<dns>` (byte-exact, nothing else normalised), so the prefix is added here when it is
-     * missing. Every other type (semantic values already carry `semantic_id:`) and every other member is passed through untouched.
-     */
-    private fun withPrefixedVerifierIds(context: JsonObject): JsonObject {
-        val ids = context["verifier_ids"] as? kotlinx.serialization.json.JsonArray ?: return context
-        val fixed = kotlinx.serialization.json.JsonArray(ids.map { entry ->
-            val o = entry as? JsonObject ?: return@map entry
-            val type = (o["verifier_id_type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
-            val value = (o["verifier_id"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
-            if (type == "x509_san_dns" && value != null && value.isNotEmpty() && !value.startsWith("x509_san_dns:")) {
-                JsonObject(o + ("verifier_id" to kotlinx.serialization.json.JsonPrimitive("x509_san_dns:$value")))
-            } else entry
-        })
-        return JsonObject(context + ("verifier_ids" to fixed))
     }
 
     /** Drops what a flow's match step left for its sign step; called wherever a flow ends. */
