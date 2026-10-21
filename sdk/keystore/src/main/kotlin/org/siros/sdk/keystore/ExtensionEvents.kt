@@ -73,8 +73,13 @@ internal object ExtensionEvents {
         // The shortest digit string that reads back as the same double (what ECMAScript prints). Not
         // Double.toString: before JDK 19 it is not always the shortest (1e23 gives 9.999999999999999E22).
         val exact = java.math.BigDecimal(Math.abs(d))
+        val target = Math.abs(d)
         val bd = (1..17).firstNotNullOf { p ->
-            exact.round(java.math.MathContext(p, java.math.RoundingMode.HALF_EVEN)).takeIf { it.toDouble() == Math.abs(d) }
+            // Both neighbours at this precision, not only the nearest: the shortest string that reads
+            // back as the same double may be the farther one; if both do, the nearer wins.
+            val down = exact.round(java.math.MathContext(p, java.math.RoundingMode.DOWN))
+            val up = exact.round(java.math.MathContext(p, java.math.RoundingMode.UP))
+            listOf(down, up).filter { it.toDouble() == target }.minByOrNull { (it - exact).abs() }
         }.stripTrailingZeros()
         val digits = bd.unscaledValue().toString()
         val k = digits.length
