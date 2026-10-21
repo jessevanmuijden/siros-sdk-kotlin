@@ -84,23 +84,21 @@ class VerifierIdRegistry(
 }
 
 /**
- * Reads the identifier from the policy decision point's response. go-trust
- * (#203) returns `context.verifier_ids` as a LIST of objects
- * `{"verifier_id_type": ..., "verifier_id": ..., "basis": ...}` (`basis` is
- * informational and ignored here). The wallet does not narrow the PDP's answer
- * (no `context.verifier_id_type` is sent), so the list may hold every type the
- * PDP knows. Among the entries whose `verifier_id_type`
- * equals [type], duplicates of one value are one identifier; if several DISTINCT
- * values exist the source declines rather than choose, because the value is
- * hashed into a pseudonym and a guess would be a different pseudonym. Malformed
- * entries and empty `verifier_id`s are ignored. Declines when the context, the
- * member (not a list) or a matching entry is absent. Type names and value forms are
- * defined by the rulebook / trust framework, produced by the PDP, and opaque here (the
- * wallet hashes the value byte-for-byte and never lower-cases, trims or strips it): the names in the wallet's list must match what the
- * PDP returns, and go-trust is aligning to the trust framework (for `x509_san_dns` the
- * value is the PREFIXED Client Identifier, `x509_san_dns:<dns name>`, as in rulebook v0.4, derived by the PDP). The wallet derives
- * nothing itself from the request's client id or `x5c` chain; the PDP is the single
- * default source of verifier ids.
+ * Reads the verifier id from the policy decision point's response and maps it to the rulebook v0.4 `verifier_id`. go-trust returns
+ * `context.verifier_ids` as a LIST of objects `{"verifier_id_type": ..., "verifier_id": ..., "basis": ...}` (`basis` is informational
+ * and ignored here). The wallet does not narrow the PDP's answer, so the list may hold every type the PDP knows. This is the ONE place
+ * every trust path (the engine's `verifier_trust_evaluated` context, the DC API's evaluation, the SDK handshake) goes through, so the
+ * same entry gives the same pseudonym on all of them.
+ *
+ * The mapping, per the PDP's own contract (go-trust `authzen.VerifierID`):
+ *  - `semantic`: the value already is the verifier id and must carry its `semantic_id:` prefix, else it is unusable;
+ *  - `x509_san_dns`: the PDP returns the dNSName SAN as a BARE A-label (lower case, no trailing dot); the verifier id is
+ *    `x509_san_dns:` followed by the value as returned, nothing else normalised (go-trust already canonicalises);
+ *  - any other type (`x509_san_uri`, `decentralized_identifier`, `openid_federation`) is not a v0.4 verifier id form and is
+ *    never used.
+ * Among the entries of the asked [type], duplicates of one value are one identifier; if several DISTINCT values exist the source
+ * declines rather than choose, because the value is hashed into a pseudonym and a guess would be a different pseudonym. Malformed
+ * entries and empty values are ignored. Declines when the context, the member (not a list) or a usable entry is absent.
  */
 class AuthZENSource(override val type: String) : VerifierIdSource {
     override suspend fun resolve(context: VerifierIdContext): String? {
@@ -109,6 +107,13 @@ class AuthZENSource(override val type: String) : VerifierIdSource {
             .mapNotNull { it as? JsonObject }
             .filter { (it["verifier_id_type"] as? JsonPrimitive)?.takeIf { p -> p.isString }?.contentOrNull == type }
             .mapNotNull { (it["verifier_id"] as? JsonPrimitive)?.takeIf { p -> p.isString }?.contentOrNull?.takeIf { v -> v.isNotEmpty() } }
+            .mapNotNull { value ->
+                when (type) {
+                    "semantic" -> value.takeIf { it.startsWith("semantic_id:") }
+                    "x509_san_dns" -> "x509_san_dns:$value"
+                    else -> null
+                }
+            }
             .distinct().toList().singleOrNull()
     }
 }

@@ -394,8 +394,9 @@ data class WalletConfig(
      * Entries must be non-blank, trimmed, comma-free and unique (checked at construction).
      * An EMPTY list means no type is supported: a request needing a pseudonym is refused.
      *
-     * The strings are opaque and must equal what the policy decision point returns in
-     * `context.verifier_ids`; go-trust is aligning its names and values to the trust framework.
+     * The strings must equal what the policy decision point returns in `context.verifier_ids`. The policy decision point
+     * ([AuthZENSource]) yields a verifier id only for `semantic` (the value, which carries `semantic_id:`) and `x509_san_dns`
+     * (`x509_san_dns:` + the bare SAN it returns): the rulebook v0.4 forms. Any other type is never taken from it.
      */
     val circuitZkVerifierIdTypes: List<String> = VerifierIdTypeOrder.DEFAULT,
     /**
