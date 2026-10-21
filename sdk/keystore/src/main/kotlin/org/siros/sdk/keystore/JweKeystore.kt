@@ -989,7 +989,12 @@ class JweKeystore(
         requireUnlocked()
         val currentMainKey = mainKey!!
 
-        // Build the WalletStateContainer V3 plaintext
+        // privatedata-spec 2.8 section 6: never rewrite a version or event type this
+        // SDK does not implement. Thrown BEFORE anything is built or stored, so the
+        // caller's stored container (and the backend's) stays exactly as it was.
+        PrivateDataSchema.rewriteBlocker(preservedWalletState)?.let { throw it }
+
+        // Build the WalletStateContainer plaintext (S.schemaVersion 4)
         val walletState = buildWalletStateV3()
         val payload = json.encodeToString(
             kotlinx.serialization.json.JsonObject.serializer(),
@@ -1027,7 +1032,10 @@ class JweKeystore(
                 ?: kotlinx.serialization.json.JsonArray(emptyList())
             put("events", events)
             put("S", kotlinx.serialization.json.buildJsonObject {
-                put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(3))
+                // Always the current version. A version 3 container this SDK rewrites is
+                // thereby migrated (the spec's migration only sets this number), which is
+                // also what makes it legal to write metadata and extensions into it.
+                put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(PrivateDataSchema.CURRENT_VERSION))
                 put("keypairs", kotlinx.serialization.json.JsonArray(
                     keys.map { (kid, ecKey) ->
                         kotlinx.serialization.json.buildJsonObject {

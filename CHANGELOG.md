@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Private data: `S.schemaVersion` 4** (privatedata-spec 2.8,
+  https://github.com/sirosfoundation/privatedata-spec/pull/9 at 901a9a1). `JweKeystore`
+  now writes `S.schemaVersion` 4 (it wrote 3). A version 3 container it rewrites is
+  migrated by that number alone; everything else is carried through unchanged, including
+  unknown members of `S`, of credential entries and of `metadata` entries. `S.credentials[].metadata`
+  and `S.extensions` are version 4 members, so they are only ever written into a version 4
+  container (the SDK always rewrites at 4); containers written earlier that already carry them
+  under version 3 are read as version 4. The SDK emits no events and does not fold or merge them,
+  so event stamping and the ETag/`If-Match` handling are unchanged.
+- **Breaking for clients still on version 3 only:** wallet-frontend (and older SDKs) that do not
+  implement version 4 will refuse to rewrite a container this SDK has rewritten, until updated.
+- The vendored privatedata-spec vectors are re-copied verbatim from 901a9a1 (with the fixtures
+  they reference); `vectors.PROVENANCE.txt` records the commit and digests.
+
 ### Added
+- **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`
+  `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`
+  throws it, before building or storing anything, when the unlocked container has an
+  `S.schemaVersion` other than 3 or 4 (absent counts as 1; 1 and 2 are not migrated here), an event
+  whose `schemaVersion` is not 1 to 4 or is missing, or an event type the implemented versions do
+  not define (`set_extension` only from version 3 events on, as written by spec 2.1 to 2.8 clients).
+  Reading is unaffected, so credentials stay usable. `SirosWallet` reports it as its own
+  `onFlowError("sync", ...)` and neither stores nor uploads the container, so the backend copy is intact.
+  Previously such a container was silently rewritten as version 3.
+
 - **Holder-generated pseudonym commitment (`org.siros.psc`) in the OpenID4VCI
   proof JWT** (tracking issue https://github.com/SUNET/vc/issues/823). When the
   engine's `generate_proof` sign request (legacy engine and WMP sign sub-flow)

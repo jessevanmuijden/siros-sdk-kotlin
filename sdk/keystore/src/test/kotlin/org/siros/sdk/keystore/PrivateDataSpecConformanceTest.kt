@@ -53,7 +53,7 @@ class PrivateDataSpecConformanceTest {
         return stream.bufferedReader(Charsets.UTF_8).readText()
             .lineSequence()
             .filter { it.isNotBlank() }
-            .map { json.parseToJsonElement(it).jsonObject }
+            .map { json.parseToJsonElement(it).jsonObject.withRealEvents() }
             .toList()
     }
 
