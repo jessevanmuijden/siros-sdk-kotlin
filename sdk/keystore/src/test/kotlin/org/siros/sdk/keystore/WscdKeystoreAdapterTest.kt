@@ -737,4 +737,32 @@ class WscdKeystoreAdapterTest {
 
         assertFalse(adapter.scaAuthenticationCapability(fakeSdJwtVc(), "no-such-key").isPossible)
     }
+
+    private fun jwtClaims(jwt: String): kotlinx.serialization.json.JsonObject =
+        kotlinx.serialization.json.Json.parseToJsonElement(
+            String(java.util.Base64.getUrlDecoder().decode(jwt.split('.')[1]), Charsets.UTF_8),
+        ) as kotlinx.serialization.json.JsonObject
+
+    @Test
+    fun generateProofCarriesTheSignedExtraClaims() = runTest {
+        val signer = createMockSigner()
+        // A real curve point: the proof header carries the public key.
+        val jwk = com.nimbusds.jose.jwk.gen.ECKeyGenerator(com.nimbusds.jose.jwk.Curve.P_256).generate().toPublicJWK().toJSONString()
+        coEvery { signer.exportPublicKey(any()) } returns jwk.toByteArray()
+        val adapter = WscdKeystoreAdapter(signer)
+        adapter.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0))
+
+        val jwt = adapter.generateProof("https://issuer.example", "n-1", false, null, mapOf("org.siros.psc" to "PSC-VALUE"))
+
+        val claims = jwtClaims(jwt)
+        assertEquals("PSC-VALUE", (claims["org.siros.psc"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("n-1", (claims["nonce"] as kotlinx.serialization.json.JsonPrimitive).content)
+        // The claim is part of what the WSCD signs, not added afterwards.
+        val signed = io.mockk.slot<ByteArray>()
+        coVerify { signer.sign("test-key-1", capture(signed)) }
+        assertTrue(String(signed.captured, Charsets.UTF_8).contains(jwt.split('.')[1]))
+        // The shorter overloads add nothing.
+        val plain = adapter.generateProof("https://issuer.example", "n-2", false, null)
+        assertFalse(jwtClaims(plain).containsKey("org.siros.psc"))
+    }
 }

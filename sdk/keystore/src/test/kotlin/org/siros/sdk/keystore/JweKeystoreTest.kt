@@ -139,6 +139,32 @@ class JweKeystoreTest {
     }
 
     @Test
+    fun generateProofSignsExtraClaimsIntoThePayload() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.generateKey()
+
+        val proof = keystore.generateProof(
+            "https://issuer.example.com", "n-1", false, null, mapOf("org.siros.psc" to "abc"),
+        )
+        val signed = com.nimbusds.jwt.SignedJWT.parse(proof)
+        assertEquals("abc", signed.jwtClaimsSet.getStringClaim("org.siros.psc"))
+        assertEquals("n-1", signed.jwtClaimsSet.getStringClaim("nonce"))
+        // The claim is inside the signed bytes: the signature verifies over it.
+        val jwk = signed.header.jwk.toECKey()
+        assertTrue(signed.verify(com.nimbusds.jose.crypto.ECDSAVerifier(jwk)))
+    }
+
+    @Test
+    fun generateProofWithoutExtraClaimsCarriesNoCommitmentClaim() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.generateKey()
+        val proof = keystore.generateProof("https://issuer.example.com", "n-1")
+        assertEquals(null, com.nimbusds.jwt.SignedJWT.parse(proof).jwtClaimsSet.getClaim("org.siros.psc"))
+    }
+
+    @Test
     fun generateKeyProofBuildsValidPopJwt() = runTest {
         val keystore = JweKeystore()
         keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)

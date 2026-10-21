@@ -454,6 +454,18 @@ public final class org/siros/sdk/wallet/PresentationRequest {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class org/siros/sdk/wallet/PseudonymCommitmentConflictException : org/siros/sdk/credentials/SirosException {
+	public static final field Companion Lorg/siros/sdk/wallet/PseudonymCommitmentConflictException$Companion;
+	public static final field ERROR_CODE Ljava/lang/String;
+	public static final field FLOW_ERROR_CODE Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;)V
+	public final fun getIssuerMessage ()Ljava/lang/String;
+	public final fun getUserMessageRes ()I
+}
+
+public final class org/siros/sdk/wallet/PseudonymCommitmentConflictException$Companion {
+}
+
 public final class org/siros/sdk/wallet/RememberScope : java/lang/Enum {
 	public static final field ALL_ISSUERS Lorg/siros/sdk/wallet/RememberScope;
 	public static final field ONCE Lorg/siros/sdk/wallet/RememberScope;
@@ -974,6 +986,7 @@ public abstract interface class org/siros/sdk/wallet/WalletEventListener {
 	public abstract fun onFlowComplete (Ljava/lang/String;Ljava/lang/String;)V
 	public abstract fun onFlowError (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
 	public abstract fun onIssuerNotTrusted (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public abstract fun onPseudonymCommitmentConflict (Ljava/lang/String;Lorg/siros/sdk/wallet/PseudonymCommitmentConflictException;)V
 	public abstract fun onReauthenticationRequired ()V
 	public abstract fun onTransactionDataRefused (Ljava/lang/String;Lorg/siros/sdk/credentials/TransactionDataReason;)V
 	public abstract fun onTxCodeRequired (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
@@ -990,6 +1003,7 @@ public final class org/siros/sdk/wallet/WalletEventListener$DefaultImpls {
 	public static fun onFlowError (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
 	public static synthetic fun onFlowError$default (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)V
 	public static fun onIssuerNotTrusted (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public static fun onPseudonymCommitmentConflict (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Lorg/siros/sdk/wallet/PseudonymCommitmentConflictException;)V
 	public static fun onReauthenticationRequired (Lorg/siros/sdk/wallet/WalletEventListener;)V
 	public static fun onTransactionDataRefused (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Lorg/siros/sdk/credentials/TransactionDataReason;)V
 	public static fun onTxCodeRequired (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;

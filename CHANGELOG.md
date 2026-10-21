@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Holder-generated pseudonym commitment (`org.siros.psc`) in the OpenID4VCI
+  proof JWT** (tracking issue https://github.com/SUNET/vc/issues/823). When the
+  engine's `generate_proof` sign request (legacy engine and WMP sign sub-flow)
+  carries `holder_commitments: ["psc"]` with `credential_type` and
+  `credential_issuer`, the wallet adds the claim `org.siros.psc` =
+  base64url-without-padding of the 32-byte `psc` to the `jwt` proof payload
+  before signing. The issuer string is used verbatim (a trailing slash is a
+  different commitment). Fail-closed: an unknown commitment name, a missing
+  type/issuer, a keystore that is not a `HolderWitnessSource`, an
+  attestation-type proof, or a value that is not 32 bytes fails the flow instead
+  of sending a proof without the claim, and still runs `onWscdOperationEnd`. The
+  commitment is `HolderWitnessSource.privateSeedCommitment(type, issuer)` (seed v2). The value is never logged. New:
+  `KeystoreManager.generateProof(..., extraClaims)`
+  (non-empty claims refused by a conformer that cannot place them),
+  `SignRequestParams`/`SignSubFlowParams` members.
+- Holder commitment consistency: the issuer string a commitment was derived for
+  is stored with the issued credentials (also when issuer display metadata could
+  not be fetched), and a fresh registration unlocks the other keystores from the
+  exported container instead of independent empty ones, so every keystore derives
+  the same `psc` before and after login.
+- **`PSC_CONFLICT` as a typed error.** The issuer's refusal of a different
+  pseudonym commitment (before anything is issued, so nothing to roll back) is
+  delivered as `WalletEventListener.onPseudonymCommitmentConflict`
+  (`PseudonymCommitmentConflictException`, `errorCode = "psc_conflict"`,
+  `userMessageRes` = `siros_psc_conflict`, added in default/sv/fi/el/pt; the
+  translations are unreviewed). The default implementation forwards the issuer's
+  text to `onFlowError`.
 - **User consent for `circuit_zk` presentations.** One `PresentationConsentHandler`
   (a sibling of `TransactionConsentHandler`, not coupled to `transactionDataEnabled`;
   wallet-level `SirosWallet.presentationConsentHandler`, per request through a new

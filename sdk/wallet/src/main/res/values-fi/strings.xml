@@ -12,6 +12,8 @@
     <string name="siros_dcapi_refused_request_not_verified">Pyyntöä ei voitu varmistaa tulevaksi sivustolta, jolla olet, joten mitään ei jaettu.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">Lompakkosi ei voinut selvittää, kuka pyytää, joten mitään ei jaettu.</string>
     <string name="siros_dcapi_refused_proof_failed">Lompakkosi ei voinut luoda todistetta, joten mitään ei jaettu. Yritä uudelleen.</string>
+    <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
+    <string name="siros_psc_conflict">Myöntäjällä on jo sinusta tallessa eri pseudonyymisitoumus. Jos menetit lompakkosi, pyydä myöntäjää nollaamaan se.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
     <string name="siros_consent_title">Vahvista jakaminen</string>
     <string name="siros_consent_share">Jaa</string>

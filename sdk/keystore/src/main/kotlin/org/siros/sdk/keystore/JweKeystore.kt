@@ -697,6 +697,14 @@ class JweKeystore(
         nonce: String,
         freshKey: Boolean,
         holderBinding: HolderBinding?,
+    ): String = generateProof(audience, nonce, freshKey, holderBinding, emptyMap())
+
+    override suspend fun generateProof(
+        audience: String,
+        nonce: String,
+        freshKey: Boolean,
+        holderBinding: HolderBinding?,
+        extraClaims: Map<String, String>,
     ): String = mutex.withLock {
         requireUnlocked()
         // `freshKey` means batch issuance: each credential in the batch must
@@ -751,6 +759,7 @@ class JweKeystore(
             .issueTime(Date())
             .claim("nonce", nonce)
         did?.let { claimsBuilder.issuer(it) }
+        extraClaims.forEach { (k, v) -> claimsBuilder.claim(k, v) }
         val claims = claimsBuilder.build()
 
         val headerBuilder = JWSHeader.Builder(JWSAlgorithm.ES256)

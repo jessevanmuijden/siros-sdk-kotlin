@@ -50,6 +50,19 @@ class KeystoreManagerTest {
     }
 
     @Test
+    fun `a conformer that cannot place extra claims refuses rather than dropping them`() = runTest {
+        try {
+            preDiipKeystore().generateProof("https://issuer.example", "nonce", false, null, mapOf("org.siros.psc" to "x"))
+            fail("expected a KeystoreException")
+        } catch (e: KeystoreException) {
+            // expected; the claim values are never in the message
+            assertEquals(false, e.message?.contains("\"x\"") ?: false)
+        }
+        // With nothing to add it still forwards.
+        assertEquals("haip-shaped-proof", preDiipKeystore().generateProof("https://issuer.example", "nonce", false, null, emptyMap()))
+    }
+
+    @Test
     fun `a pre-DIIP conformer still forwards a HAIP-compatible request`() = runTest {
         // null and EMBEDDED_JWK are both requests this conformer can
         // already satisfy by definition - the default must still forward
