@@ -6098,10 +6098,12 @@ class SirosWalletTest {
         var signs = false
         /** The last input the prover was given (its session transcript, for one). */
         var lastInput: org.siros.sdk.keystore.CircuitZkProveInput? = null
+        val inputs = mutableListOf<org.siros.sdk.keystore.CircuitZkProveInput>()
         override val isFake get() = inner.isFake
         override suspend fun prove(input: org.siros.sdk.keystore.CircuitZkProveInput): org.siros.sdk.keystore.CircuitZkProveOutput {
             calls++
             lastInput = input
+            inputs += input
             events?.add("prove")
             if (signs) input.signer.sign(-7, byteArrayOf(1, 2, 3))
             return inner.prove(input)
@@ -6345,6 +6347,8 @@ class SirosWalletTest {
         val engine: WalletEngineSession,
         val match: MutableSharedFlow<MatchRequestMessage>,
         val sign: MutableSharedFlow<SignRequestMessage>,
+        val progress: MutableSharedFlow<FlowProgressMessage>,
+        val complete: MutableSharedFlow<FlowCompleteMessage>,
         val metadataSeen: MutableList<JsonObject?>,
     )
 
@@ -6353,15 +6357,18 @@ class SirosWalletTest {
         consent: suspend (org.siros.sdk.credentials.PresentationConsentRequest) -> Boolean = { true },
         flagOn: Boolean = true,
         offersCircuit: Boolean = true,
+        credentials: List<StoredCredential>? = null,
     ): EngineCzk {
         val match = MutableSharedFlow<MatchRequestMessage>()
         val sign = MutableSharedFlow<SignRequestMessage>()
-        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match)
+        val progress = MutableSharedFlow<FlowProgressMessage>()
+        val complete = MutableSharedFlow<FlowCompleteMessage>()
+        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete)
         every { engine.cancelFlow(any()) } just runs
         every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
         every { engine.sendMatchResponse(any(), any(), any()) } just runs
         val seen = mutableListOf<JsonObject?>()
-        val s = czkSetup(trust = czkIds("x509_san_dns" to redirectClientId), consent = consent, flagOn = flagOn, offersCircuit = offersCircuit, onPlan = { seen += it })
+        val s = czkSetup(trust = czkIds("x509_san_dns" to redirectClientId), consent = consent, flagOn = flagOn, offersCircuit = offersCircuit, credentials = credentials, onPlan = { seen += it })
         invokeConnectEngine(s.wallet, "app-token")
         advanceUntilIdle()
         // What the engine's trust step left for this flow.
@@ -6370,7 +6377,7 @@ class SirosWalletTest {
             trusted = trusted, identifier = redirectClientId, entityName = "Example RP",
             context = buildJsonObject { putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId) }) } },
         )
-        return EngineCzk(s, engine, match, sign, seen)
+        return EngineCzk(s, engine, match, sign, progress, complete, seen)
     }
 
     private val redirectQuery = Json.parseToJsonElement(
@@ -6380,8 +6387,16 @@ class SirosWalletTest {
         """{"vp_formats_supported":{"zkp_req":{"system_id_values":["c1"],"proof_system_values":["sys"]}},"authorization_encrypted_response_alg":"ECDH-ES"}""",
     )
 
-    private suspend fun EngineCzk.matchOnce() {
-        match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+    /** What the legacy redirect flow really sends: a flow_progress step with the request, the verifier and its client_metadata. */
+    private suspend fun EngineCzk.matchOnce(query: kotlinx.serialization.json.JsonElement = redirectQuery) {
+        progress.emit(FlowProgressMessage(
+            flowId = "f1", step = "credential_selection",
+            payload = buildJsonObject {
+                put("dcql_query", query)
+                putJsonObject("verifier") { put("client_id", redirectClientId); put("name", "Example RP") }
+                put("client_metadata", redirectMetadata)
+            },
+        ))
     }
 
     private fun redirectSign(thumbprint: String? = redirectThumbprint, audience: String = redirectClientId, responseUri: String? = "https://rp.example/response", creds: List<String> = listOf("1")) =
@@ -6400,12 +6415,15 @@ class SirosWalletTest {
         advanceUntilIdle()
         // The verifier's client_metadata reached the planner, and the credential was offered.
         assertEquals(listOf<kotlinx.serialization.json.JsonElement?>(redirectMetadata), e.metadataSeen)
-        val matches = slot<List<CredentialMatch>>()
-        verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
-        assertEquals(listOf("1"), matches.captured.map { it.credentialId })
-        assertEquals(listOf("q"), matches.captured.map { it.credentialQueryId })
-        // A zkp_req match advertises no claim names (the engine would authorize none, and a consent check would refuse any).
-        assertEquals(listOf<List<String>?>(null), matches.captured.map { it.availableClaims })
+        val consent = slot<JsonObject>()
+        verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", capture(consent)) }
+        val selected = consent.captured["selected_credentials"]!!.jsonArray.single().jsonObject
+        assertEquals("q", selected["credential_query_id"]?.jsonPrimitive?.content)
+        assertEquals("1", selected["credential_id"]?.jsonPrimitive?.content)
+        // A zkp_req query discloses no claims: the engine's consent check would refuse any.
+        assertEquals(0, selected["disclosed_claims"]!!.jsonArray.size)
+        // Nothing is recorded as presented before anything is proved.
+        assertTrue(e.s.history.isEmpty())
 
         e.sign.emit(redirectSign())
         advanceUntilIdle()
@@ -6427,8 +6445,121 @@ class SirosWalletTest {
         // One consent, naming the verifier; the history records a ZK proof; the flow is not cancelled.
         assertEquals(1, e.s.consents.size)
         assertEquals("Example RP", e.s.consents.single().verifier.label)
-        assertTrue(e.s.history.single().zkProof) // written once, at selection time
+        assertTrue(e.s.history.single().zkProof) // written once, when answered
         verify(exactly = 0) { e.engine.cancelFlow(any()) }
+    }
+
+    private fun czkTwoCredentials() = listOf(
+        StoredCredential(id = 1L, format = "mso_mdoc", raw = CzkFixtures.mdoc(CzkFixtures.psc, "2000-06-15"), credentialIssuerIdentifier = CzkFixtures.ISSUER,
+            metadata = CredentialMetadata(name = "Nym A"), batchId = 1L, instanceId = 0),
+        StoredCredential(id = 2L, format = "mso_mdoc", raw = CzkFixtures.mdoc(CzkFixtures.psc, "1990-01-01"), credentialIssuerIdentifier = CzkFixtures.ISSUER,
+            metadata = CredentialMetadata(name = "Nym B"), batchId = 2L, instanceId = 0),
+    )
+
+    private fun TestScope.engineCzkWith(credentials: List<StoredCredential>?, policy: CredentialConsumptionPolicy? = null): EngineCzk {
+        val e = engineCzk(credentials = credentials)
+        policy?.let { e.s.wallet.credentialConsumptionPolicy = it }
+        return e
+    }
+
+    @Test
+    fun circuitZkRedirect_eachQueryIsAnsweredWithTheCredentialItsReferenceNames_whateverTheOrder() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        val query = Json.parseToJsonElement(
+            """{"credentials":[
+              {"id":"q1","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n1","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]},
+              {"id":"q2","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n2","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
+        )
+        e.matchOnce(query)
+        advanceUntilIdle()
+        // The references come in the reverse order of the queries: q2 is answered by credential 1, q1 by credential 2.
+        e.sign.emit(redirectSign().let { r ->
+            r.copy(params = r.params.copy(credentialsToInclude = listOf(
+                org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "q2", credentialId = "1"),
+                org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "q1", credentialId = "2"),
+            )))
+        })
+        advanceUntilIdle()
+        val vp = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
+        assertEquals(setOf("q1", "q2"), Json.parseToJsonElement(vp.captured).jsonObject.keys)
+        // The prover got credential 2 for q1 and credential 1 for q2: tell them apart by the birth dates they hold.
+        fun holds(input: org.siros.sdk.keystore.CircuitZkProveInput, birth: String) = String(input.credentialBytes, Charsets.ISO_8859_1).contains(birth)
+        assertEquals(2, e.s.prover.inputs.size)
+        // Proved in query order: q1 with credential 2, q2 with credential 1.
+        assertTrue(holds(e.s.prover.inputs[0], "1990-01-01") && !holds(e.s.prover.inputs[0], "2000-06-15"))
+        assertTrue(holds(e.s.prover.inputs[1], "2000-06-15") && !holds(e.s.prover.inputs[1], "1990-01-01"))
+    }
+
+    @Test
+    fun circuitZkRedirect_aReferenceToAnUnknownQuery_isRefused() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign().let { r ->
+            r.copy(params = r.params.copy(credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "other", credentialId = "1"))))
+        })
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aFreshSingleCopyCredential_isNotCountedConsumedBeforeItIsProved_underConsumeAll() = runTest(dispatcher) {
+        val e = engineCzkWith(null, CredentialConsumptionPolicy.CONSUME_ALL)
+        e.matchOnce()
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", any()) }
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        assertEquals(1, e.s.prover.calls)
+        // Recorded once, from what was really used.
+        assertEquals(listOf(listOf(1L)), e.s.history.map { it.credentialIds })
+    }
+
+    @Test
+    fun circuitZkRedirect_theVerifierMetadataDoesNotOutliveTheFlow() = runTest(dispatcher) {
+        fun cached(e: EngineCzk) = (getField(e.s.wallet, "circuitZkClientMetadataByFlow") as Map<*, *>).size
+        // A request that is refused at match time caches nothing.
+        val refused = engineCzk(flagOn = false)
+        refused.matchOnce()
+        advanceUntilIdle()
+        assertEquals(0, cached(refused))
+        // An accepted one holds it for the sign step only, whether the sign step answers or refuses.
+        val answered = engineCzk()
+        answered.matchOnce()
+        advanceUntilIdle()
+        assertEquals(1, cached(answered))
+        answered.sign.emit(redirectSign())
+        advanceUntilIdle()
+        assertEquals(0, cached(answered))
+        val failed = engineCzk()
+        failed.matchOnce()
+        advanceUntilIdle()
+        failed.sign.emit(redirectSign(thumbprint = null))
+        advanceUntilIdle()
+        assertEquals(0, cached(failed))
+        // And one that never reaches the sign step is dropped when the flow ends.
+        val completed = engineCzk()
+        completed.matchOnce()
+        advanceUntilIdle()
+        assertEquals(1, cached(completed))
+        completed.complete.emit(FlowCompleteMessage(flowId = "f1"))
+        advanceUntilIdle()
+        assertEquals(0, cached(completed))
+    }
+
+    @Test
+    fun circuitZkRedirect_theMatchRequestMessageIsAnsweredToo() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+        advanceUntilIdle()
+        val matches = slot<List<CredentialMatch>>()
+        verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
+        assertEquals(listOf("1"), matches.captured.map { it.credentialId })
+        assertEquals(listOf<List<String>?>(null), matches.captured.map { it.availableClaims })
+        assertTrue(e.s.history.isEmpty())
     }
 
     @Test
@@ -6476,15 +6607,12 @@ class SirosWalletTest {
         val off = engineCzk(flagOn = false)
         off.matchOnce()
         advanceUntilIdle()
-        verify(exactly = 1) { off.engine.sendMatchResponse("f1", emptyList(), any()) }
+        verify(exactly = 1) { off.engine.sendCredentialsMatched("f1", emptyList(), any()) }
 
         val mixed = engineCzk()
-        mixed.match.emit(MatchRequestMessage(
-            flowId = "f1", clientMetadata = redirectMetadata,
-            dcqlQuery = Json.parseToJsonElement("""{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"}},{"id":"p","format":"mso_mdoc","meta":{"doctype_value":"x"},"claims":[{"path":["x","y"]}]}]}"""),
-        ))
+        mixed.matchOnce(Json.parseToJsonElement("""{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"}},{"id":"p","format":"mso_mdoc","meta":{"doctype_value":"x"},"claims":[{"path":["x","y"]}]}]}"""))
         advanceUntilIdle()
-        verify(exactly = 1) { mixed.engine.sendMatchResponse("f1", emptyList(), any()) }
+        verify(exactly = 1) { mixed.engine.sendCredentialsMatched("f1", emptyList(), any()) }
 
         val tx = engineCzk()
         tx.matchOnce()
