@@ -145,6 +145,9 @@ class WalletEngineSession(
      */
     private val generationCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
+    /** The generation allowed to act (its callbacks count); [NO_LIVE_SOCKET] while a replacement is being made. */
+    private val liveGeneration = java.util.concurrent.atomic.AtomicInteger(NO_LIVE_SOCKET)
+
     /** Generation of the most recently opened socket. */
     val connectionGeneration: Int get() = generationCounter.get()
 
@@ -263,12 +266,24 @@ class WalletEngineSession(
         // and overrides only the interval, rather than constructing an
         // unrelated OkHttpClient from scratch.
         val connectionClient = client.newBuilder()
-            .pingInterval(pingIntervalMs, TimeUnit.MILLISECONDS)
+            .pingInterval(livenessIntervalMs(pingIntervalMs), TimeUnit.MILLISECONDS)
             .build()
 
+        // Single-flight: at most one socket is ever live. Opening a new one supersedes (and cancels) the previous, and a
+        // callback from a superseded socket (the failure its own cancel() raises, a late ping timeout) is ignored: it must
+        // not schedule yet another connection, which is how two sockets ended up killing each other in a reconnect storm.
         val generation = generationCounter.incrementAndGet()
-        webSocket = connectionClient.newWebSocket(request, object : WebSocketListener() {
+        liveGeneration.set(generation)
+        pendingReconnect?.cancel()
+        pendingReconnect = null
+        val previous = webSocket
+        webSocket = null
+        previous?.cancel()
+        val opened = connectionClient.newWebSocket(request, object : WebSocketListener() {
+            private fun stale() = liveGeneration.get() != generation
+
             override fun onOpen(ws: WebSocket, response: Response) {
+                if (stale()) { ws.cancel(); return }
                 Timber.d("Engine WebSocket connected, sending handshake")
                 reconnectAttempts = 0
                 val handshake = json.encodeToString(
@@ -279,21 +294,33 @@ class WalletEngineSession(
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
+                if (stale()) return
                 rawMessageChannel.trySend(RawFrame(generation, text))
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
                 Timber.d("Engine WebSocket closing: $code $reason")
                 ws.close(1000, null)
+                if (stale()) return
                 scheduleReconnect()
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                if (stale()) {
+                    Timber.d("Engine WebSocket: failure of a superseded socket ignored (${t.javaClass.simpleName})")
+                    return
+                }
                 Timber.e(t, "Engine WebSocket failure")
                 scheduleReconnect()
             }
         })
+        // A callback may already have run for a socket that failed instantly; only record the socket if still current.
+        if (liveGeneration.get() == generation) webSocket = opened else opened.cancel()
     }
+
+    /** The one pending backoff-then-connect attempt, if any; a new schedule or any connect replaces it. */
+    @Volatile
+    private var pendingReconnect: kotlinx.coroutines.Job? = null
 
     private fun scheduleReconnect() {
         if (lastAppToken == null) {
@@ -307,11 +334,13 @@ class WalletEngineSession(
             _state.value = State.FAILED
             return
         }
+        // One attempt in flight: a second failure/closing of the same socket must not queue another (or inflate the backoff).
+        if (pendingReconnect?.isActive == true) return
         _state.value = State.RECONNECTING
         reconnectAttempts++
         val delayMs = baseReconnectDelayMs * (1L shl (reconnectAttempts - 1).coerceAtMost(4))
         Timber.i("Reconnecting in ${delayMs}ms (attempt $reconnectAttempts/$maxReconnectAttempts)")
-        scope.launch {
+        pendingReconnect = scope.launch {
             kotlinx.coroutines.delay(delayMs)
             if (_state.value != State.RECONNECTING) return@launch
             val token = refreshTokenOrSignalReauth() ?: return@launch
@@ -746,6 +775,9 @@ class WalletEngineSession(
         }
         Timber.i("Engine WebSocket: forced reconnect (was ${_state.value}); the old socket is dropped, it may be a zombie after the browser gap")
         val request = reconnectRequests.incrementAndGet()
+        // This replaces the pending backoff attempt instead of adding a parallel one.
+        pendingReconnect?.cancel()
+        pendingReconnect = null
         val token = refreshTokenOrSignalReauth(request)
         // A newer forceReconnect began while this one was refreshing its token
         // (the caller moved on - e.g. a cancelled start that was retried). It
@@ -755,6 +787,8 @@ class WalletEngineSession(
         // Clear the (possibly zombie) socket unconditionally, even if refresh was
         // rejected below - otherwise isConnected stays true and send() would keep
         // appearing usable on a session that's actually no longer valid.
+        // Supersede the old socket BEFORE cancelling it, so the failure its cancel() raises is recognised as stale.
+        liveGeneration.set(NO_LIVE_SOCKET)
         webSocket?.cancel() // ungraceful - the connection may already be dead
         webSocket = null
         sessionId = null
@@ -808,10 +842,13 @@ class WalletEngineSession(
     private fun <T> send(serializer: kotlinx.serialization.KSerializer<T>, message: T) {
         val ws = webSocket ?: throw IllegalStateException("Not connected")
         val text = json.encodeToString(serializer, message)
-        ws.send(text)
+        // A frame the socket refuses (closed or cancelled) must not vanish: the flow would wait for a reply forever.
+        if (!ws.send(text)) throw IllegalStateException("Not connected (the engine socket refused the message)")
     }
 
     companion object {
+        private const val NO_LIVE_SOCKET = -1
+
         /**
          * Used until (and unless) the server tells us otherwise via
          * [HandshakeCompleteMessage.config] - see [pingIntervalMs]'s doc
@@ -824,6 +861,16 @@ class WalletEngineSession(
          * go-wallet-backend's own default (config.ServerConfig.EngineWSPingInterval).
          */
         const val DEFAULT_PING_INTERVAL_MS = 3000L
+
+        /**
+         * Floor of the client's own liveness ping (OkHttp fails the socket when a pong does not arrive within one interval, so
+         * this is also the pong wait). The engine pings every 3 s itself, which keeps Fly's edge from dropping the idle
+         * connection and which OkHttp answers automatically; the client's ping is only a dead-peer detector, and 3 s was so tight
+         * that a flaky mobile network, or a socket the engine closed as superseded, produced a 1-2 s reconnect loop.
+         */
+        private const val MIN_LIVENESS_INTERVAL_MS = 10_000L
+
+        internal fun livenessIntervalMs(configured: Long): Long = maxOf(configured, MIN_LIVENESS_INTERVAL_MS)
 
         private fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
             .pingInterval(DEFAULT_PING_INTERVAL_MS, TimeUnit.MILLISECONDS)

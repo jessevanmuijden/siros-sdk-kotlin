@@ -9551,8 +9551,11 @@ class SirosWallet private constructor(
                     })
                 }
                 engine.sendFlowAction(flowId, "consent", consentPayload)
-            } catch (e: Exception) {
-                Timber.e(e, "Error handling credential selection")
+            } catch (e: Throwable) {
+                // Not only Exception: a native matcher/prover linkage Error would otherwise kill this coroutine with no log and no
+                // answer, leaving the flow (and the app's spinner) waiting for a reply that never comes.
+                if (e is VirtualMachineError) throw e
+                Timber.e(e, "Error handling credential selection (code=credential_selection_failed, flow $flowId)")
                 val declinePayload = kotlinx.serialization.json.buildJsonObject {
                     put("reason", kotlinx.serialization.json.JsonPrimitive("error: ${e.message}"))
                 }
