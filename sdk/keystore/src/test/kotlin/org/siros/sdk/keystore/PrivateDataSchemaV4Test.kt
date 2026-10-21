@@ -346,6 +346,39 @@ class PrivateDataSchemaV4Test {
         // A clock behind the old event's timestamp.
         val behind = ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), emptyMap(), "p", listOf(old), 50L) { 5L }.single()
         assertTrue(behind["timestampSeconds"]!!.jsonPrimitive.content.toLong() >= 100)
+        // Collision handling must not break the ordering: ids 4294967294 (old, same key) and 4294967295 (other key) taken.
+        val old2 = JsonObject(old + mapOf("eventId" to JsonPrimitive(4_294_967_294L)))
+        val other = JsonObject(old + mapOf("eventId" to JsonPrimitive(4_294_967_295L), "key" to JsonPrimitive("other")))
+        val r = ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), emptyMap(), "p", listOf(old2, other), 100L) { 5L }.single()
+        assertTrue(r["timestampSeconds"]!!.jsonPrimitive.content.toLong() > 100)
+    }
+
+    @Test
+    fun removingAnOpaqueEntryEmitsOneTombstone() = runTest {
+        val ext = buildJsonObject { put("n", buildJsonObject { put("opaque", buildJsonObject { put("x", JsonPrimitive(1)) }); put("keep", JsonPrimitive("v")) }) }
+        val k = unlocked(plaintext(extraS = mapOf("extensions" to ext)))
+        k.removeExtensionEntry("n", "opaque")
+        val a = decrypt(k.exportEncryptedContainer())
+        assertEquals(listOf("keep"), state(a)["extensions"]!!.jsonObject["n"]!!.jsonObject.keys.toList())
+        val tomb = a["events"]!!.jsonArray.single().jsonObject
+        assertEquals("opaque", tomb["key"]!!.jsonPrimitive.content)
+        assertEquals(kotlinx.serialization.json.JsonNull, tomb["value"])
+        k.removeExtensionEntry("n", "opaque")
+        assertEquals(1, decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray.size)
+    }
+
+    @Test
+    fun hashKeyOrderAndNumbersFollowJavaScript() {
+        fun h(js: String, e: JsonObject) = assertEquals(
+            java.security.MessageDigest.getInstance("SHA-256").digest(js.toByteArray()).joinToString("") { "%02x".format(it) },
+            ExtensionEvents.hash(e),
+        )
+        // array indexes up to 2^32-2 sort first and numerically, "01" is not one
+        h("""{"4000000000":1,"01":2,"a":3}""", buildJsonObject { put("01", JsonPrimitive(2)); put("a", JsonPrimitive(3)); put("4000000000", JsonPrimitive(1)) })
+        val nums = listOf("1.0E-7" to "1e-7", "0.0000001" to "1e-7", "1000000000000000000000" to "1e+21", "1E2" to "100", "0.000001" to "0.000001", "-2.50" to "-2.5", "123456789012345680000" to "123456789012345680000")
+        for ((lit, js) in nums) {
+            h("""{"v":$js}""", buildJsonObject { put("v", kotlinx.serialization.json.JsonUnquotedLiteral(lit)) })
+        }
     }
 
     @Test

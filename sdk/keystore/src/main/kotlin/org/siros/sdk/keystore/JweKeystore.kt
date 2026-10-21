@@ -162,6 +162,12 @@ class JweKeystore(
     // set_extension events appended since unlock, written after the container's own events.
     // (namespace, key) pairs this session set or removed: an explicit removal beats the verbatim
     // carrying of a non-string value the container held under the same key.
+    // Opaque (non-string) entries of the container that this session removed: no string was ever read
+    // for them, so the difference to the loaded map cannot show it, yet the removal needs a tombstone.
+    private val pendingOpaqueRemovals: MutableSet<Pair<String, String>> = mutableSetOf()
+
+    private val emittedOpaqueRemovals: MutableSet<Pair<String, String>> = mutableSetOf()
+
     private val touchedExtensionKeys: MutableSet<Pair<String, String>> = mutableSetOf()
 
     private val appendedEvents: MutableList<kotlinx.serialization.json.JsonObject> = mutableListOf()
@@ -275,6 +281,7 @@ class JweKeystore(
             touchedExtensionKeys.clear()
             loadWalletState(plaintextJson)
             extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
+            pendingOpaqueRemovals.clear(); emittedOpaqueRemovals.clear()
 
             // Preserve container metadata for re-export
             containerMetadata = container
@@ -552,6 +559,7 @@ class JweKeystore(
         extensionsAtLastSync = emptyMap()
         appendedEvents.clear()
         touchedExtensionKeys.clear()
+        pendingOpaqueRemovals.clear(); emittedOpaqueRemovals.clear()
         credentialRefreshTokens.clear()
         mainKey = null
         containerMetadata = null
@@ -638,6 +646,8 @@ class JweKeystore(
         requireUnlocked()
         extensions.getOrPut(namespace) { mutableMapOf() }[key] = value
         touchedExtensionKeys.add(namespace to key)
+        pendingOpaqueRemovals.remove(namespace to key)
+        emittedOpaqueRemovals.remove(namespace to key)
         Unit
     }
 
@@ -656,6 +666,7 @@ class JweKeystore(
      */
     override suspend fun removeExtensionEntry(namespace: String, key: String) = mutex.withLock {
         requireUnlocked()
+        noteOpaqueRemoval(namespace, key)
         val ns = extensions[namespace] ?: return@withLock
         ns.remove(key)
         touchedExtensionKeys.add(namespace to key)
@@ -1040,6 +1051,7 @@ class JweKeystore(
             throw e
         }
         extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
+        emittedOpaqueRemovals.addAll(pendingOpaqueRemovals); pendingOpaqueRemovals.clear()
 
         // Build the full container with the updated JWE
         val meta = containerMetadata ?: throw KeystoreException("No container metadata")
@@ -1047,6 +1059,16 @@ class JweKeystore(
         containerMetadata = updatedContainer
 
         EncryptedContainer.serialize(updatedContainer)
+    }
+
+    /** Remember removing [key] if the container holds a value for it this build does not read (non-string). */
+    private fun noteOpaqueRemoval(namespace: String, key: String) {
+        val held = ((preservedWalletState?.get("S") as? kotlinx.serialization.json.JsonObject)?.get("extensions") as? kotlinx.serialization.json.JsonObject)
+            ?.get(namespace) as? kotlinx.serialization.json.JsonObject
+        val v = held?.get(key) ?: return
+        if ((v as? kotlinx.serialization.json.JsonPrimitive)?.isString != true && (namespace to key) !in emittedOpaqueRemovals) {
+            pendingOpaqueRemovals.add(namespace to key)
+        }
     }
 
     /** The events for the extension changes since the container was loaded or last exported. */
@@ -1060,7 +1082,7 @@ class JweKeystore(
         }
         val random = SecureRandom()
         return ExtensionEvents.diff(
-            extensionsAtLastSync, extensions, parent, original.filterIsInstance<kotlinx.serialization.json.JsonObject>(), System.currentTimeMillis() / 1000,
+            extensionsAtLastSync, extensions, parent, original.filterIsInstance<kotlinx.serialization.json.JsonObject>(), System.currentTimeMillis() / 1000, pendingOpaqueRemovals.toSet(),
         ) { random.nextInt().toLong().and(0xFFFFFFFFL).let { if (it == 0L) 1L else it } }
     }
 

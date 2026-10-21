@@ -36,9 +36,9 @@ internal object ExtensionEvents {
         return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
     }
 
-    private val ARRAY_INDEX = Regex("0|[1-9][0-9]{0,8}|[1-3][0-9]{9}")
-
-    private fun isArrayIndex(k: String): Boolean = ARRAY_INDEX.matches(k) && k.toLong() < 4294967295L
+    /** A canonical array index: "0" or digits without a leading zero, below 2^32 - 1. */
+    private fun isArrayIndex(k: String): Boolean =
+        k.isNotEmpty() && k.length <= 10 && k.all { it in '0'..'9' } && (k == "0" || k[0] != '0') && k.toLong() < 4294967295L
 
     private fun stringify(e: JsonElement, sb: StringBuilder) {
         when (e) {
@@ -63,14 +63,28 @@ internal object ExtensionEvents {
         }
     }
 
-    /** `true`/`false` as they are; a number as JavaScript prints it where that differs from the literal (1.0, 1E2). */
+    /** A number as `Number.prototype.toString` prints it (ECMA-262 Number::toString), via the double it denotes. */
     private fun jsNumberOrLiteral(c: String): String {
         if (c == "true" || c == "false") return c
-        val bd = c.toBigDecimalOrNull() ?: return c
-        val abs = bd.abs()
-        if (bd.signum() == 0) return "0"
-        val inPlainRange = abs >= java.math.BigDecimal("1e-6") && abs < java.math.BigDecimal("1e21")
-        return if (inPlainRange) bd.stripTrailingZeros().toPlainString() else c
+        val d = c.toDoubleOrNull() ?: return c
+        if (d.isNaN() || d.isInfinite()) return "null" // JSON.stringify of a non-finite number
+        if (d == 0.0) return "0"
+        val neg = d < 0
+        val bd = java.math.BigDecimal(java.lang.Double.toString(Math.abs(d))).stripTrailingZeros()
+        val digits = bd.unscaledValue().toString()
+        val k = digits.length
+        val n = k - bd.scale() // value = 0.digits * 10^n
+        val body = when {
+            n in k..21 -> digits + "0".repeat(n - k)
+            n in 1..21 -> digits.substring(0, n) + "." + digits.substring(n)
+            n in -5..0 -> "0." + "0".repeat(-n) + digits
+            else -> {
+                val e = n - 1
+                val mant = if (k == 1) digits else digits[0] + "." + digits.substring(1)
+                mant + "e" + (if (e < 0) "-" else "+") + Math.abs(e)
+            }
+        }
+        return if (neg) "-$body" else body
     }
 
     /** JSON.stringify's string quoting: \b \f \n \r \t, other control characters as lowercase \u00xx, lone surrogates as \udxxx. */
@@ -108,11 +122,13 @@ internal object ExtensionEvents {
         parentHash: String,
         existing: List<JsonObject>,
         nowSeconds: Long,
+        extraTombstones: Set<Pair<String, String>> = emptySet(),
         nextEventId: () -> Long,
     ): List<JsonObject> {
         val changes = sortedMapOf<Pair<String, String>, String?>(compareBy({ it.first }, { it.second }))
         for ((ns, entries) in after) for ((k, v) in entries) if (before[ns]?.get(k) != v) changes[ns to k] = v
         for ((ns, entries) in before) for (k in entries.keys) if (after[ns]?.containsKey(k) != true) changes[ns to k] = null
+        for (nk in extraTombstones) if (after[nk.first]?.containsKey(nk.second) != true) changes.putIfAbsent(nk, null)
         val out = ArrayList<JsonObject>()
         val taken = existing.mapNotNull { (it["eventId"] as? JsonPrimitive)?.content?.toLongOrNull() }.toHashSet()
         // Merge is last-write-wins by (timestampSeconds, eventId), so a new event for a key must sort
@@ -130,13 +146,16 @@ internal object ExtensionEvents {
         for ((nk, value) in changes) {
             var ts = nowSeconds
             var id = nextEventId()
-            best[nk]?.let { (bTs, bId) ->
+            val (bTs, bId) = best[nk] ?: (Long.MIN_VALUE to 0L)
+            while (true) {
                 if (ts < bTs) ts = bTs
                 if (ts == bTs && id <= bId) {
-                    if (bId < MAX_EVENT_ID) id = bId + 1 else { ts = bTs + 1 }
+                    if (bId < MAX_EVENT_ID) id = bId + 1 else { ts = bTs + 1; id = nextEventId() }
                 }
+                if (id in taken) { if (id < MAX_EVENT_ID) id++ else { ts++; id = 1L }; continue }
+                break
             }
-            while (!taken.add(id)) id = if (id < MAX_EVENT_ID) id + 1 else 1L
+            taken.add(id)
             best[nk] = ts to id
             val event = JsonObject(
                 linkedMapOf(
