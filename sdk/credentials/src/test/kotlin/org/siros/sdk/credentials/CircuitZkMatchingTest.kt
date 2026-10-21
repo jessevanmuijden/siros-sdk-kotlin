@@ -326,7 +326,7 @@ class CircuitZkMatchingTest {
 
     private fun descriptor(id: String, published: Boolean = true, deprecatedAt: String? = null, params: String = "{}") =
         ZkCircuitDescriptor(
-            id = id, aliases = listOf("$id-alias"), system = "sys", docTypes = listOf(doctype),
+            id = id, aliases = listOf("$id-alias"), system = "sys", proofSystem = "proof-sys", docTypes = listOf(doctype),
             published = published, deprecatedAt = deprecatedAt, params = json.parseToJsonElement(params).jsonObject,
         )
 
@@ -379,6 +379,23 @@ class CircuitZkMatchingTest {
         assertEquals(json.parseToJsonElement("""{"schema":1,"functions":[]}"""), json.parseToJsonElement(circuits[0].capabilities!!))
         assertNull(circuits[1].capabilities)
         assertNull(circuits[0].credentialType)
+    }
+
+    @Test
+    fun `a manifest entry without a proofSystem is not offered for zkp_req, and the proof system offered is the catalog's, not the adapter key`() {
+        val withoutIt = descriptor("a").copy(proofSystem = null)
+        val empty = descriptor("b").copy(proofSystem = "")
+        val ok = descriptor("c")
+        val circuits = CircuitZkCircuitSource.fromManifest(ZkManifest(circuits = listOf(withoutIt, empty, ok)))
+        assertEquals(listOf("c"), circuits.map { it.circuitId })
+        // The adapter key stays `system`; what a verifier sees is `proofSystem`.
+        assertEquals("sys", circuits.single().system)
+        assertEquals("proof-sys", circuits.single().offeredProofSystem)
+        assertEquals(listOf("proof-sys"), SharedCircuitZkServing.capabilities(circuits.single()).map { it.system }.distinct())
+        val filter = CircuitZkCircuitFilter(listOf("proof-sys"), listOf("c"))
+        assertTrue(filter.admits(circuits.single()))
+        assertFalse(CircuitZkCircuitFilter(listOf("sys"), listOf("c")).admits(circuits.single()))
+        assertFalse(filter.copy(proofSystems = listOf("sys")).offersProofSystem(circuits.single()))
     }
 
     @Test

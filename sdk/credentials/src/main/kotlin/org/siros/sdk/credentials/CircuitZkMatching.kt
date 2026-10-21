@@ -26,7 +26,7 @@ data class CircuitZkFunction(
 data class CircuitZkCircuitFilter(val proofSystems: List<String>?, val circuitIds: List<String>?) {
     /** Whether [circuit] is one this filter names (its id, or one of its aliases). */
     fun admits(circuit: CircuitZkCircuit): Boolean =
-        (proofSystems == null || circuit.system in proofSystems) &&
+        (proofSystems == null || circuit.offeredProofSystem in proofSystems) &&
             (circuitIds == null || circuit.circuitId in circuitIds || circuit.aliases.any { it in circuitIds })
 
     /**
@@ -40,7 +40,7 @@ data class CircuitZkCircuitFilter(val proofSystems: List<String>?, val circuitId
     }
 
     /** Whether the request accepts [circuit]'s proof system: `proof_system_values` is OPTIONAL, so no list accepts any. */
-    fun offersProofSystem(circuit: CircuitZkCircuit): Boolean = proofSystems?.contains(circuit.system) ?: true
+    fun offersProofSystem(circuit: CircuitZkCircuit): Boolean = proofSystems?.contains(circuit.offeredProofSystem) ?: true
 }
 
 /**
@@ -129,7 +129,15 @@ data class CircuitZkCircuit(
     val capabilities: String? = null,
     /** The catalog `systemVersion`, for a prover that gates per (system, version); null when the source does not know it. */
     val systemVersion: String? = null,
+    /**
+     * The proof-system identity offered to verifiers (the catalog's `proofSystem`), registered with the matcher and compared with
+     * `proof_system_values`. Null for a hand-made circuit: [system] is then the identity ([offeredProofSystem]).
+     */
+    val proofSystem: String? = null,
 ) {
+    /** The proof system a verifier sees: [proofSystem], else [system]. */
+    val offeredProofSystem: String get() = proofSystem ?: system
+
     /** Whether the matcher, not this SDK, decides if the circuit serves a request: it declares [capabilities] or a [credentialType]. */
     val constrainedByMatcher: Boolean get() = capabilities != null || credentialType != null
 
@@ -179,7 +187,7 @@ object SharedCircuitZkServing : CircuitZkServing {
                 circuit.credentialType?.let { put("credential_type", it) }
                 circuit.capabilities?.let { put("capabilities", it) }
             }
-            uniffi.siros_dc_matcher_ffi.FfiCapability(circuit.system, params)
+            uniffi.siros_dc_matcher_ffi.FfiCapability(circuit.offeredProofSystem, params)
         }
 
     override fun serves(circuit: CircuitZkCircuit, docType: String, query: JsonObject): Boolean? = try {
@@ -216,7 +224,8 @@ fun interface CircuitZkCircuitSource {
          * and a circuit with neither functions nor capabilities is offered for no plan.
          */
         fun fromManifest(manifest: ZkManifest, declare: (ZkCircuitDescriptor) -> Set<String>? = { null }): List<CircuitZkCircuit> = manifest.circuits
-            .filter { it.published && it.deprecatedAt == null }
+            // An entry without a `proofSystem` is not offered for zkp_req: the verifier's proof_system_values cannot name it.
+            .filter { it.published && it.deprecatedAt == null && !it.proofSystem.isNullOrEmpty() }
             .map { d ->
                 CircuitZkCircuit(
                     system = d.system,
@@ -228,6 +237,7 @@ fun interface CircuitZkCircuitSource {
                     aliases = d.aliases.toSet(),
                     capabilities = d.capabilities?.toString(),
                     systemVersion = d.systemVersion.ifEmpty { null },
+                    proofSystem = d.proofSystem,
                 )
             }
     }

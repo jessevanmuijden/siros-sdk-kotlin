@@ -89,8 +89,14 @@ data class ZkArtifact(
 data class ZkCircuitDescriptor(
     val id: String,
     val aliases: List<String> = emptyList(),
+    /** The SDK's adapter key: which prover adapter (with [systemVersion]) can prove this circuit. Not what a verifier is told. */
     val system: String = "",
     val systemVersion: String = "",
+    /**
+     * The proof-system identity a verifier names in `proof_system_values` (for example `longfellow-libzk-v1`), distinct from the
+     * adapter key [system]. Absent or empty: the circuit is not offered for `zkp_req` at all (no fallback to [system]).
+     */
+    val proofSystem: String? = null,
     val docTypes: List<String> = emptyList(),
     val published: Boolean = false,
     val status: String = "",

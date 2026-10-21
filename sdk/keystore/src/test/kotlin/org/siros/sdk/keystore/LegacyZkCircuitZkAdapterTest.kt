@@ -154,7 +154,7 @@ class LegacyZkCircuitZkAdapterTest {
         published: Boolean = true,
         deprecatedAt: String? = null,
     ) = ZkCircuitDescriptor(
-        id = id, system = system, systemVersion = version, docTypes = listOf(docType), published = published,
+        id = id, system = system, systemVersion = version, proofSystem = "proof-$system", docTypes = listOf(docType), published = published,
         status = status, deprecatedAt = deprecatedAt, artifact = ZkArtifact(hash = "sha256:00"),
     )
 
