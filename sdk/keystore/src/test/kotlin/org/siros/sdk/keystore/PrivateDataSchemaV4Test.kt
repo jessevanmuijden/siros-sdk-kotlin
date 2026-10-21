@@ -375,7 +375,7 @@ class PrivateDataSchemaV4Test {
         )
         // array indexes up to 2^32-2 sort first and numerically, "01" is not one
         h("""{"4000000000":1,"01":2,"a":3}""", buildJsonObject { put("01", JsonPrimitive(2)); put("a", JsonPrimitive(3)); put("4000000000", JsonPrimitive(1)) })
-        val nums = listOf("1.0E-7" to "1e-7", "0.0000001" to "1e-7", "1000000000000000000000" to "1e+21", "1E2" to "100", "0.000001" to "0.000001", "-2.50" to "-2.5", "123456789012345680000" to "123456789012345680000")
+        val nums = listOf("1.0E-7" to "1e-7", "0.0000001" to "1e-7", "1000000000000000000000" to "1e+21", "1E2" to "100", "0.000001" to "0.000001", "-2.50" to "-2.5", "123456789012345680000" to "123456789012345680000", "1e23" to "1e+23", "5e-324" to "5e-324", "1.7976931348623157e308" to "1.7976931348623157e+308", "0.1" to "0.1", "4.35" to "4.35")
         for ((lit, js) in nums) {
             h("""{"v":$js}""", buildJsonObject { put("v", kotlinx.serialization.json.JsonUnquotedLiteral(lit)) })
         }

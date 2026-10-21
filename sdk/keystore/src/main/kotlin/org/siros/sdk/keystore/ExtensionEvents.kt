@@ -70,7 +70,12 @@ internal object ExtensionEvents {
         if (d.isNaN() || d.isInfinite()) return "null" // JSON.stringify of a non-finite number
         if (d == 0.0) return "0"
         val neg = d < 0
-        val bd = java.math.BigDecimal(java.lang.Double.toString(Math.abs(d))).stripTrailingZeros()
+        // The shortest digit string that reads back as the same double (what ECMAScript prints). Not
+        // Double.toString: before JDK 19 it is not always the shortest (1e23 gives 9.999999999999999E22).
+        val exact = java.math.BigDecimal(Math.abs(d))
+        val bd = (1..17).firstNotNullOf { p ->
+            exact.round(java.math.MathContext(p, java.math.RoundingMode.HALF_EVEN)).takeIf { it.toDouble() == Math.abs(d) }
+        }.stripTrailingZeros()
         val digits = bd.unscaledValue().toString()
         val k = digits.length
         val n = k - bd.scale() // value = 0.digits * 10^n
