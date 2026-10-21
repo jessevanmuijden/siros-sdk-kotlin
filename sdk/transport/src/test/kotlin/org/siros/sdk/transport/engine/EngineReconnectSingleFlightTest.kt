@@ -2,6 +2,8 @@ package org.siros.sdk.transport.engine
 
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -91,5 +93,56 @@ class EngineReconnectSingleFlightTest {
     fun `the engine's own 3 s ping interval never becomes the client's pong wait`() {
         assertEquals(10_000L, WalletEngineSession.livenessIntervalMs(3000L))
         assertEquals(15_000L, WalletEngineSession.livenessIntervalMs(15_000L))
+    }
+
+    @Test
+    fun `a forced reconnect whose caller is cancelled during the token refresh does not stop the pending recovery`() {
+        val s = session()
+        var calls = 0
+        s.connect("tok", tokenProvider = { if (calls++ == 0) kotlinx.coroutines.awaitCancellation() else "fresh" })
+        listeners[0].onOpen(sockets[0], response)
+        listeners[0].onFailure(sockets[0], IOException("ping timeout"), null) // schedules the backoff attempt
+        runBlocking {
+            val forced = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Default) { s.forceReconnect() }
+            Thread.sleep(200)
+            forced.cancelAndJoin() // the caller goes away while tokenProvider is suspended
+        }
+        settle()
+        assertEquals("the pending attempt still reconnected", 2, sockets.size)
+    }
+
+    @Test
+    fun `an old attempt that resumes after a newer socket was installed publishes nothing`() {
+        val s = session()
+        val gate = kotlinx.coroutines.CompletableDeferred<String>()
+        var calls = 0
+        s.connect("tok", tokenProvider = { if (calls++ == 0) gate.await() else "fresh" })
+        listeners[0].onOpen(sockets[0], response)
+        listeners[0].onFailure(sockets[0], IOException("ping timeout"), null) // backoff job parks in the refresh (after 1 s)
+        Thread.sleep(1300)
+        runBlocking { s.forceReconnect() } // installs socket 1
+        assertEquals(2, sockets.size)
+        gate.complete("late")
+        settle()
+        assertEquals("the late attempt did not add or replace a socket", 2, sockets.size)
+    }
+
+    @Test
+    fun `a socket that failed is not reported connected during the backoff`() {
+        val s = session()
+        s.connect("tok")
+        listeners[0].onOpen(sockets[0], response)
+        assertEquals(true, s.isConnected)
+        listeners[0].onFailure(sockets[0], IOException("ping timeout"), null)
+        assertEquals(false, s.isConnected)
+        assertThrows(IllegalStateException::class.java) { s.startPresentation(requestUri = "openid4vp://x") }
+    }
+
+    @Test
+    fun `a credential notification the socket refuses does not throw`() {
+        val s = session()
+        s.connect("tok")
+        every { sockets[0].send(any<String>()) } returns false
+        s.sendCredentialNotification("flow", "n1", "credential_accepted", null)
     }
 }

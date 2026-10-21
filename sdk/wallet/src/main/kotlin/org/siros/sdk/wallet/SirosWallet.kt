@@ -9554,12 +9554,18 @@ class SirosWallet private constructor(
             } catch (e: Throwable) {
                 // Not only Exception: a native matcher/prover linkage Error would otherwise kill this coroutine with no log and no
                 // answer, leaving the flow (and the app's spinner) waiting for a reply that never comes.
-                if (e is VirtualMachineError) throw e
+                if (e is VirtualMachineError || e is kotlinx.coroutines.CancellationException) throw e
                 Timber.e(e, "Error handling credential selection (code=credential_selection_failed, flow $flowId)")
                 val declinePayload = kotlinx.serialization.json.buildJsonObject {
                     put("reason", kotlinx.serialization.json.JsonPrimitive("error: ${e.message}"))
                 }
-                engine.sendFlowAction(flowId, "decline", declinePayload)
+                // Best effort: when the failure was the socket refusing a frame, the decline fails the same way, and an exception
+                // escaping this launch has no handler.
+                try {
+                    engine.sendFlowAction(flowId, "decline", declinePayload)
+                } catch (sendFailure: Exception) {
+                    Timber.w("Decline for flow $flowId not sent (${sendFailure.javaClass.simpleName}: ${sendFailure.message})")
+                }
             }
         }
     }

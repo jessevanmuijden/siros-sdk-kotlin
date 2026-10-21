@@ -5789,6 +5789,52 @@ class SirosWalletTest {
     }
 
     @Test
+    fun credentialSelection_whenTheSocketRefusesEveryFrame_theFallbackDeclineIsBestEffort_andNothingEscapes() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val store = FakeCredentialStore(mutableListOf())
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.sendCredentialsMatched(any(), any(), any()) } throws IllegalStateException("Not connected")
+        every { engine.sendFlowAction(any(), any(), any()) } throws IllegalStateException("Not connected")
+        val keystore = mockk<KeystoreManager>()
+        every { keystore.isUnlocked } returns false
+        every { keystore.listKeys() } returns listOf(KeyInfo("test-kid", "ES256", 0L))
+        val escaped = mutableListOf<Throwable>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice", credentials = store.getAll())),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob() + kotlinx.coroutines.CoroutineExceptionHandler { _, e -> escaped += e }),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to store,
+            "keystore" to keystore,
+            "eventListener" to listener,
+            "lastTrustResults" to mutableMapOf<String, Any?>(),
+            "_presentationHistory" to mutableListOf<PresentationRecord>(),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        progressFlow.emit(
+            FlowProgressMessage(
+                flowId = "flow-refused",
+                step = "credential_selection",
+                payload = buildJsonObject {
+                    putJsonObject("dcql_query") {
+                        putJsonArray("credentials") {
+                            add(buildJsonObject {
+                                put("id", "q-pid"); put("format", "dc+sd-jwt")
+                                putJsonObject("meta") { putJsonArray("vct_values") { add(JsonPrimitive("urn:x")) } }
+                            })
+                        }
+                    }
+                },
+            )
+        )
+        advanceUntilIdle()
+        // The no-match answer was refused by the socket, the fallback decline was tried, and its failure was logged, not thrown.
+        verify(atLeast = 1) { engine.sendFlowAction("flow-refused", "decline", any()) }
+        assertEquals(emptyList<Throwable>(), escaped)
+    }
+
+    @Test
     fun matchRequest_with_nothing_matching_reports_credentials_matched_with_a_reason() = runTest(dispatcher) {
         val matchFlow = MutableSharedFlow<MatchRequestMessage>()
         val listener = mockk<WalletEventListener>(relaxed = true)
