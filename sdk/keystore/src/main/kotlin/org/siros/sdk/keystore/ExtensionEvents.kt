@@ -79,7 +79,13 @@ internal object ExtensionEvents {
             // back as the same double may be the farther one; if both do, the nearer wins.
             val down = exact.round(java.math.MathContext(p, java.math.RoundingMode.DOWN))
             val up = exact.round(java.math.MathContext(p, java.math.RoundingMode.UP))
-            listOf(down, up).filter { it.toDouble() == target }.minByOrNull { (it - exact).abs() }
+            val ok = listOf(down, up).filter { it.toDouble() == target }
+            if (ok.size == 2 && ok[0].compareTo(ok[1]) != 0 && (ok[0] - exact).abs() == (ok[1] - exact).abs()) {
+                // Equidistant: ECMAScript takes the candidate whose last digit is even.
+                ok.first { it.unscaledValue().mod(java.math.BigInteger.valueOf(2)).signum() == 0 }
+            } else {
+                ok.minByOrNull { (it - exact).abs() }
+            }
         }.stripTrailingZeros()
         val digits = bd.unscaledValue().toString()
         val k = digits.length
