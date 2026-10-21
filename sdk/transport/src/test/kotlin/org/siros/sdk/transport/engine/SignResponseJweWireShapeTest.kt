@@ -26,10 +26,11 @@ class SignResponseJweWireShapeTest {
         for (build in listOf<() -> SignResponseMessage>(
             { SignResponseMessage(flowId = "f", responseJwe = "j", error = "x") },
             { SignResponseMessage(flowId = "f", responseJwe = "j", errorCode = SignResponseMessage.SIGN_REFUSED) },
+            { SignResponseMessage(flowId = "f", responseJwe = "j", vpToken = "t") },
         )) {
             try {
                 build()
-                fail("accepted a response_jwe together with an error")
+                fail("accepted a response_jwe together with an error or a vp_token")
             } catch (_: IllegalArgumentException) {
                 assertTrue(true)
             }

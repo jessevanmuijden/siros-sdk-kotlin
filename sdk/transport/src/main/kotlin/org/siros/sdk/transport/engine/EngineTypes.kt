@@ -236,6 +236,7 @@ data class SignResponseMessage(
         require(responseJwe == null || (error == null && errorCode == null)) {
             "A sign_response that carries an error or error_code carries no response_jwe"
         }
+        require(responseJwe == null || vpToken == null) { "A sign_response carries response_jwe or vp_token, never both" }
     }
 
     companion object {

@@ -1,5 +1,5 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
-package org.siros.sdk.keystore
+package org.siros.sdk.wallet
 
 import com.nimbusds.jose.EncryptionMethod
 import com.nimbusds.jose.JWEAlgorithm
@@ -35,7 +35,7 @@ import kotlinx.serialization.json.buildJsonObject
  * private half. [alg] and [enc] are the pair the engine negotiated against the issuer's metadata, and the issuer's JWE
  * must use exactly that pair ([decrypt] refuses anything else).
  */
-class CredentialResponseKey private constructor(
+internal class CredentialResponseKey private constructor(
     private val key: ECKey,
     val alg: String,
     val enc: String,
@@ -95,9 +95,32 @@ class CredentialResponseKey private constructor(
  * Builds the OpenID4VP `direct_post.jwt` response (JARM, OpenID4VP 1.0 section 8.3) on the wallet, so the engine can
  * POST ciphertext to the verifier without ever holding the `vp_token`.
  */
-object AuthorizationResponseEncryption {
+internal object AuthorizationResponseEncryption {
     private const val JARM_ISSUER = "https://self-issued.me/v2"
     private const val JARM_LIFETIME_SECONDS = 300L
+
+    /** The engine refuses a larger `response_jwe`. */
+    const val MAX_RESPONSE_JWE_BYTES = 4 * 1024 * 1024
+
+    /**
+     * Whether [jwe] is a compact JWE the engine accepts: five base64url segments, none empty (the encrypted-key segment
+     * may be empty only for direct `ECDH-ES`), at most [MAX_RESPONSE_JWE_BYTES], whose protected header carries exactly
+     * [alg], [enc] and, when the verifier's JWK has one, its [kid] (and none when it has not).
+     */
+    fun isConformant(jwe: String, alg: String, enc: String, kid: String?): Boolean {
+        if (jwe.isEmpty() || jwe.length > MAX_RESPONSE_JWE_BYTES) return false
+        val segments = jwe.split('.')
+        if (segments.size != 5) return false
+        val b64 = Regex("^[A-Za-z0-9_-]*$")
+        if (segments.any { !b64.matches(it) }) return false
+        if (segments.withIndex().any { (i, s) -> s.isEmpty() && !(i == 1 && alg == "ECDH-ES") }) return false
+        val header = try {
+            JWEHeader.parse(com.nimbusds.jose.util.Base64URL(segments[0]))
+        } catch (e: Exception) {
+            return false
+        }
+        return header.algorithm.name == alg && header.encryptionMethod.name == enc && header.keyID == kid
+    }
 
     /**
      * The compact JWE of the response: claims `iss`, `aud`, `iat`, `exp` (`iat` + 300 s), `vp_token` and, when the
@@ -146,6 +169,9 @@ object AuthorizationResponseEncryption {
         } catch (e: Exception) {
             throw IllegalArgumentException("The response could not be encrypted to the verifier's key with $alg/$enc")
         }
-        return obj.serialize()
+        val serialized = obj.serialize()
+        // The engine refuses anything else, so a response it would refuse is never sent.
+        require(isConformant(serialized, alg, enc, jwk.keyID)) { "The encrypted response is not a conformant compact JWE (too large or malformed)" }
+        return serialized
     }
 }

@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Redirect `zkp_req` presentations answer `response_jwe` when the engine asks for client-side encryption**
-  (go-wallet-backend#471; stacked on #280 and #282; the helper files `BlindResponseEncryption.kt`,
-  `BlindEncryptionTypes.kt` and `BlindPresentation.kt` are copied unchanged from #283 at 446ea1ed and
+  (go-wallet-backend#471; stacked on #280 and #282; the helper files `BlindResponseEncryption.kt` (sdk:wallet, internal),
+  `BlindEncryptionTypes.kt` and `BlindPresentation.kt` are copied unchanged from #283 at 8715c0b4 and
   disappear from this diff when #283 lands). When the `sign_presentation` request carries
   `response_encryption`, `handleCircuitZkEngineSignPresentation` builds the JARM response itself
   (`BlindPresentation.responseJwe`: `vp_token` `{queryId: [base64url CBOR ZkpPresentation]}`, `state` echoed,
