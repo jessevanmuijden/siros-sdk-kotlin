@@ -261,6 +261,15 @@ data class SignSubFlowParams(
     @SerialName("dpop_nonce") val dpopNonce: String? = null,
     val ath: String? = null,
     @SerialName("key_id") val keyId: String? = null,
+    /**
+     * Holder commitments the issuer asked for (`["psc"]`), with the
+     * [credentialType] and the exact [credentialIssuer] identifier string
+     * (issuer metadata `credential_issuer`, verbatim) the wallet derives them
+     * for. The wallet puts the claim `org.siros.psc` into the `jwt` proof.
+     */
+    @SerialName("holder_commitments") val holderCommitments: List<String>? = null,
+    @SerialName("credential_type") val credentialType: String? = null,
+    @SerialName("credential_issuer") val credentialIssuer: String? = null,
 )
 
 // ---------------------------------------------------------------------------

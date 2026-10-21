@@ -12,6 +12,8 @@
     <string name="siros_dcapi_refused_request_not_verified">Δεν ήταν δυνατό να επαληθευτεί ότι το αίτημα προέρχεται από τον ιστότοπο στον οποίο βρίσκεστε, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">Το πορτοφόλι σας δεν μπόρεσε να καθορίσει ποιος ζητά τα στοιχεία, γι\' αυτό δεν κοινοποιήθηκε τίποτα.</string>
     <string name="siros_dcapi_refused_proof_failed">Το πορτοφόλι σας δεν μπόρεσε να δημιουργήσει την απόδειξη, γι\' αυτό δεν κοινοποιήθηκε τίποτα. Δοκιμάστε ξανά.</string>
+    <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
+    <string name="siros_psc_conflict">Αυτός ο εκδότης έχει ήδη καταχωρισμένη διαφορετική δέσμευση ψευδωνύμου για εσάς. Αν χάσατε το πορτοφόλι σας, ζητήστε από τον εκδότη να την επαναφέρει.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
     <string name="siros_consent_title">Επιβεβαίωση κοινοποίησης</string>
     <string name="siros_consent_share">Κοινοποίηση</string>

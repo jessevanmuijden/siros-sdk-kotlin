@@ -359,7 +359,55 @@ class PredicateFunctions(functions: List<PredicateFunction>) {
             }
         }
 
-        private fun read(v0: CBORObject, type: ValueType): ClaimValue {
+        /** Largest decimal exponent magnitude, and mantissa size in bits, a claim number may have before it is expanded to text. */
+        private const val MAX_NUMBER_EXPONENT = 1000
+        private const val MAX_NUMBER_MANTISSA_BITS = 4096
+
+        /** Largest binary exponent magnitude of a CBOR bigfloat (tag 5), and the largest bignum (tag 2/3) in bytes. */
+        private const val MAX_BIGFLOAT_EXPONENT = 4096
+        private const val MAX_BIGNUM_BYTES = MAX_NUMBER_MANTISSA_BITS / 8
+
+        /**
+         * Whether the tagged CBOR number [v0] (its content is [v]) is small enough to convert: a bignum by its byte length, a
+         * decimal fraction or bigfloat by its exponent and mantissa, all checked on the encoded items before anything is expanded.
+         */
+        private fun rawNumberWithinBounds(v0: CBORObject, v: CBORObject): Boolean {
+            // The exponent and mantissa are read as PLAIN integers or bignums by their encoding: a nested decimal fraction or
+            // bigfloat there (4([4([100000000, 1]), 1])) is refused, never converted to look at its size.
+            fun mantissaOk(m: CBORObject): Boolean = when {
+                !m.isTagged && m.type == CBORType.Integer -> m.AsNumber().ToEInteger().GetUnsignedBitLengthAsEInteger()
+                    .compareTo(com.upokecenter.numbers.EInteger.FromInt32(MAX_NUMBER_MANTISSA_BITS)) <= 0
+                m.isTagged && m.tagCount == 1 && (m.HasMostOuterTag(2) || m.HasMostOuterTag(3)) -> {
+                    val bytes = m.UntagOne()
+                    !bytes.isTagged && bytes.type == CBORType.ByteString && bytes.GetByteString().size <= MAX_BIGNUM_BYTES
+                }
+                else -> false
+            }
+            fun exponentWithin(e: CBORObject, limit: Int): Boolean =
+                !e.isTagged && e.type == CBORType.Integer && e.AsNumber().ToEInteger().Abs().compareTo(com.upokecenter.numbers.EInteger.FromInt32(limit)) <= 0
+            return when {
+                v.type == CBORType.ByteString -> !v.isTagged && v.GetByteString().size <= MAX_BIGNUM_BYTES
+                v.type == CBORType.Array && v.size() == 2 -> {
+                    val limit = if (v0.HasMostOuterTag(5)) MAX_BIGFLOAT_EXPONENT else MAX_NUMBER_EXPONENT
+                    exponentWithin(v[0], limit) && mantissaOk(v[1])
+                }
+                else -> false
+            }
+        }
+
+        /**
+         * The plain decimal text of [d], or null when expanding it would be unreasonable: a CBOR decimal fraction or bigfloat
+         * such as `[100000000, 1]` (1E+100000000) would otherwise become ~100M characters before consent. Refused (the reader
+         * then reports a mismatching type, so no comparison holds): the bound is checked on the exponent and mantissa, before
+         * any expansion.
+         */
+        private fun boundedPlain(d: com.upokecenter.numbers.EDecimal): String? {
+            if (d.exponent.Abs().compareTo(com.upokecenter.numbers.EInteger.FromInt32(MAX_NUMBER_EXPONENT)) > 0) return null
+            if (d.unsignedMantissa.GetUnsignedBitLengthAsEInteger().compareTo(com.upokecenter.numbers.EInteger.FromInt32(MAX_NUMBER_MANTISSA_BITS)) > 0) return null
+            return BigDecimal(d.toString()).toPlainString()
+        }
+
+        internal fun read(v0: CBORObject, type: ValueType): ClaimValue {
             val v = if (v0.isTagged) v0.UntagOne() else v0
             val mismatch = ClaimValue(if (type == ValueType.STRING) ValueType.BOOL else ValueType.STRING, "")
             return when (type) {
@@ -368,8 +416,10 @@ class PredicateFunctions(functions: List<PredicateFunction>) {
                 ValueType.BOOL -> if (v.type == CBORType.Boolean) ClaimValue(type, v.isTrue.toString()) else mismatch
                 // A tagged number (bignum 2/3, decimal fraction 4, bigfloat 5) is a number, not a mismatching type.
                 ValueType.NUMBER -> if (listOf(2, 3, 4, 5).any { v0.HasMostOuterTag(it) }) {
+                    // Bound the RAW exponent and mantissa before any conversion: ToEDecimal of a bigfloat [-100000000, 1] needs 5^100000000.
+                    if (!rawNumberWithinBounds(v0, v)) return mismatch
                     runCatching { v0.AsNumber() }.getOrNull()?.takeIf { it.IsFinite() }
-                        ?.let { ClaimValue(type, BigDecimal(it.ToEDecimal().toString()).toPlainString()) } ?: mismatch
+                        ?.let { n -> boundedPlain(n.ToEDecimal())?.let { ClaimValue(type, it) } } ?: mismatch
                 } else when (v.type) {
                     CBORType.Integer -> ClaimValue(type, v.AsNumber().ToEInteger().toString())
                     CBORType.FloatingPoint -> v.AsDoubleValue().takeIf { it.isFinite() }?.let { ClaimValue(type, BigDecimal(it).toPlainString()) } ?: mismatch

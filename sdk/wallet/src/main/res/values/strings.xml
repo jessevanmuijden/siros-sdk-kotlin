@@ -16,6 +16,8 @@
     <string name="siros_dcapi_refused_request_not_verified">This request could not be verified as coming from the site you are on, so nothing was shared.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">Your wallet could not work out who is asking, so nothing was shared.</string>
     <string name="siros_dcapi_refused_proof_failed">Your wallet could not create the proof, so nothing was shared. Please try again.</string>
+    <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
+    <string name="siros_psc_conflict">This issuer already has a different pseudonym commitment on record for you. If you lost your wallet, ask the issuer to reset it.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
     <string name="siros_consent_title">Confirm sharing</string>
     <string name="siros_consent_share">Share</string>

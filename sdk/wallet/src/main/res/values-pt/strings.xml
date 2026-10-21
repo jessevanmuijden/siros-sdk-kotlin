@@ -12,6 +12,8 @@
     <string name="siros_dcapi_refused_request_not_verified">Não foi possível verificar que este pedido vem do site em que está, por isso nada foi partilhado.</string>
     <string name="siros_dcapi_refused_verifier_id_unavailable">A sua carteira não conseguiu determinar quem está a pedir, por isso nada foi partilhado.</string>
     <string name="siros_dcapi_refused_proof_failed">A sua carteira não conseguiu criar a prova, por isso nada foi partilhado. Tente novamente.</string>
+    <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
+    <string name="siros_psc_conflict">Este emissor já tem registado um compromisso de pseudónimo diferente para si. Se perdeu a sua carteira, peça ao emissor para o repor.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
     <string name="siros_consent_title">Confirmar partilha</string>
     <string name="siros_consent_share">Partilhar</string>

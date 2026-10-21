@@ -127,6 +127,33 @@ interface KeystoreManager {
     }
 
     /**
+     * [generateProof] with extra string claims in the proof JWT payload, signed
+     * together with the rest (so the proof of possession covers them). Used for
+     * the issuer-advertised holder commitments (`org.siros.psc`).
+     *
+     * Fail-closed default: an empty [extraClaims] forwards to the four-argument
+     * form; a non-empty one throws, because a keystore that cannot place the
+     * claims must not return a proof that silently lacks what the issuer asked
+     * for. The keystores in this SDK override it. Claim values are never logged.
+     */
+    suspend fun generateProof(
+        audience: String,
+        nonce: String,
+        freshKey: Boolean,
+        holderBinding: HolderBinding?,
+        extraClaims: Map<String, String>,
+    ): String {
+        if (extraClaims.isNotEmpty()) {
+            throw KeystoreException(
+                "This KeystoreManager does not implement generateProof(..., extraClaims) and so cannot " +
+                    "add the requested proof claims - refusing rather than returning a proof without them.",
+            )
+        }
+        return generateProof(audience, nonce, freshKey, holderBinding)
+    }
+
+
+    /**
      * Sign a verifiable presentation for OID4VP.
      * @param nonce the verifier nonce
      * @param audience the verifier URL

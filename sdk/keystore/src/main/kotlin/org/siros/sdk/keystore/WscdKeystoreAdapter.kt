@@ -228,6 +228,14 @@ class WscdKeystoreAdapter private constructor(
         nonce: String,
         freshKey: Boolean,
         holderBinding: HolderBinding?,
+    ): String = generateProof(audience, nonce, freshKey, holderBinding, emptyMap())
+
+    override suspend fun generateProof(
+        audience: String,
+        nonce: String,
+        freshKey: Boolean,
+        holderBinding: HolderBinding?,
+        extraClaims: Map<String, String>,
     ): String {
         checkUnlocked()
         var keys = signer.listKeys()
@@ -268,6 +276,7 @@ class WscdKeystoreAdapter private constructor(
             .issueTime(Date())
             .claim("nonce", nonce)
         did?.let { claimsBuilder.issuer(it) }
+        extraClaims.forEach { (k, v) -> claimsBuilder.claim(k, v) }
         val claims = claimsBuilder.build()
 
         val signingInput = "${base64Url(header.toJSONObject())}.${base64Url(claims.toJSONObject())}"

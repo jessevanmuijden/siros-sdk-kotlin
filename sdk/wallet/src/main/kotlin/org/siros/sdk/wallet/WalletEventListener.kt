@@ -107,6 +107,20 @@ interface WalletEventListener {
     fun onFlowError(flowId: String, errorMessage: String, redirectUri: String? = null) {}
 
     /**
+     * The issuer refused this wallet's pseudonym commitment: it holds a
+     * different one for the user (flow error `PSC_CONFLICT`). Terminal for the
+     * flow, with nothing issued or stored. Show
+     * [PseudonymCommitmentConflictException.userMessageRes] and tell the user to
+     * ask the issuer for a reset.
+     *
+     * The default forwards the issuer's text to [onFlowError], so a listener
+     * that does not know this callback still sees the failure.
+     */
+    fun onPseudonymCommitmentConflict(flowId: String, error: PseudonymCommitmentConflictException) {
+        onFlowError(flowId, error.issuerMessage)
+    }
+
+    /**
      * An issuance was refused because the issuer's trust could not be
      * established (remote evaluation negative or rejected, backend unreachable
      * with no positive local validation, or an unverifiable mdoc `issuerAuth`).
