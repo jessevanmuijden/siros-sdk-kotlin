@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Redirect `zkp_req` presentations answer `response_jwe` when the engine asks for client-side encryption**
+  (go-wallet-backend#471; stacked on #280 and #282; the helper files `BlindResponseEncryption.kt`,
+  `BlindEncryptionTypes.kt` and `BlindPresentation.kt` are copied unchanged from #283 at 446ea1ed and
+  disappear from this diff when #283 lands). When the `sign_presentation` request carries
+  `response_encryption`, `handleCircuitZkEngineSignPresentation` builds the JARM response itself
+  (`BlindPresentation.responseJwe`: `vp_token` `{queryId: [base64url CBOR ZkpPresentation]}`, `state` echoed,
+  `aud` = `verified_request.client_id`, protected header `alg`/`enc` as requested and the verifier JWK's `kid`)
+  and answers `{response_jwe}` with NO `vp_token`; a refusal or error never carries one. A request that asks for
+  encryption without a `verified_request.client_id`, or whose key/algorithm cannot be applied, is refused
+  (`SIGN_REFUSED`), never answered in the clear. Without `response_encryption` (plain response modes) the answer is
+  the `vp_token` as before. New: `SignResponseMessage.responseJwe`, `SignRequestParams.responseEncryption`/`state`/
+  `verifiedRequest`, `WalletEngineSession.sendSignResponse(responseJwe = ...)`. Must not be merged before
+  go-wallet-backend#469/#471 are deployed: a gdc build with #471 breaks a client that still returns a `vp_token`
+  for `direct_post.jwt`.
+
 ### Added
 - **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`).** The engine
   session now matches, proves and answers `zkp_req` requests: the verifier's `client_metadata`

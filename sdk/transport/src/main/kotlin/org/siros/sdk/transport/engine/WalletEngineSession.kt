@@ -663,6 +663,7 @@ class WalletEngineSession(
         clientAttestationPoP: String? = null,
         dpopKeyId: String? = null,
         dpopProof: String? = null,
+        responseJwe: String? = null,
     ) {
         send(SignResponseMessage.serializer(), SignResponseMessage(
             flowId = flowId,
@@ -675,6 +676,7 @@ class WalletEngineSession(
             clientAttestationPoP = clientAttestationPoP,
             dpopKeyId = dpopKeyId,
             dpopProof = dpopProof,
+            responseJwe = responseJwe,
         ))
     }
 

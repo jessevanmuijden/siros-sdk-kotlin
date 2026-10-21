@@ -7204,7 +7204,7 @@ class SirosWallet private constructor(
     /**
      * The `zkp_req` presentation of a redirect (QR / same-device link, `direct_post.jwt`) request relayed by the engine: the engine has
      * fetched and verified the request object and evaluated trust; this answers its `sign_presentation` request with the
-     * `vp_token` object `{queryId: [base64url(CBOR ZkpPresentation)]}`, which the engine encrypts for the verifier (JARM) and posts.
+     * `vp_token` object `{queryId: [base64url(CBOR ZkpPresentation)]}`. When the request carries `response_encryption` (`direct_post.jwt`) the wallet encrypts it for the verifier itself (JARM, [BlindPresentation.responseJwe]) and answers `{response_jwe}` with NO `vp_token`; otherwise (a plain response mode) it answers the `vp_token`.
      * Everything else is [answerCircuitZkQueries], shared with the DC API path. The session transcript is the OpenID4VPHandover over
      * `[client id, nonce, JWK thumbprint, response_uri]`: the thumbprint of the verifier's response-encryption key is REQUIRED (the
      * response is always encrypted over redirects), so a request without one is refused, never answered with a null.
@@ -7316,7 +7316,17 @@ class SirosWallet private constructor(
             )
             // The flow may have ended while the user was asked: nothing is recorded or sent for it then.
             if (ended()) return
-            val vpToken = JsonObject(answer.tokensByQueryId.mapValues { (_, tokens) -> kotlinx.serialization.json.JsonArray(tokens) }).toString()
+            val vpTokenObject = JsonObject(answer.tokensByQueryId.mapValues { (_, tokens) -> kotlinx.serialization.json.JsonArray(tokens) })
+            // direct_post.jwt: the JARM response is built and encrypted HERE and the engine only relays the ciphertext. The `aud` is the
+            // client_id the engine validated, never the sign request's `audience`; a request that asks for encryption without it is refused.
+            val responseJwe = params.responseEncryption?.let { enc ->
+                val jarmAudience = params.verifiedRequest?.clientId?.takeIf { it.isNotEmpty() } ?: refuse("jarm-audience", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+                try {
+                    BlindPresentation.responseJwe(enc, jarmAudience, params.state, vpTokenObject)
+                } catch (e: IllegalArgumentException) {
+                    refuse("response-encryption", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+                }
+            }
             recordPresentation(PresentationRecord(
                 id = randomUint32Id(),
                 flowId = flowId,
@@ -7330,7 +7340,12 @@ class SirosWallet private constructor(
             // Recording the history can suspend (keystore sync): check again, as late as possible, that this connection and flow are
             // still the ones being answered.
             if (!currentCoroutineContext().isActive || ended()) return
-            engine.sendSignResponse(flowId, vpToken = vpToken, messageId = msg.messageId)
+            // Exactly one of the two: response_jwe (the engine then never holds the vp_token) or, on a plain mode, the vp_token.
+            if (responseJwe != null) {
+                engine.sendSignResponse(flowId, responseJwe = responseJwe, messageId = msg.messageId)
+            } else {
+                engine.sendSignResponse(flowId, vpToken = vpTokenObject.toString(), messageId = msg.messageId)
+            }
             }
         } catch (e: CircuitZkEngineRefusal) {
             if (ended()) return

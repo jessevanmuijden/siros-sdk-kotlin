@@ -23,6 +23,7 @@ class EngineTypesBinaryShapeTest {
     @Test
     fun `sign request params appends client_metadata last`() {
         val c = components(SignRequestParams(clientMetadata = JsonPrimitive("CM"), credentialIssuer = "CI"))
-        assertEquals(listOf<Any?>("CI", JsonPrimitive("CM")), c.takeLast(2))
+        // client_metadata is followed only by the three encrypted-presentation members (response_encryption, state, verified_request).
+        assertEquals(listOf<Any?>("CI", JsonPrimitive("CM"), null, null, null), c.takeLast(5))
     }
 }

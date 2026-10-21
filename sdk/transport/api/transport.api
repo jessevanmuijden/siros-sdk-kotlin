@@ -1,9 +1,46 @@
+public final class org/siros/sdk/transport/BlindEncryptionWire {
+	public static final field ACTION_DECRYPT_CREDENTIAL_RESPONSE Ljava/lang/String;
+	public static final field INSTANCE Lorg/siros/sdk/transport/BlindEncryptionWire;
+}
+
 public abstract interface class org/siros/sdk/transport/CredentialNotifier {
 	public abstract fun sendCredentialNotification (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
 }
 
 public final class org/siros/sdk/transport/CredentialNotifier$DefaultImpls {
 	public static synthetic fun sendCredentialNotification$default (Lorg/siros/sdk/transport/CredentialNotifier;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)V
+}
+
+public final class org/siros/sdk/transport/CredentialResponseEncryptionRequest {
+	public static final field Companion Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Z)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Z
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Z)Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest;
+	public static synthetic fun copy$default (Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest;Ljava/lang/String;Ljava/lang/String;ZILjava/lang/Object;)Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAlg ()Ljava/lang/String;
+	public final fun getEnc ()Ljava/lang/String;
+	public final fun getRequired ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public synthetic class org/siros/sdk/transport/CredentialResponseEncryptionRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Lorg/siros/sdk/transport/CredentialResponseEncryptionRequest;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class org/siros/sdk/transport/CredentialResponseEncryptionRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
 }
 
 public abstract interface class org/siros/sdk/transport/DeliveredResponseMetadata {
@@ -38,6 +75,37 @@ public final class org/siros/sdk/transport/ResponseCredentialMetadata$Companion 
 	public final fun serializer ()Lkotlinx/serialization/KSerializer;
 }
 
+public final class org/siros/sdk/transport/ResponseEncryptionRequest {
+	public static final field Companion Lorg/siros/sdk/transport/ResponseEncryptionRequest$Companion;
+	public fun <init> (Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Lkotlinx/serialization/json/JsonObject;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun copy (Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;)Lorg/siros/sdk/transport/ResponseEncryptionRequest;
+	public static synthetic fun copy$default (Lorg/siros/sdk/transport/ResponseEncryptionRequest;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lorg/siros/sdk/transport/ResponseEncryptionRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAlg ()Ljava/lang/String;
+	public final fun getEnc ()Ljava/lang/String;
+	public final fun getJwk ()Lkotlinx/serialization/json/JsonObject;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public synthetic class org/siros/sdk/transport/ResponseEncryptionRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Lorg/siros/sdk/transport/ResponseEncryptionRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Lorg/siros/sdk/transport/ResponseEncryptionRequest;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Lorg/siros/sdk/transport/ResponseEncryptionRequest;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class org/siros/sdk/transport/ResponseEncryptionRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
+}
+
 public abstract interface class org/siros/sdk/transport/Transport {
 	public abstract fun connect (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public abstract fun disconnect (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
@@ -55,6 +123,47 @@ public final class org/siros/sdk/transport/TransportState : java/lang/Enum {
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public static fun valueOf (Ljava/lang/String;)Lorg/siros/sdk/transport/TransportState;
 	public static fun values ()[Lorg/siros/sdk/transport/TransportState;
+}
+
+public final class org/siros/sdk/transport/VerifiedRequest {
+	public static final field Companion Lorg/siros/sdk/transport/VerifiedRequest$Companion;
+	public fun <init> ()V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Lkotlinx/serialization/json/JsonElement;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Lkotlinx/serialization/json/JsonElement;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Z
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()Lkotlinx/serialization/json/JsonElement;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Lkotlinx/serialization/json/JsonElement;)Lorg/siros/sdk/transport/VerifiedRequest;
+	public static synthetic fun copy$default (Lorg/siros/sdk/transport/VerifiedRequest;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZLjava/lang/String;Lkotlinx/serialization/json/JsonElement;ILjava/lang/Object;)Lorg/siros/sdk/transport/VerifiedRequest;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getClientId ()Ljava/lang/String;
+	public final fun getClientIdScheme ()Ljava/lang/String;
+	public final fun getClientMetadata ()Lkotlinx/serialization/json/JsonElement;
+	public final fun getResponseMode ()Ljava/lang/String;
+	public final fun getResponseUri ()Ljava/lang/String;
+	public final fun getSignatureVerification ()Ljava/lang/String;
+	public final fun getSigned ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public synthetic class org/siros/sdk/transport/VerifiedRequest$$serializer : kotlinx/serialization/internal/GeneratedSerializer {
+	public static final field INSTANCE Lorg/siros/sdk/transport/VerifiedRequest$$serializer;
+	public final fun childSerializers ()[Lkotlinx/serialization/KSerializer;
+	public synthetic fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Ljava/lang/Object;
+	public final fun deserialize (Lkotlinx/serialization/encoding/Decoder;)Lorg/siros/sdk/transport/VerifiedRequest;
+	public final fun getDescriptor ()Lkotlinx/serialization/descriptors/SerialDescriptor;
+	public synthetic fun serialize (Lkotlinx/serialization/encoding/Encoder;Ljava/lang/Object;)V
+	public final fun serialize (Lkotlinx/serialization/encoding/Encoder;Lorg/siros/sdk/transport/VerifiedRequest;)V
+	public fun typeParametersSerializers ()[Lkotlinx/serialization/KSerializer;
+}
+
+public final class org/siros/sdk/transport/VerifiedRequest$Companion {
+	public final fun serializer ()Lkotlinx/serialization/KSerializer;
 }
 
 public final class org/siros/sdk/transport/bridge/AuthCapability {
@@ -1357,8 +1466,8 @@ public final class org/siros/sdk/transport/engine/SignRequestMessage$Companion {
 public final class org/siros/sdk/transport/engine/SignRequestParams {
 	public static final field Companion Lorg/siros/sdk/transport/engine/SignRequestParams$Companion;
 	public fun <init> ()V
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Lorg/siros/sdk/transport/ResponseEncryptionRequest;Ljava/lang/String;Lorg/siros/sdk/transport/VerifiedRequest;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Lorg/siros/sdk/transport/ResponseEncryptionRequest;Ljava/lang/String;Lorg/siros/sdk/transport/VerifiedRequest;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component10 ()Ljava/lang/String;
 	public final fun component11 ()Ljava/lang/String;
@@ -1373,6 +1482,9 @@ public final class org/siros/sdk/transport/engine/SignRequestParams {
 	public final fun component2 ()Ljava/lang/String;
 	public final fun component20 ()Ljava/lang/String;
 	public final fun component21 ()Lkotlinx/serialization/json/JsonElement;
+	public final fun component22 ()Lorg/siros/sdk/transport/ResponseEncryptionRequest;
+	public final fun component23 ()Ljava/lang/String;
+	public final fun component24 ()Lorg/siros/sdk/transport/VerifiedRequest;
 	public final fun component3 ()Ljava/lang/String;
 	public final fun component4 ()Ljava/lang/String;
 	public final fun component5 ()Lkotlinx/serialization/json/JsonObject;
@@ -1380,8 +1492,8 @@ public final class org/siros/sdk/transport/engine/SignRequestParams {
 	public final fun component7 ()Ljava/util/List;
 	public final fun component8 ()Ljava/lang/String;
 	public final fun component9 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;)Lorg/siros/sdk/transport/engine/SignRequestParams;
-	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/SignRequestParams;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/SignRequestParams;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Lorg/siros/sdk/transport/ResponseEncryptionRequest;Ljava/lang/String;Lorg/siros/sdk/transport/VerifiedRequest;)Lorg/siros/sdk/transport/engine/SignRequestParams;
+	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/SignRequestParams;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/Integer;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Lorg/siros/sdk/transport/ResponseEncryptionRequest;Ljava/lang/String;Lorg/siros/sdk/transport/VerifiedRequest;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/SignRequestParams;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAth ()Ljava/lang/String;
 	public final fun getAudience ()Ljava/lang/String;
@@ -1399,9 +1511,12 @@ public final class org/siros/sdk/transport/engine/SignRequestParams {
 	public final fun getNonce ()Ljava/lang/String;
 	public final fun getProofType ()Ljava/lang/String;
 	public final fun getProofTypesSupported ()Lkotlinx/serialization/json/JsonObject;
+	public final fun getResponseEncryption ()Lorg/siros/sdk/transport/ResponseEncryptionRequest;
 	public final fun getResponseMode ()Ljava/lang/String;
 	public final fun getResponseUri ()Ljava/lang/String;
+	public final fun getState ()Ljava/lang/String;
 	public final fun getTransactionData ()Ljava/util/List;
+	public final fun getVerifiedRequest ()Lorg/siros/sdk/transport/VerifiedRequest;
 	public final fun getVerifierJwkThumbprint ()Ljava/lang/String;
 	public final fun getVerifierSessionId ()Ljava/lang/String;
 	public fun hashCode ()I
@@ -1426,14 +1541,15 @@ public final class org/siros/sdk/transport/engine/SignRequestParams$Companion {
 public final class org/siros/sdk/transport/engine/SignResponseMessage {
 	public static final field Companion Lorg/siros/sdk/transport/engine/SignResponseMessage$Companion;
 	public static final field SIGN_REFUSED Ljava/lang/String;
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component10 ()Ljava/lang/String;
 	public final fun component11 ()Ljava/lang/String;
 	public final fun component12 ()Ljava/lang/String;
 	public final fun component13 ()Ljava/lang/String;
 	public final fun component14 ()Ljava/lang/String;
+	public final fun component15 ()Ljava/lang/String;
 	public final fun component2 ()Ljava/lang/String;
 	public final fun component3 ()Ljava/lang/String;
 	public final fun component4 ()Ljava/lang/String;
@@ -1442,8 +1558,8 @@ public final class org/siros/sdk/transport/engine/SignResponseMessage {
 	public final fun component7 ()Lkotlinx/serialization/json/JsonObject;
 	public final fun component8 ()Ljava/lang/String;
 	public final fun component9 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lorg/siros/sdk/transport/engine/SignResponseMessage;
-	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/SignResponseMessage;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/SignResponseMessage;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lorg/siros/sdk/transport/engine/SignResponseMessage;
+	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/SignResponseMessage;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/SignResponseMessage;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getClientAttestation ()Ljava/lang/String;
 	public final fun getClientAttestationPoP ()Ljava/lang/String;
@@ -1456,6 +1572,7 @@ public final class org/siros/sdk/transport/engine/SignResponseMessage {
 	public final fun getMessageId ()Ljava/lang/String;
 	public final fun getProofJwt ()Ljava/lang/String;
 	public final fun getProofs ()Ljava/util/List;
+	public final fun getResponseJwe ()Ljava/lang/String;
 	public final fun getTimestamp ()Ljava/lang/String;
 	public final fun getType ()Ljava/lang/String;
 	public final fun getVpToken ()Ljava/lang/String;
@@ -1511,8 +1628,8 @@ public final class org/siros/sdk/transport/engine/WalletEngineSession : org/siro
 	public static synthetic fun sendMatchResponse$default (Lorg/siros/sdk/transport/engine/WalletEngineSession;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)V
 	public final fun sendSignRefusal (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
 	public static synthetic fun sendSignRefusal$default (Lorg/siros/sdk/transport/engine/WalletEngineSession;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)V
-	public final fun sendSignResponse (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
-	public static synthetic fun sendSignResponse$default (Lorg/siros/sdk/transport/engine/WalletEngineSession;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)V
+	public final fun sendSignResponse (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public static synthetic fun sendSignResponse$default (Lorg/siros/sdk/transport/engine/WalletEngineSession;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Lkotlinx/serialization/json/JsonObject;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)V
 	public final fun sendTrustResult (Ljava/lang/String;ZLjava/lang/String;)V
 	public static synthetic fun sendTrustResult$default (Lorg/siros/sdk/transport/engine/WalletEngineSession;Ljava/lang/String;ZLjava/lang/String;ILjava/lang/Object;)V
 	public final fun signRequests ()Lkotlinx/coroutines/flow/Flow;

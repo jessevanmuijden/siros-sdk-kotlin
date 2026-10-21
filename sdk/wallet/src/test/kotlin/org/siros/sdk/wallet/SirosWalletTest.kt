@@ -6684,6 +6684,7 @@ class SirosWalletTest {
         every { engine.cancelFlow(any()) } just runs
         every { engine.sendSignRefusal(any(), any(), any()) } just runs
         every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
+        every { engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) } just runs
         every { engine.sendMatchResponse(any(), any(), any()) } just runs
         val seen = mutableListOf<JsonObject?>()
         val s = czkSetup(trust = czkIds("x509_san_dns" to redirectClientId.removePrefix("x509_san_dns:")), consent = consent, flagOn = flagOn, offersCircuit = offersCircuit, credentials = credentials, onPlan = { seen += it })
@@ -6768,6 +6769,95 @@ class SirosWalletTest {
         assertTrue(e.s.history.single().zkProof) // written once, when answered
         verify(exactly = 0) { e.engine.cancelFlow(any()) }
         verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+    }
+
+    /** A verifier response-encryption key as the engine sends it in `response_encryption`: public JWK with a kid. */
+    private fun verifierKey() = com.nimbusds.jose.jwk.gen.ECKeyGenerator(com.nimbusds.jose.jwk.Curve.P_256).keyID("verifier-enc-1").generate()
+
+    private fun redirectSignEncrypted(
+        key: com.nimbusds.jose.jwk.ECKey,
+        verifiedClientId: String? = "x509_san_dns:rp.example",
+        state: String? = "st-1",
+        alg: String = "ECDH-ES",
+        enc: String = "A128GCM",
+    ) = redirectSign().let { m ->
+        m.copy(
+            params = m.params.copy(
+                responseEncryption = org.siros.sdk.transport.ResponseEncryptionRequest(
+                    jwk = Json.parseToJsonElement(key.toPublicJWK().toJSONString()).jsonObject, alg = alg, enc = enc,
+                ),
+                state = state,
+                verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = verifiedClientId, responseMode = "direct_post.jwt", signed = true, signatureVerification = "verified"),
+            ),
+        )
+    }
+
+    @Test
+    fun circuitZkRedirect_withResponseEncryption_answersOnlyWithAResponseJweTheVerifierCanOpen() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        val key = verifierKey()
+        e.sign.emit(redirectSignEncrypted(key, verifiedClientId = "x509_san_dns:rp.example"))
+        advanceUntilIdle()
+
+        val jwe = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(jwe), messageId = "m1") }
+        // NOTHING but the JWE: no vp_token alongside, no refusal.
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+        // Five non-empty segments (direct ECDH-ES has an empty encrypted-key segment only), header as the engine validates it.
+        val parsed = com.nimbusds.jose.JWEObject.parse(jwe.captured)
+        assertEquals("ECDH-ES", parsed.header.algorithm.name)
+        assertEquals("A128GCM", parsed.header.encryptionMethod.name)
+        assertEquals("verifier-enc-1", parsed.header.keyID)
+        parsed.decrypt(com.nimbusds.jose.crypto.ECDHDecrypter(key))
+        val claims = Json.parseToJsonElement(parsed.payload.toString()).jsonObject
+        assertEquals("st-1", claims["state"]!!.jsonPrimitive.content)
+        assertEquals("x509_san_dns:rp.example", claims["aud"]!!.jsonPrimitive.content)
+        val token = claims["vp_token"]!!.jsonObject
+        assertEquals(setOf("q"), token.keys)
+        val decoded = CzkDecoded(token["q"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym(redirectClientId)), decoded.results["n"])
+    }
+
+    @Test
+    fun circuitZkRedirect_theJarmAudienceIsTheEnginesVerifiedClientId_notTheSignRequestAudience() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        val key = verifierKey()
+        e.sign.emit(redirectSignEncrypted(key, verifiedClientId = "x509_san_dns:verified.example"))
+        advanceUntilIdle()
+        val jwe = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(jwe), messageId = "m1") }
+        val parsed = com.nimbusds.jose.JWEObject.parse(jwe.captured).also { it.decrypt(com.nimbusds.jose.crypto.ECDHDecrypter(key)) }
+        assertEquals("x509_san_dns:verified.example", Json.parseToJsonElement(parsed.payload.toString()).jsonObject["aud"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun circuitZkRedirect_withResponseEncryptionButNoVerifiedClientId_isRefusedAndNothingIsSent() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSignEncrypted(verifierKey(), verifiedClientId = null))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "jarm-audience") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_anUnusableVerifierKey_isRefusedAndNothingIsSent() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // An algorithm pair the key cannot be used with: the response cannot be built, so the wallet refuses rather than send a plain vp_token.
+        e.sign.emit(redirectSignEncrypted(verifierKey(), alg = "RSA-OAEP-256"))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "response-encryption") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
     }
 
     private fun czkTwoCredentials() = listOf(

@@ -216,6 +216,11 @@ data class SignResponseMessage(
      */
     @SerialName("dpop_key_id") val dpopKeyId: String? = null,
     @SerialName("dpop_proof") val dpopProof: String? = null,
+    /**
+     * Answer to a `direct_post.jwt` `sign_presentation` that carried [SignRequestParams.responseEncryption]: the
+     * compact JWE of the whole authorization response. Replaces [vpToken], which the engine then never sees.
+     */
+    @SerialName("response_jwe") val responseJwe: String? = null,
     val timestamp: String? = null,
     // Appended after timestamp (append-only: a data class's property order is part of its binary API).
     /**
@@ -227,6 +232,12 @@ data class SignResponseMessage(
     @SerialName("error_code") val errorCode: String? = null,
     val error: String? = null,
 ) {
+    init {
+        require(responseJwe == null || (error == null && errorCode == null)) {
+            "A sign_response that carries an error or error_code carries no response_jwe"
+        }
+    }
+
     companion object {
         const val SIGN_REFUSED = "SIGN_REFUSED"
     }
@@ -517,6 +528,15 @@ data class SignRequestParams(
     // Appended last: a data class's property order is part of its binary API (componentN, copy, constructor).
     /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
     @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
+    /**
+     * `sign_presentation` over `direct_post.jwt`: the verifier's key and the `alg`/`enc` to build the encrypted
+     * response with. Present means the wallet returns [SignResponseMessage.responseJwe], not a `vp_token`.
+     */
+    @SerialName("response_encryption") val responseEncryption: org.siros.sdk.transport.ResponseEncryptionRequest? = null,
+    /** The request's `state`, which the encrypted response must echo. */
+    val state: String? = null,
+    /** The request as the engine validated it; its `client_id` is the `aud` of an encrypted response. */
+    @SerialName("verified_request") val verifiedRequest: org.siros.sdk.transport.VerifiedRequest? = null,
 )
 
 @Serializable
