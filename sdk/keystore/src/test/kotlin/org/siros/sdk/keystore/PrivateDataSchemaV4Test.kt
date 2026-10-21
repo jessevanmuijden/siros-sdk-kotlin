@@ -259,6 +259,40 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun extensionsThisSdkCannotReadAreWrittenBackVerbatimAndInPlace() = runTest {
+        val ext = buildJsonObject {
+            put("com.example.numbers", JsonPrimitive(5)) // namespace that is not an object
+            put("org.siros.bbs", buildJsonObject {
+                put("a", JsonPrimitive("1"))
+                put("n", JsonPrimitive(7)) // non-string entry value
+                put("o", buildJsonObject { put("z", JsonPrimitive(null as String?)) })
+                put("gone", JsonPrimitive("x"))
+            })
+            put("com.example.empty", buildJsonObject { })
+        }
+        val k = unlocked(plaintext(extraS = mapOf("extensions" to ext)))
+        assertEquals("1", k.extensionEntries("org.siros.bbs")["a"])
+        k.removeExtensionEntry("org.siros.bbs", "gone")
+        k.setExtensionEntry("org.siros.bbs", "b", "2")
+        k.setExtensionEntry("org.siros.new", "k", "v")
+        val out = state(decrypt(k.exportEncryptedContainer()))["extensions"]!!.jsonObject
+        assertEquals(listOf("com.example.numbers", "org.siros.bbs", "com.example.empty", "org.siros.new"), out.keys.toList())
+        assertEquals(ext["com.example.numbers"], out["com.example.numbers"])
+        assertEquals(ext["com.example.empty"], out["com.example.empty"])
+        val bbs = out["org.siros.bbs"]!!.jsonObject
+        assertEquals(listOf("a", "n", "o", "b"), bbs.keys.toList())
+        assertEquals(ext["org.siros.bbs"]!!.jsonObject["n"], bbs["n"])
+        assertEquals(ext["org.siros.bbs"]!!.jsonObject["o"], bbs["o"])
+        // Writing into a namespace the container holds as a non-object would replace someone's value.
+        try {
+            k.setExtensionEntry("com.example.numbers", "k", "v")
+            k.exportEncryptedContainer()
+            fail("overwrote a non-object namespace")
+        } catch (_: org.siros.sdk.credentials.KeystoreException) {
+        }
+    }
+
+    @Test
     fun aSetExtensionEventAtSchemaVersion3IsRefused() = runTest {
         assertRefused(plaintext(events = listOf(event("set_extension", JsonPrimitive(3)))), Kind.EVENT_TYPE, 3, "set_extension")
     }

@@ -1160,18 +1160,7 @@ class JweKeystore(
                 // legacy fields below so a reader sees the normative shape
                 // first. Namespaces this build does not implement are
                 // written back exactly as they were read.
-                if (extensions.isNotEmpty()) {
-                    put("extensions", kotlinx.serialization.json.buildJsonObject {
-                        for ((namespace, entries) in extensions) {
-                            if (entries.isEmpty()) continue
-                            put(namespace, kotlinx.serialization.json.buildJsonObject {
-                                for ((key, value) in entries) {
-                                    put(key, kotlinx.serialization.json.JsonPrimitive(value))
-                                }
-                            })
-                        }
-                    })
-                }
+                buildExtensions(existingState)?.let { put("extensions", it) }
 
                 // credentialRefreshTokens (privatedata-spec §6.2,
                 // native-SDK-only extension) - same "in-memory map IS the
@@ -1200,6 +1189,59 @@ class JweKeystore(
             }
         }
     }
+
+    /**
+     * `S.extensions` for export, or null when there is none to write.
+     *
+     * The in-memory map holds only what this build reads (string values in object namespaces).
+     * Everything else the container held (a namespace that is not an object, an entry whose value
+     * is not a string, an `extensions` that is not an object) is written back unchanged and in its
+     * original position, as spec 3.0 requires of a rewriter. An entry this build removed is dropped,
+     * one it set or changed is written, new ones follow the original ones.
+     *
+     * @throws KeystoreException if an entry was set in a namespace the container holds as a
+     *   non-object (or into a non-object `extensions`): writing it would replace someone's value.
+     */
+    private fun buildExtensions(existingState: kotlinx.serialization.json.JsonObject?): kotlinx.serialization.json.JsonElement? {
+        val origElement = (existingState?.get("S") as? kotlinx.serialization.json.JsonObject)?.get("extensions")
+        if (origElement != null && origElement !is kotlinx.serialization.json.JsonObject) {
+            if (extensions.values.any { it.isNotEmpty() }) {
+                throw KeystoreException("S.extensions in the container is not an object; refusing to overwrite it")
+            }
+            return origElement
+        }
+        val orig = origElement as? kotlinx.serialization.json.JsonObject
+        val out = LinkedHashMap<String, kotlinx.serialization.json.JsonElement>()
+        for ((namespace, nsValue) in orig.orEmptyObject()) {
+            val mem = extensions[namespace]
+            if (nsValue !is kotlinx.serialization.json.JsonObject) {
+                if (!mem.isNullOrEmpty()) throw KeystoreException("Extension namespace $namespace is not an object in the container; refusing to overwrite it")
+                out[namespace] = nsValue
+                continue
+            }
+            val entries = LinkedHashMap<String, kotlinx.serialization.json.JsonElement>()
+            for ((key, value) in nsValue) {
+                val isString = (value as? kotlinx.serialization.json.JsonPrimitive)?.isString == true
+                val m = mem?.get(key)
+                when {
+                    m != null -> entries[key] = kotlinx.serialization.json.JsonPrimitive(m)
+                    !isString -> entries[key] = value // not read here: verbatim
+                    // else: a string this build removed
+                }
+            }
+            mem?.forEach { (key, value) -> if (key !in entries) entries[key] = kotlinx.serialization.json.JsonPrimitive(value) }
+            if (entries.isNotEmpty() || nsValue.isEmpty()) out[namespace] = kotlinx.serialization.json.JsonObject(entries)
+        }
+        for ((namespace, mem) in extensions) {
+            if (namespace in out || mem.isEmpty() || (orig != null && namespace in orig)) continue
+            out[namespace] = kotlinx.serialization.json.buildJsonObject {
+                for ((key, value) in mem) put(key, kotlinx.serialization.json.JsonPrimitive(value))
+            }
+        }
+        return if (out.isEmpty() && orig == null) null else kotlinx.serialization.json.JsonObject(out)
+    }
+
+    private fun kotlinx.serialization.json.JsonObject?.orEmptyObject(): Map<String, kotlinx.serialization.json.JsonElement> = this ?: emptyMap()
 
     // presentationId -> (the original S.presentations[] entry, the record string derived from it
     // at load). An unchanged record writes its original entry back, so `transactionId`, `data`

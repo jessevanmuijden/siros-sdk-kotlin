@@ -223,15 +223,13 @@ class ExtensionStoreTest {
     // --- what a non-conforming or second container does ----------------------
 
     /**
-     * §6.1 makes an entry value a string, and this keystore writes every
-     * entry back as one. A peer that stored a number or a boolean must
-     * therefore not have it read in and handed back re-typed on the next
-     * round trip — quietly changing another client's data is worse than
-     * declining to carry a value the spec does not allow, and it is what
-     * objects and arrays in that position already get.
+     * §6.1 makes an entry value a string. A peer that stored a number or a
+     * boolean must not have it read in as one (no entry is reported for it)
+     * nor handed back re-typed; and since spec 3.0 a rewriter must preserve
+     * what it does not understand, so it is written back UNCHANGED and in place.
      */
     @Test
-    fun aNonStringEntryValueIsSkippedRatherThanRetyped() = runTest {
+    fun aNonStringEntryValueIsNotReadButWrittenBackUnchanged() = runTest {
         val keystore = freshKeystore()
         keystore.setExtensionEntry("org.siros.bbs", "cred-1", "state-one")
 
@@ -252,11 +250,12 @@ class ExtensionStoreTest {
             mapOf("text" to "carried"),
             reopened.extensionEntries("com.example.peer"),
         )
-        // And nothing re-typed reaches the container on the way back out.
-        assertEquals(
-            setOf("text"),
-            extensionsOf(reopened.exportEncryptedContainer())!!["com.example.peer"]!!.jsonObject.keys,
-        )
+        // And nothing re-typed reaches the container on the way back out: every value is as authored.
+        val peer = extensionsOf(reopened.exportEncryptedContainer())!!["com.example.peer"]!!.jsonObject
+        assertEquals(listOf("number", "boolean", "object", "text"), peer.keys.toList())
+        assertEquals(JsonPrimitive(42), peer["number"])
+        assertEquals(JsonPrimitive(true), peer["boolean"])
+        assertEquals(buildJsonObject { put("nested", JsonPrimitive("x")) }, peer["object"])
         assertEquals(mapOf("cred-1" to "state-one"), reopened.extensionEntries("org.siros.bbs"))
     }
 
