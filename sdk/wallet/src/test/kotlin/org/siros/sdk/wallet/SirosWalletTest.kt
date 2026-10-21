@@ -8238,6 +8238,23 @@ class SirosWalletTest {
     }
 
     @Test
+    fun verifierIdRegistry_earlyCheck_neverAsksAHostSourceWithTheEmptyMatchTimeContext() = runTest(dispatcher) {
+        val ctx = VerifierIdContext(
+            org.siros.sdk.wallet.dcapi.DCAPIRequest(
+                clientId = "c", responseMode = "direct_post.jwt", nonce = "", dcqlQuery = null, clientMetadata = null,
+                keyMaterial = null, protocol = "openid4vp-redirect", state = null,
+            ),
+            TrustResult(trusted = true), "",
+        )
+        val calls = mutableListOf<String>()
+        val custom = VerifierIdRegistry(listOf("a"), listOf(FixedSource("a", "a-id", calls)))
+        assertEquals(VerifierIdRegistry.EarlyCheck.Skipped, custom.earlyCheck(ctx))
+        assertEquals("a host source is not called at match time", emptyList<String>(), calls)
+        // Without a host source the PDP answer alone decides, now.
+        assertEquals(VerifierIdRegistry.EarlyCheck.Unresolvable, VerifierIdRegistry(listOf("a")).earlyCheck(ctx))
+    }
+
+    @Test
     fun circuitZkDcApi_cancelledTrustEvaluation_propagatesCancellation_notARefusal() = runTest(dispatcher) {
         val s = czkSetup(trust = { throw kotlinx.coroutines.CancellationException("cancelled") })
         org.junit.Assert.assertThrows(kotlinx.coroutines.CancellationException::class.java) { czkRun(s, czkRequest()) }

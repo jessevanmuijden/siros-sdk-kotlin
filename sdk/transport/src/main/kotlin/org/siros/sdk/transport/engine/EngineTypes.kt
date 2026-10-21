@@ -216,6 +216,8 @@ data class SignResponseMessage(
      */
     @SerialName("dpop_key_id") val dpopKeyId: String? = null,
     @SerialName("dpop_proof") val dpopProof: String? = null,
+    val timestamp: String? = null,
+    // Appended after timestamp (append-only: a data class's property order is part of its binary API).
     /**
      * A sign-stage refusal (wmp spec 3.2.6): [errorCode] [SIGN_REFUSED] answers the `sign_request` (its `message_id` echoed) with
      * "the wallet will not sign". The engine ends the signing at once and tells the verifier `access_denied` with no description.
@@ -224,7 +226,6 @@ data class SignResponseMessage(
      */
     @SerialName("error_code") val errorCode: String? = null,
     val error: String? = null,
-    val timestamp: String? = null,
 ) {
     companion object {
         const val SIGN_REFUSED = "SIGN_REFUSED"
@@ -471,8 +472,6 @@ data class SignRequestParams(
     @SerialName("credentials_to_include") val credentialsToInclude: List<CredentialRef>? = null,
     @SerialName("response_uri") val responseUri: String? = null,
     @SerialName("verifier_jwk_thumbprint") val verifierJwkThumbprint: String? = null,
-    /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
-    @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
     // The verifier's own session id for this presentation (from the
     // request_uri's "sessionId" query param, forwarded by go-wallet-backend)
     // - a real ZK/PPID pseudonym's verifier_context binds to THIS specific
@@ -515,6 +514,9 @@ data class SignRequestParams(
     @SerialName("holder_commitments") val holderCommitments: List<String>? = null,
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
+    // Appended last: a data class's property order is part of its binary API (componentN, copy, constructor).
+    /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
+    @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
 )
 
 @Serializable

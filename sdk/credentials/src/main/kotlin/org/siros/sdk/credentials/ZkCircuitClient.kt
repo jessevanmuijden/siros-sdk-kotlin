@@ -92,11 +92,6 @@ data class ZkCircuitDescriptor(
     /** The SDK's adapter key: which prover adapter (with [systemVersion]) can prove this circuit. Not what a verifier is told. */
     val system: String = "",
     val systemVersion: String = "",
-    /**
-     * The proof-system identity a verifier names in `proof_system_values` (for example `longfellow-libzk-v1`), distinct from the
-     * adapter key [system]. Absent or empty: the circuit is not offered for `zkp_req` at all (no fallback to [system]).
-     */
-    val proofSystem: String? = null,
     val docTypes: List<String> = emptyList(),
     val published: Boolean = false,
     val status: String = "",
@@ -108,6 +103,12 @@ data class ZkCircuitDescriptor(
     val notes: String? = null,
     /** The circuit's structured `capabilities`, when the catalog has them. Passed to the matcher verbatim, never read here. */
     val capabilities: JsonObject? = null,
+    // Appended last: a data class's property order is part of its binary API (componentN, copy, constructor).
+    /**
+     * The proof-system identity a verifier names in `proof_system_values` (for example `longfellow-libzk-v1`), distinct from the
+     * adapter key [system]. Absent or empty: the circuit is not offered for `zkp_req` at all (no fallback to [system]).
+     */
+    val proofSystem: String? = null,
 ) {
     /** Published, `active` and not deprecated: the only state in which a circuit may be proved with. */
     fun isActive(): Boolean = published && deprecatedAt == null && status == "active"

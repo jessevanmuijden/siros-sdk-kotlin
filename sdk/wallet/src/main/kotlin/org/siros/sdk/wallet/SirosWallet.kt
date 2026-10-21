@@ -9713,8 +9713,8 @@ class SirosWallet private constructor(
                     clientId = verifierClientId, responseMode = "direct_post.jwt", nonce = "", dcqlQuery = null,
                     clientMetadata = clientMetadata, protocol = "openid4vp-redirect", state = null,
                 )
-                val resolved = try { registry.resolve(VerifierIdContext(request, trust, "")) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { null }
-                if (resolved == null) return zkRefused("no-verifier-id")
+                val early = try { registry.earlyCheck(VerifierIdContext(request, trust, "")) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { VerifierIdRegistry.EarlyCheck.Unresolvable }
+                if (early == VerifierIdRegistry.EarlyCheck.Unresolvable) return zkRefused("no-verifier-id")
             }
         }
         clientMetadata?.let { circuitZkClientMetadataByFlow[flowId] = it }

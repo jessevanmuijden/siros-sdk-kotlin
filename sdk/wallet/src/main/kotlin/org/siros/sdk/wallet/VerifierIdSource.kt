@@ -79,6 +79,18 @@ class VerifierIdRegistry(
         return null
     }
 
+    /**
+     * The early (match-time) check that a verifier id can be resolved. It has no origin or nonce yet, so a host-registered
+     * source, which may use either, is NOT asked here (and never asked twice for one request): with any such source the check is
+     * [EarlyCheck.Skipped] and the id is resolved once, with the full signing context, at sign time. Without one, only the
+     * policy decision point's own answer is needed and is checked now.
+     */
+    internal suspend fun earlyCheck(context: VerifierIdContext): EarlyCheck =
+        if (extraSources.isNotEmpty()) EarlyCheck.Skipped
+        else if (resolve(context) != null) EarlyCheck.Resolvable else EarlyCheck.Unresolvable
+
+    internal enum class EarlyCheck { Skipped, Resolvable, Unresolvable }
+
     private fun sourcesFor(type: String): List<VerifierIdSource> =
         listOf<VerifierIdSource>(AuthZENSource(type)) + extraSources.filter { it.type == type }
 }
