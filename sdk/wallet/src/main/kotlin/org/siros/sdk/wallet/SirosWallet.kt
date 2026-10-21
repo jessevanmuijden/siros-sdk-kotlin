@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -3879,6 +3880,15 @@ class SirosWallet private constructor(
         rawRequestJson: String,
         origin: String,
         selectedCredentialIds: List<Long>? = null,
+    ): DCAPIPresentationResult =
+        // One presentation at a time across EVERY path that consumes a credential instance (this one, in all its formats, and the
+        // engine's zkp_req redirect route): eligibility and the use record happen under the same lock.
+        zkSigningMutex.withLock { handleDCAPIRequestSerialized(rawRequestJson, origin, selectedCredentialIds) }
+
+    private suspend fun handleDCAPIRequestSerialized(
+        rawRequestJson: String,
+        origin: String,
+        selectedCredentialIds: List<Long>?,
     ): DCAPIPresentationResult {
         val request = try {
             DCAPIRequestParser.parse(
@@ -3899,9 +3909,7 @@ class SirosWallet private constructor(
         if (circuitZkSupport != null && request.dcqlQuery != null &&
             DCAPIRequestRules.DEFAULT_REQUIRES_SIGNED_REQUEST(request.dcqlQuery)
         ) {
-            // One zkp_req presentation at a time across BOTH entry points (this one and the engine's redirect route): eligibility and
-            // the use record happen under the same lock.
-            return zkSigningMutex.withLock { handleCircuitZkDcApi(request, origin, selectedCredentialIds.orEmpty()) }
+            return handleCircuitZkDcApi(request, origin, selectedCredentialIds.orEmpty())
         }
 
         // The DC API has no negotiation, so a request can carry
@@ -7319,6 +7327,9 @@ class SirosWallet private constructor(
                 zkProof = true,
                 timestamp = System.currentTimeMillis(),
             ))
+            // Recording the history can suspend (keystore sync): check again, as late as possible, that this connection and flow are
+            // still the ones being answered.
+            if (!currentCoroutineContext().isActive || ended()) return
             engine.sendSignResponse(flowId, vpToken = vpToken, messageId = msg.messageId)
             }
         } catch (e: CircuitZkEngineRefusal) {

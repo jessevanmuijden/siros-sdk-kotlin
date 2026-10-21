@@ -6896,6 +6896,25 @@ class SirosWalletTest {
     }
 
     @Test
+    fun circuitZkRedirect_aConnectionLostWhileTheHistoryIsBeingRecorded_sendsNothing() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // Recording the presentation reads the store (the renew check) AFTER the proof: the socket drops exactly there.
+        val inner = getField(e.s.wallet, "credentialStore") as CredentialStore
+        setField(e.s.wallet, "credentialStore", object : CredentialStore by inner {
+            override suspend fun getAll(): List<StoredCredential> {
+                if (e.s.prover.calls > 0) e.state.value = WalletEngineSession.State.RECONNECTING
+                return inner.getAll()
+            }
+        })
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        assertEquals(1, e.s.prover.calls)
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
+    @Test
     fun circuitZkRedirect_anOverlappingDcApiRequestNeverPresentsTheSameSingleCopyCredentialTwice_underConsumeAll() = runTest(dispatcher) {
         val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
         val e = engineCzk(consent = { gate.await() })
