@@ -4405,6 +4405,12 @@ class SirosWallet private constructor(
         registry: VerifierIdRegistry,
         consentHandler: PresentationConsentHandler,
         refuse: (String, org.siros.sdk.wallet.dcapi.DCAPIRefusalReason) -> Nothing,
+        /**
+         * The credential chosen for each query (query id to credential id), when the transport states it (the engine's
+         * `credentials_to_include`): every query then needs its own entry, answered with that credential (or a copy of its batch) and no
+         * other, so a credential may answer several queries. Null for the DC API, whose picker reports plain ids (positional preference).
+         */
+        selectionByQuery: Map<String, Long>? = null,
     ): CircuitZkAnswer {
         // No silent first-eligible: the credential that is proved is the one the user picked, and the consent
         // screen names it. A call that names none is refused, never read as "any".
@@ -4445,7 +4451,12 @@ class SirosWallet private constructor(
             val plan = result.circuitZkPlan ?: refuse("no-plan", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
             // Best effort for a multi-credential selection: when the picker reported one credential per
             // query, the one at this query's position goes first; otherwise picks keep their reported order.
-            val pickedHere = result.candidates.filter(::picked).sortedBy { c ->
+            val pickedHere = if (selectionByQuery != null) {
+                // An explicit choice per query: none stated is refused, and the choice must be a candidate of THAT query.
+                val want = selectionByQuery[result.queryId] ?: refuse("query-without-pick", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+                val wantBatch = allCreds.firstOrNull { it.id == want }?.batchId
+                result.candidates.filter { c -> c.id == want || (wantBatch != null && c.batchId == wantBatch) }
+            } else result.candidates.filter(::picked).sortedBy { c ->
                 val position = selectedCredentialIds.indexOf(c.id).let { if (it < 0) selectedCredentialIds.size else it }
                 if (selectedCredentialIds.size == results.size && position == queryIndex) -1 else position
             }
@@ -7113,14 +7124,18 @@ class SirosWallet private constructor(
             }
             val clientMetadata = circuitZkClientMetadataByFlow.remove(flowId) ?: params.clientMetadata as? JsonObject
             // The wallet's pick for this flow, in the engine's order; an id that is not a number is refused, never skipped.
-            // Each reference names its query: read per query, in the request's query order (what the shared core's positional pick expects),
-            // so a credential is never answered under another query's name. A reference to an unknown query, one without a number, or a
-            // query without a reference is refused.
+            // Each reference names its query, and the choice is kept per query (a credential may answer several): a reference to an
+            // unknown query, one without a number, or two different choices for one query is refused; a query without a reference is
+            // refused by the shared core.
             val refs = params.credentialsToInclude.orEmpty()
             if (refs.any { ref -> results.none { it.queryId == ref.credentialQueryId } }) refuse("selection-query", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
-            val picked = results.flatMap { r ->
-                refs.filter { it.credentialQueryId == r.queryId }.map { it.credentialId.toLongOrNull() ?: refuse("selection", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE) }
-            }.distinct()
+            val selectionByQuery = HashMap<String, Long>()
+            for (ref in refs) {
+                val id = ref.credentialId.toLongOrNull() ?: refuse("selection", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+                val queryId = ref.credentialQueryId ?: refuse("selection-query", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+                if (selectionByQuery.put(queryId, id).let { it != null && it != id }) refuse("selection-ambiguous", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+            }
+            val picked = selectionByQuery.values.distinct()
             val origin = try {
                 java.net.URI(responseUri).let { u -> "${u.scheme}://${u.authority}" }
             } catch (e: Exception) {
@@ -7159,6 +7174,7 @@ class SirosWallet private constructor(
                 registry = registry,
                 consentHandler = consentHandler,
                 refuse = ::refuse,
+                selectionByQuery = selectionByQuery,
             )
             val vpToken = JsonObject(answer.tokensByQueryId.mapValues { (_, tokens) -> kotlinx.serialization.json.JsonArray(tokens) }).toString()
             recordPresentation(PresentationRecord(
@@ -7832,6 +7848,23 @@ class SirosWallet private constructor(
                     pendingMatchResultsByFlow[msg.flowId] = matchResults
                     prewarmZkMatches(matchResults)
 
+                    // zkp_req: one entry per query (a credential may answer several), never the first-match-only view.
+                    val zkSelection = if (zkPlan != null) {
+                        circuitZkSelectionByQuery(matchResults, selectedIds) ?: run {
+                            val reason = "No credential was selected for every query"
+                            engine.sendMatchResponse(msg.flowId, emptyList(), reason)
+                            engine.sendCredentialsMatched(msg.flowId, emptyList(), reason)
+                            return@collect
+                        }
+                    } else null
+                    if (zkSelection != null) {
+                        engine.sendMatchResponse(msg.flowId, zkSelection.mapNotNull { (r, id) ->
+                            allCreds.find { it.id == id }?.let { cred ->
+                                CredentialMatch(credentialQueryId = r.queryId, credentialId = cred.id.toString(), format = cred.format, vct = CredentialUtils.vctOf(cred), availableClaims = null)
+                            }
+                        })
+                        return@collect
+                    }
                     val matches = selectedIds.mapNotNull { id ->
                         allCreds.find { it.id == id }?.let { cred ->
                             val queryId = matchResultByCredentialId[id]?.queryId
@@ -9460,6 +9493,21 @@ class SirosWallet private constructor(
         return CircuitZkMatchPlan(results, null)
     }
 
+    /**
+     * The credential for EACH query of a zkp_req request, from the credentials the user picked (the picker reports plain ids): a pick that
+     * is a candidate of the query answers it, preferring the pick at the query's own position, and one credential may answer several
+     * queries. Null when some query has no pick: the request is then not answerable and no selection is sent.
+     */
+    private fun circuitZkSelectionByQuery(results: List<CredentialMatcher.MatchResult>, selectedIds: List<Long>): List<Pair<CredentialMatcher.MatchResult, Long>>? {
+        val out = ArrayList<Pair<CredentialMatcher.MatchResult, Long>>()
+        for ((i, r) in results.withIndex()) {
+            val own = selectedIds.filter { id -> r.candidates.any { it.id == id } }
+            val id = (if (selectedIds.size == results.size && selectedIds[i] in own) selectedIds[i] else own.firstOrNull()) ?: return null
+            out += r to id
+        }
+        return out
+    }
+
     /** Drops what a flow's match step left for its sign step; called wherever a flow ends. */
     private fun clearFlowMatchState(flowId: String) {
         pendingMatchResultsByFlow.remove(flowId)
@@ -9634,10 +9682,31 @@ class SirosWallet private constructor(
                     timestamp = System.currentTimeMillis(),
                 ))
 
+                // zkp_req: the credential for EACH query, or the request is declined (a query without a pick cannot be answered).
+                val zkSelection = if (zkPlan != null) {
+                    circuitZkSelectionByQuery(matchResults, selectedIds) ?: run {
+                        engine.sendFlowAction(flowId, "decline", kotlinx.serialization.json.buildJsonObject {
+                            put("reason", kotlinx.serialization.json.JsonPrimitive("user_declined"))
+                        })
+                        return@launch
+                    }
+                } else null
+
                 // Build consent payload with selected credentials
                 // Must match backend ConsentSelection: credential_query_id, credential_id, disclosed_claims
                 val consentPayload = kotlinx.serialization.json.buildJsonObject {
                     put("selected_credentials", kotlinx.serialization.json.buildJsonArray {
+                        if (zkSelection != null) {
+                            // zkp_req: one selection per query, a credential reusable across queries, no disclosed claims.
+                            for ((r, id) in zkSelection) {
+                                add(kotlinx.serialization.json.buildJsonObject {
+                                    put("credential_query_id", kotlinx.serialization.json.JsonPrimitive(r.queryId))
+                                    put("credential_id", kotlinx.serialization.json.JsonPrimitive(id.toString()))
+                                    put("disclosed_claims", kotlinx.serialization.json.buildJsonArray {})
+                                })
+                            }
+                            return@buildJsonArray
+                        }
                         for (id in selectedIds) {
                             allCreds.find { it.id == id } ?: continue
                             val matchResult = matchResults.firstOrNull { r ->

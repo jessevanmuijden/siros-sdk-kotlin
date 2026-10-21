@@ -6491,6 +6491,77 @@ class SirosWalletTest {
         assertTrue(holds(e.s.prover.inputs[1], "2000-06-15") && !holds(e.s.prover.inputs[1], "1990-01-01"))
     }
 
+    private fun redirectQueries(n: Int) = Json.parseToJsonElement(
+        """{"credentials":[""" + (1..n).joinToString(",") { i ->
+            """{"id":"q$i","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n$i","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}"""
+        } + "]}",
+    )
+
+    private fun refs(vararg pairs: Pair<String, String>) = pairs.map { (q, id) -> org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = q, credentialId = id) }
+
+    private fun SignRequestMessage.withRefs(r: List<org.siros.sdk.transport.engine.CredentialRef>) = copy(params = params.copy(credentialsToInclude = r))
+
+    private fun holds(input: org.siros.sdk.keystore.CircuitZkProveInput, birth: String) = String(input.credentialBytes, Charsets.ISO_8859_1).contains(birth)
+
+    @Test
+    fun circuitZkRedirect_aCredentialReusedAcrossQueries_keepsEveryQueriesOwnChoice() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.matchOnce(redirectQueries(3))
+        advanceUntilIdle()
+        // q1 and q2 are answered by credential 1, q3 by credential 2: three queries, two distinct credentials.
+        e.sign.emit(redirectSign().withRefs(refs("q1" to "1", "q2" to "1", "q3" to "2")))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        assertEquals(3, e.s.prover.inputs.size)
+        assertTrue(holds(e.s.prover.inputs[0], "2000-06-15"))
+        assertTrue(holds(e.s.prover.inputs[1], "2000-06-15"))
+        assertTrue(holds(e.s.prover.inputs[2], "1990-01-01") && !holds(e.s.prover.inputs[2], "2000-06-15"))
+    }
+
+    @Test
+    fun circuitZkRedirect_aQueryWithoutItsOwnReference_isRefused_evenIfAnotherQueryChoseTheSameCredential() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.matchOnce(redirectQueries(2))
+        advanceUntilIdle()
+        e.sign.emit(redirectSign().withRefs(refs("q1" to "1")))
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+        verify(exactly = 1) { e.engine.cancelFlow("f1") }
+    }
+
+    @Test
+    fun circuitZkRedirect_theConsentSelectsOneCredentialPerQuery_andItsOwnReferencesAreAnswered() = runTest(dispatcher) {
+        for ((name, creds, expected) in listOf(
+            Triple("two credentials, both match both queries", czkTwoCredentials(), listOf("q1" to "1", "q2" to "2")),
+            Triple("one credential answers both queries", null, listOf("q1" to "1", "q2" to "1")),
+        )) {
+            val e = engineCzkWith(creds)
+            e.matchOnce(redirectQueries(2))
+            advanceUntilIdle()
+            val consent = slot<JsonObject>()
+            verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", capture(consent)) }
+            val entries = consent.captured["selected_credentials"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(name, expected, entries.map { it["credential_query_id"]!!.jsonPrimitive.content to it["credential_id"]!!.jsonPrimitive.content })
+            assertTrue(name, entries.all { it["disclosed_claims"]!!.jsonArray.isEmpty() })
+            // The sign references are the ones the consent emitted, not fabricated ones.
+            e.sign.emit(redirectSign().withRefs(refs(*expected.toTypedArray())))
+            advanceUntilIdle()
+            verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+            assertEquals(name, 2, e.s.prover.calls)
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_theMatchRequestAnswerHasOneEntryPerQuery() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQueries(2), clientMetadata = redirectMetadata))
+        advanceUntilIdle()
+        val matches = slot<List<CredentialMatch>>()
+        verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
+        assertEquals(listOf("q1" to "1", "q2" to "2"), matches.captured.map { it.credentialQueryId to it.credentialId })
+    }
+
     @Test
     fun circuitZkRedirect_aReferenceToAnUnknownQuery_isRefused() = runTest(dispatcher) {
         val e = engineCzk()
