@@ -160,6 +160,10 @@ class JweKeystore(
     private var extensionsAtLastSync: Map<String, Map<String, String>> = emptyMap()
 
     // set_extension events appended since unlock, written after the container's own events.
+    // (namespace, key) pairs this session set or removed: an explicit removal beats the verbatim
+    // carrying of a non-string value the container held under the same key.
+    private val touchedExtensionKeys: MutableSet<Pair<String, String>> = mutableSetOf()
+
     private val appendedEvents: MutableList<kotlinx.serialization.json.JsonObject> = mutableListOf()
     // OID4VCI renewal (credential re-issuance/renewal plan, Phase 2) -
     // refresh_token + the DPoP key it's bound to, keyed by the credential
@@ -268,6 +272,7 @@ class JweKeystore(
                 preservedWalletState = plaintextJson
             }
             appendedEvents.clear()
+            touchedExtensionKeys.clear()
             loadWalletState(plaintextJson)
             extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
 
@@ -546,6 +551,7 @@ class JweKeystore(
         extensions.clear()
         extensionsAtLastSync = emptyMap()
         appendedEvents.clear()
+        touchedExtensionKeys.clear()
         credentialRefreshTokens.clear()
         mainKey = null
         containerMetadata = null
@@ -631,6 +637,8 @@ class JweKeystore(
     override suspend fun setExtensionEntry(namespace: String, key: String, value: String) = mutex.withLock {
         requireUnlocked()
         extensions.getOrPut(namespace) { mutableMapOf() }[key] = value
+        touchedExtensionKeys.add(namespace to key)
+        Unit
     }
 
     /**
@@ -650,6 +658,7 @@ class JweKeystore(
         requireUnlocked()
         val ns = extensions[namespace] ?: return@withLock
         ns.remove(key)
+        touchedExtensionKeys.add(namespace to key)
         if (ns.isEmpty()) extensions.remove(namespace)
     }
 
@@ -1049,12 +1058,9 @@ class JweKeystore(
         } else {
             (preservedWalletState?.get("lastEventHash") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: ""
         }
-        val used = original.mapNotNull {
-            ((it as? kotlinx.serialization.json.JsonObject)?.get("eventId") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
-        }.toSet()
         val random = SecureRandom()
         return ExtensionEvents.diff(
-            extensionsAtLastSync, extensions, parent, used, System.currentTimeMillis() / 1000,
+            extensionsAtLastSync, extensions, parent, original.filterIsInstance<kotlinx.serialization.json.JsonObject>(), System.currentTimeMillis() / 1000,
         ) { random.nextInt().toLong().and(0xFFFFFFFFL).let { if (it == 0L) 1L else it } }
     }
 
@@ -1267,7 +1273,7 @@ class JweKeystore(
                 val m = mem?.get(key)
                 when {
                     m != null -> entries[key] = kotlinx.serialization.json.JsonPrimitive(m)
-                    !isString -> entries[key] = value // not read here: verbatim
+                    !isString && (namespace to key) !in touchedExtensionKeys -> entries[key] = value // not read here: verbatim
                     // else: a string this build removed
                 }
             }

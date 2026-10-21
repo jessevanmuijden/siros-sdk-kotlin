@@ -300,6 +300,55 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun explicitRemovalBeatsVerbatimCarryingOfANonStringValue() = runTest {
+        val ext = buildJsonObject { put("org.siros.bbs", buildJsonObject { put("o", buildJsonObject { put("z", JsonPrimitive(1)) }); put("keep", JsonPrimitive(2)) }) }
+        val k = unlocked(plaintext(extraS = mapOf("extensions" to ext)))
+        k.setExtensionEntry("org.siros.bbs", "o", "now-a-string")
+        k.exportEncryptedContainer()
+        k.removeExtensionEntry("org.siros.bbs", "o")
+        val out = state(decrypt(k.exportEncryptedContainer()))["extensions"]!!.jsonObject["org.siros.bbs"]!!.jsonObject
+        assertEquals(listOf("keep"), out.keys.toList())
+    }
+
+    @Test
+    fun hashSerializesLikeJavaScript() {
+        // JS: JSON.stringify({"10":1,"2":2,"b":1.0,"a":"\n\u0001\u00e9"}) with sorted insertion
+        val e = buildJsonObject {
+            put("type", JsonPrimitive("alter_settings"))
+            put("settings", buildJsonObject {
+                put("10", JsonPrimitive("a")); put("2", JsonPrimitive("b")); put("b", kotlinx.serialization.json.JsonUnquotedLiteral("1.0"))
+                put("a", JsonPrimitive("\n\u0001\u00e9\"\\"))
+            })
+        }
+        val js = """{"settings":{"2":"b","10":"a","a":"\n\u0001é\"\\","b":1},"type":"alter_settings"}"""
+        val expected = java.security.MessageDigest.getInstance("SHA-256").digest(js.toByteArray()).joinToString("") { "%02x".format(it) }
+        assertEquals(expected, ExtensionEvents.hash(e))
+    }
+
+    @Test
+    fun aLaterChangeToTheSameKeyAlwaysOrdersAfterTheEarlierOne() = runTest {
+        val k = unlocked(plaintext())
+        k.setExtensionEntry("org.siros.bbs", "k", "v1")
+        val first = decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray.last().jsonObject
+        k.removeExtensionEntry("org.siros.bbs", "k")
+        val second = decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray.last().jsonObject
+        fun at(e: JsonObject) = e["timestampSeconds"]!!.jsonPrimitive.content.toLong() to e["eventId"]!!.jsonPrimitive.content.toLong()
+        val (a, b) = at(first) to at(second)
+        assertTrue("$a !< $b", a.first < b.first || (a.first == b.first && a.second < b.second))
+    }
+
+    @Test
+    fun diffOrdersANewEventAfterEveryExistingEventForTheSameKey() {
+        val old = event("set_extension").let { JsonObject(it + mapOf("eventId" to JsonPrimitive(4_000_000_000L), "timestampSeconds" to JsonPrimitive(100), "namespace" to JsonPrimitive("n"), "key" to JsonPrimitive("k"), "value" to JsonPrimitive("v"))) }
+        // Same second, a small random id: it must still sort after the old event.
+        val same = ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), emptyMap(), "p", listOf(old), 100L) { 5L }.single()
+        assertTrue(same["timestampSeconds"]!!.jsonPrimitive.content.toLong() > 100 || same["eventId"]!!.jsonPrimitive.content.toLong() > 4_000_000_000L)
+        // A clock behind the old event's timestamp.
+        val behind = ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), emptyMap(), "p", listOf(old), 50L) { 5L }.single()
+        assertTrue(behind["timestampSeconds"]!!.jsonPrimitive.content.toLong() >= 100)
+    }
+
+    @Test
     fun eventHashMatchesTheSpecsParentHashChain() {
         val events = inputsOf("schema-version-event-types-001")["plaintextState"]!!.jsonObject["events"]!!.jsonArray.map { it.jsonObject }
         for (i in 1 until events.size) {
