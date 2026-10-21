@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -6589,6 +6590,7 @@ class SirosWalletTest {
         val progress: MutableSharedFlow<FlowProgressMessage>,
         val complete: MutableSharedFlow<FlowCompleteMessage>,
         val errors: MutableSharedFlow<FlowErrorMessage>,
+        val state: MutableStateFlow<WalletEngineSession.State>,
         val metadataSeen: MutableList<JsonObject?>,
     )
 
@@ -6609,6 +6611,8 @@ class SirosWalletTest {
         val complete = MutableSharedFlow<FlowCompleteMessage>()
         val errors = MutableSharedFlow<FlowErrorMessage>()
         val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete, flowErrors = errors)
+        val engineState = MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        every { engine.state } returns engineState
         every { engine.cancelFlow(any()) } just runs
         every { engine.sendSignRefusal(any(), any(), any()) } just runs
         every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
@@ -6625,7 +6629,7 @@ class SirosWalletTest {
                 context = buildJsonObject { putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId.removePrefix("x509_san_dns:")) }) } },
             )
         }
-        return EngineCzk(s, engine, match, sign, progress, complete, errors, seen)
+        return EngineCzk(s, engine, match, sign, progress, complete, errors, engineState, seen)
     }
 
     private val redirectQuery = Json.parseToJsonElement(
@@ -6872,6 +6876,44 @@ class SirosWalletTest {
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
         assertTrue(e.s.history.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aConsentApprovedWhileTheEngineIsReconnecting_provesNothing_evenWithoutANewGeneration() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent()
+        assertEquals(1, e.s.consents.size)
+        e.state.value = WalletEngineSession.State.RECONNECTING // the backoff: the generation has not changed yet
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+        assertTrue(e.s.history.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_anOverlappingDcApiRequestNeverPresentsTheSameSingleCopyCredentialTwice_underConsumeAll() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.s.wallet.credentialConsumptionPolicy = CredentialConsumptionPolicy.CONSUME_ALL
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // the redirect holds the credential and waits on the user
+        val dcApi = async(dispatcher) {
+            runCatching { e.s.wallet.handleDCAPIRequest(czkRequest(), CzkFixtures.ORIGIN, listOf(1L)) }
+        }
+        runCurrent()
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        // The DC API request found the single copy spent.
+        assertTrue(dcApi.await().exceptionOrNull() is org.siros.sdk.wallet.dcapi.DCAPIRequestRefused)
+        assertEquals(1, e.s.prover.calls)
     }
 
     @Test

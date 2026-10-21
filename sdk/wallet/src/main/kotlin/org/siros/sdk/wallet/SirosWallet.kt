@@ -3899,7 +3899,9 @@ class SirosWallet private constructor(
         if (circuitZkSupport != null && request.dcqlQuery != null &&
             DCAPIRequestRules.DEFAULT_REQUIRES_SIGNED_REQUEST(request.dcqlQuery)
         ) {
-            return handleCircuitZkDcApi(request, origin, selectedCredentialIds.orEmpty())
+            // One zkp_req presentation at a time across BOTH entry points (this one and the engine's redirect route): eligibility and
+            // the use record happen under the same lock.
+            return zkSigningMutex.withLock { handleCircuitZkDcApi(request, origin, selectedCredentialIds.orEmpty()) }
         }
 
         // The DC API has no negotiation, so a request can carry
@@ -7206,7 +7208,8 @@ class SirosWallet private constructor(
         // The session this request belongs to: a result that comes back after it ended (a logout, a new login) acts on nothing.
         val generation = sessionGeneration
         val connection = msg.connectionGeneration
-        fun ended() = flowId in terminatedFlowIds || flowId in abandonedFlowIds || sessionGeneration != generation || engine.connectionGeneration != connection
+        fun ended() = flowId in terminatedFlowIds || flowId in abandonedFlowIds || sessionGeneration != generation || engine.connectionGeneration != connection ||
+            engine.state.value != WalletEngineSession.State.CONNECTED
         try {
             // One zkp_req presentation at a time: eligibility (a consumed copy) is checked and its use recorded under this lock, so two
             // overlapping requests can never present the same credential instance. A request waiting here that ended is dropped.
