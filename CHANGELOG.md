@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Private data: `S.schemaVersion` 4** (privatedata-spec 3.0,
-  https://github.com/sirosfoundation/privatedata-spec/pull/9 at 8ca8860). `JweKeystore`
+  https://github.com/sirosfoundation/privatedata-spec/pull/9 at f393ccb, vectors from the stacked https://github.com/sirosfoundation/privatedata-spec/pull/10). `JweKeystore`
   now writes `S.schemaVersion` 4 (it wrote 3). A version 3 container it rewrites is
   migrated by that number alone; everything else is carried through unchanged, including
   unknown members of `S`, of credential entries and of `metadata` entries. `S.credentials[].metadata`
@@ -17,13 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container (the SDK always rewrites at 4); containers written earlier that already carry them
   under version 3 are read as version 4. The SDK emits no events and does not fold or merge them,
   so event stamping and the ETag/`If-Match` handling are unchanged.
+- `S.keypairs[]` entries the SDK cannot read (non-objects, legacy shapes, no parseable private key) and
+  unknown members of readable entries are now written back verbatim and in place (spec 3.0 section 6);
+  they used to be dropped on rewrite. Keys generated in a session are appended after them.
+- **Known gap (spec section 6.1.3):** the SDK keeps no event log. `setExtensionEntry` writes
+  `S.extensions` directly and appends no `set_extension` event, which the spec requires. Existing
+  `events` and `lastEventHash` are carried through unchanged. Closing the gap needs event construction
+  (eventId, parentHash chained from `lastEventHash`, timestamp, then the new hash) and a
+  last-write-wins reduction shared with other clients, which is not attempted here.
 - **Older SDK releases have no such guard.** The Kotlin exporter before this change unconditionally
   wrote version 3, so an older SDK that rewrites a version 4 container silently downgrades it
   instead of refusing. Integrators must not rely on the refusal until every SDK that shares an
   account is on a release with this change.
 - **Breaking for clients still on version 3 only:** wallet-frontend (and older SDKs) that do not
   implement version 4 will refuse to rewrite a container this SDK has rewritten, until updated.
-- The vendored privatedata-spec vectors are re-copied verbatim from 8ca8860 (with the fixtures
+- The vendored privatedata-spec vectors are re-copied verbatim from privatedata-spec PR 10 at f393ccb (with the fixtures
   they reference); `vectors.PROVENANCE.txt` records the commit and digests.
 
 ### Added
@@ -31,8 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`
   throws it, before building or storing anything, when the unlocked container has an
   `S.schemaVersion` other than 3 or 4 (absent counts as 1; 1 and 2 are not migrated here), an event
-  whose `schemaVersion` is not 1 to 4 or is missing, or an event type the implemented versions do
-  not define (`set_extension` only from version 3 events on, as written by spec 2.1 to 2.8 clients).
+  whose `schemaVersion` is not an integer from 1 to 4, or an event type the implemented versions do
+  not define (`set_extension` only at schemaVersion 4; the ten types are the nine of wallet-frontend plus it).
   Reading is unaffected, so credentials stay usable. `SirosWallet` reports it as its own
   `onFlowError("sync", ...)` and neither stores nor uploads the container, so the backend copy is intact.
   Previously such a container was silently rewritten as version 3.

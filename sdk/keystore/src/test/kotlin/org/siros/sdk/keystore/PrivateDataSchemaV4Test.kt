@@ -47,9 +47,9 @@ class PrivateDataSchemaV4Test {
 
     private fun sha256(b: ByteArray) = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
 
-    private fun vector(id: String, realEvents: Boolean = true): JsonObject =
+    private fun vector(id: String): JsonObject =
         resource("vectors.jsonl").toString(Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }
-            .map { json.parseToJsonElement(it).jsonObject.let { v -> if (realEvents) v.withRealEvents() else v } }
+            .map { json.parseToJsonElement(it).jsonObject }
             .first { it["id"]!!.jsonPrimitive.content == id }
 
     private fun plaintextOf(id: String): JsonObject = vector(id)["inputs"]!!.jsonObject["plaintextState"]!!.jsonObject
@@ -162,7 +162,7 @@ class PrivateDataSchemaV4Test {
     @Test
     fun vendoredFilesMatchTheDigestsInTheProvenanceFile() {
         val provenance = resource("vectors.PROVENANCE.txt").toString(Charsets.UTF_8)
-        assertTrue(provenance.contains("8ca88606d44b1f580781d3c5bfd20bfba8b4d9c8"))
+        assertTrue(provenance.contains("f393ccbb18731dabe776440b0a0dcafabcff2260"))
         val files = listOf(
             "vectors.jsonl", "fixtures/legacy-v1-symmetric.json", "fixtures/metadata-preservation.json",
             "fixtures/multi-passkey-v3.json", "fixtures/single-credential-v3.json",
@@ -202,8 +202,44 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun vector_eventWithoutSchemaVersion() = runTest {
+        assertRefused(
+            inputsOf("schema-version-event-missing-version-001")["plaintextState"]!!.jsonObject,
+            Kind.EVENT_VERSION, null, "alter_settings",
+        )
+    }
+
+    @Test
+    fun vector_everyEventTypeRoundTripsUnchanged() = runTest {
+        val p = inputsOf("schema-version-event-types-001")["plaintextState"]!!.jsonObject
+        assertEquals(10, p["events"]!!.jsonArray.map { it.jsonObject["type"]!!.jsonPrimitive.content }.toSet().size)
+        assertEquals(p, decrypt(unlocked(p).exportEncryptedContainer()))
+    }
+
+    @Test
+    fun vector_unknownKeypairEntriesPreservedVerbatim() = runTest {
+        val id = "keypair-unknown-entry-001"
+        assertEquals(expectedState(id), decrypt(unlocked(inputsOf(id)["plaintextState"]!!.jsonObject).exportEncryptedContainer()))
+    }
+
+    @Test
+    fun aKeypairAddedThisSessionIsAppendedAfterCarriedEntries() = runTest {
+        val p = inputsOf("keypair-unknown-entry-001")["plaintextState"]!!.jsonObject
+        val k = unlocked(p)
+        val kid = k.generateKey("ES256")
+        val kps = state(decrypt(k.exportEncryptedContainer()))["keypairs"]!!.jsonArray
+        assertEquals(state(p)["keypairs"]!!.jsonArray + kps.last(), kps.toList())
+        assertEquals(kid, kps.last().jsonObject["kid"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun aSetExtensionEventAtSchemaVersion3IsRefused() = runTest {
+        assertRefused(plaintext(events = listOf(event("set_extension", JsonPrimitive(3)))), Kind.EVENT_TYPE, 3, "set_extension")
+    }
+
+    @Test
     fun vector_migrateV3() = runTest {
-        for (id in listOf("schema-version-migrate-v3-001", "schema-version-v3-legacy-members-001")) {
+        for (id in listOf("schema-version-migrate-v3-001", "schema-version-v3-legacy-members-001", "single-credential-v3-001", "multi-passkey-v3-001")) {
             val out = decrypt(unlocked(inputsOf(id)["plaintextState"]!!.jsonObject).exportEncryptedContainer())
             assertEquals(id, expectedState(id), out)
         }
@@ -251,8 +287,7 @@ class PrivateDataSchemaV4Test {
         val ext = buildJsonObject { put("org.siros.bbs", buildJsonObject { put("k", JsonPrimitive("v")) }) }
         val v3 = plaintext(
             version = JsonPrimitive(3),
-            events = listOf(event("set_extension", JsonPrimitive(3))),
-            extraS = mapOf("extensions" to ext),
+                        extraS = mapOf("extensions" to ext),
             credentials = JsonArray(listOf(cred(1, mapOf("metadata" to md)))),
         )
         val k = unlocked(v3)
@@ -262,16 +297,7 @@ class PrivateDataSchemaV4Test {
         assertEquals(JsonPrimitive(4), state(out)["schemaVersion"])
         assertEquals(md, state(out)["credentials"]!!.jsonArray[0].jsonObject["metadata"])
         assertEquals(ext, state(out)["extensions"])
-        assertEquals(v3["events"], out["events"])
-    }
-
-    @Test
-    fun vectorPlaceholderEventsAreRefused() = runTest {
-        // The spec's own round-trip vectors carry events no schema version defines and no schemaVersion
-        // (see SpecVectorEvents.kt); section 6 says refuse, so the verbatim vector is refused.
-        val verbatim = vector("credential-metadata-001", realEvents = false)["inputs"]!!.jsonObject["plaintextState"]!!.jsonObject
-        assertRefused(verbatim, Kind.EVENT_VERSION, null, "credential-added")
-    }
+            }
 
     // ── refusal ───────────────────────────────────────────────────────
 
@@ -288,12 +314,6 @@ class PrivateDataSchemaV4Test {
         assertRefused(plaintext(version = null), Kind.STATE_VERSION, null) // absent means 1 to wallet-frontend
         assertRefused(plaintext(version = JsonPrimitive("4")), Kind.STATE_VERSION, null)
         assertRefused(plaintext(version = JsonPrimitive(4.5)), Kind.STATE_VERSION, null)
-    }
-
-    @Test
-    fun refusesAnEventWithoutASchemaVersion() = runTest {
-        // (version 5 is schema-version-unknown-event-version-001)
-        assertRefused(plaintext(events = listOf(event("alter_settings", null))), Kind.EVENT_VERSION, null, "alter_settings")
     }
 
     @Test

@@ -1036,8 +1036,12 @@ class JweKeystore(
                 // thereby migrated (the spec's migration only sets this number), which is
                 // also what makes it legal to write metadata and extensions into it.
                 put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(PrivateDataSchema.CURRENT_VERSION))
+                // Entries the container already held are written back verbatim and in place
+                // (privatedata-spec 3.0 section 6: an unparseable or unknown keypair entry or
+                // member MUST be preserved); only keys new this session are built below.
+                val (carried, carriedKids) = carriedKeypairEntries(existingState)
                 put("keypairs", kotlinx.serialization.json.JsonArray(
-                    keys.map { (kid, ecKey) ->
+                    carried + keys.filterKeys { it !in carriedKids }.map { (kid, ecKey) ->
                         kotlinx.serialization.json.buildJsonObject {
                             put("kid", kotlinx.serialization.json.JsonPrimitive(kid))
                             put("keypair", kotlinx.serialization.json.buildJsonObject {
@@ -1192,6 +1196,38 @@ class JweKeystore(
                 }
             }
         }
+    }
+
+    /**
+     * The `S.keypairs[]` entries of the container this keystore was unlocked from, to be written
+     * back as they were, in their original order, plus the kids of those that are live keys.
+     *
+     * An entry is carried verbatim when it is not a keypair this build reads (not an object, no
+     * parseable `keypair.privateKey`, legacy shape) or when it is one and the in-memory key is
+     * still the one it holds (so unknown members, at the entry and at the `keypair` level, survive).
+     * An entry whose kid now maps to a different key is dropped: the key built from memory replaces it.
+     */
+    private fun carriedKeypairEntries(
+        existingState: kotlinx.serialization.json.JsonObject?,
+    ): Pair<List<kotlinx.serialization.json.JsonElement>, Set<String>> {
+        val original = ((existingState?.get("S") as? kotlinx.serialization.json.JsonObject)
+            ?.get("keypairs") as? kotlinx.serialization.json.JsonArray) ?: return emptyList<kotlinx.serialization.json.JsonElement>() to emptySet()
+        val out = ArrayList<kotlinx.serialization.json.JsonElement>()
+        val kids = HashSet<String>()
+        for (entry in original) {
+            val kp = (entry as? kotlinx.serialization.json.JsonObject)?.get("keypair") as? kotlinx.serialization.json.JsonObject
+            val kid = (kp?.get("kid") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+            val priv = kp?.get("privateKey") as? kotlinx.serialization.json.JsonObject
+            val parsed = if (kid != null && priv != null) {
+                try { ECKey.Builder(ECKey.parse(priv.toString())).keyID(kid).build() } catch (_: Exception) { null }
+            } else null
+            when {
+                parsed == null -> out.add(entry) // not readable here: verbatim
+                keys[kid!!] == parsed -> { out.add(entry); kids.add(kid) }
+                else -> {} // replaced by a different in-memory key
+            }
+        }
+        return out to kids
     }
 
     /**

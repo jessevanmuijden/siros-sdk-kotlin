@@ -35,7 +35,7 @@ import java.security.MessageDigest
 /**
  * Per-credential `metadata` (privatedata-spec §6, §5A) and the preservation of
  * every member this SDK does not own: consumes the vectors of
- * privatedata-spec 3.0 (8ca8860) (see `vectors.PROVENANCE.txt`).
+ * privatedata-spec 3.0 (f393ccb) (see `vectors.PROVENANCE.txt`).
  *
  * The vectors' credential entries use string `id`s and no `credentialId`, so
  * this SDK cannot read them as credentials. They are tested twice: verbatim
@@ -65,11 +65,11 @@ class CredentialMetadataKeystoreTest {
         val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
         assertEquals(
             "vectors file no longer matches the hash in its PROVENANCE file",
-            "45baed8e08b8643c6bd427bedbbe8fbea6e67ebe181383eee19b17584a02b4e4",
+            "a06ec5a21c0b74aaae16595a685c38aa538fa65b46ece7dfe50f9286d839c0ba",
             sha,
         )
         return bytes.toString(Charsets.UTF_8).lineSequence().filter { it.isNotBlank() }
-            .map { json.parseToJsonElement(it).jsonObject.withRealEvents() }
+            .map { json.parseToJsonElement(it).jsonObject }
             .associateBy { it["id"]!!.jsonPrimitive.content }
     }
 
