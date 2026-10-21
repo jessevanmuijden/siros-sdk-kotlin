@@ -446,6 +446,28 @@ class SirosWalletTest {
         verify(exactly = 1) { engine.sendTrustResult("flow-3", false, "trust backend offline") }
     }
 
+    @Test
+    fun handleTrustEvaluation_whenTheSocketRefusesTheFailureReply_nothingEscapesTheLaunch() = runTest(dispatcher) {
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        every { engine.sendTrustResult(any(), any(), any()) } throws IllegalStateException("Not connected")
+        val apiClient = mockk<BackendApiClient>()
+        coEvery { apiClient.evaluateTrust(any()) } throws IllegalStateException("trust backend offline")
+        val escaped = mutableListOf<Throwable>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob() + kotlinx.coroutines.CoroutineExceptionHandler { _, e -> escaped += e }),
+            "apiClient" to apiClient,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+        )
+        invokeHandleTrustEvaluation(
+            wallet, engine, "flow-refused",
+            buildJsonObject { putJsonObject("request") { put("subject_id", "x"); put("subject_type", "credential_issuer"); putJsonObject("key_material") { put("type", "x5c"); putJsonArray("x5c") { add(JsonPrimitive("c")) } } } },
+        )
+        advanceUntilIdle()
+        verify(exactly = 1) { engine.sendTrustResult("flow-refused", false, "trust backend offline") }
+        assertEquals(emptyList<Throwable>(), escaped)
+    }
+
     /**
      * Regression (#219): go-wallet-backend#396/#401 sets
      * requires_resolution/request_jwt for a did:-scheme verifier when the

@@ -352,13 +352,13 @@ class WalletEngineSession(
             // we just closed on purpose. Don't clobber that with FAILED.
             return
         }
+        // One attempt in flight: a second failure/closing of the same socket must not queue another (or inflate the backoff).
+        if (pendingReconnect?.isActive == true) return
         if (reconnectAttempts >= maxReconnectAttempts) {
             Timber.w("WebSocket reconnection exhausted ($reconnectAttempts attempts)")
             _state.value = State.FAILED
             return
         }
-        // One attempt in flight: a second failure/closing of the same socket must not queue another (or inflate the backoff).
-        if (pendingReconnect?.isActive == true) return
         _state.value = State.RECONNECTING
         reconnectAttempts++
         val delayMs = baseReconnectDelayMs * (1L shl (reconnectAttempts - 1).coerceAtMost(4))

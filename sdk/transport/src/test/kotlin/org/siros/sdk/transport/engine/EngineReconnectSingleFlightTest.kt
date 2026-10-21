@@ -145,4 +145,17 @@ class EngineReconnectSingleFlightTest {
         every { sockets[0].send(any<String>()) } returns false
         s.sendCredentialNotification("flow", "n1", "credential_accepted", null)
     }
+
+    @Test
+    fun `a duplicate callback while the last retry is pending does not exhaust the budget`() {
+        val s = session()
+        s.connect("tok")
+        listeners[0].onOpen(sockets[0], response)
+        // Four retries already spent: the next failure schedules the fifth (the last).
+        WalletEngineSession::class.java.getDeclaredField("reconnectAttempts").apply { isAccessible = true }.setInt(s, 4)
+        listeners[0].onFailure(sockets[0], IOException("ping timeout"), null)
+        assertEquals(WalletEngineSession.State.RECONNECTING, s.state.value)
+        listeners[0].onClosing(sockets[0], 1006, "gone") // another callback of the same socket
+        assertEquals("still retrying, not FAILED", WalletEngineSession.State.RECONNECTING, s.state.value)
+    }
 }
