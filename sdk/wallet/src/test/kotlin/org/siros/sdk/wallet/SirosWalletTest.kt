@@ -6812,7 +6812,7 @@ class SirosWalletTest {
         assertEquals(listOf("q1" to "1", "q2" to "2"), matches.captured.map { it.credentialQueryId to it.credentialId })
     }
 
-    private fun serverTrust(trusted: Boolean, withContext: Boolean = true) = FlowProgressMessage(
+    private fun serverTrust(trusted: Boolean, withContext: Boolean = true, bare: Boolean = false) = FlowProgressMessage(
         flowId = "f1", step = "trust_evaluated",
         payload = buildJsonObject {
             put("verifier_trust_evaluated", true)
@@ -6820,7 +6820,7 @@ class SirosWalletTest {
             put("trusted", trusted)
             put("framework", "etsi-tl")
             if (withContext) putJsonObject("context") {
-                putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId) }) }
+                putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", if (bare) redirectClientId.removePrefix("x509_san_dns:") else redirectClientId) }) }
             }
         },
     )
@@ -6836,6 +6836,24 @@ class SirosWalletTest {
         advanceUntilIdle()
         verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
         assertEquals(1, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_theEnginesBareDnsVerifierId_isPrefixedBeforeItIsHashed() = runTest(dispatcher) {
+        val e = engineCzk(seedTrust = false)
+        e.progress.emit(serverTrust(trusted = true, bare = true))
+        advanceUntilIdle()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        val vp = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
+        val decoded = CzkDecoded(Json.parseToJsonElement(vp.captured).jsonObject["q"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals(
+            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym(redirectClientId)),
+            decoded.results["n"],
+        )
     }
 
     @Test
@@ -6924,6 +6942,29 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aSessionThatEndsWhileConsentIsPending_orIsReplaced_provesAndSendsNothing() = runTest(dispatcher) {
+        for (how in listOf("teardown", "replaced")) {
+            val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            val e = engineCzk(consent = { gate.await() })
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(redirectSign())
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            assertEquals(1, e.s.consents.size)
+            val m = e.s.wallet::class.java.declaredMethods.first { it.name == if (how == "teardown") "stopAllZkSigning" else "bumpSessionGeneration" }
+            m.isAccessible = true
+            m.invoke(e.s.wallet)
+            runCurrent()
+            gate.complete(true)
+            runCurrent()
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+            assertEquals(how, 0, e.s.prover.calls)
+            assertTrue(how, e.s.history.isEmpty())
+        }
     }
 
     @Test

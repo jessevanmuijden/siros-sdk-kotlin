@@ -833,6 +833,8 @@ class SirosWallet private constructor(
     private fun bumpSessionGeneration() {
         sessionGeneration += 1
         reloginDoneForGeneration = false
+        // A zkp_req signing waiting on the user belongs to the session that just ended or was replaced.
+        stopAllZkSigning()
     }
 
     @Synchronized
@@ -1880,6 +1882,8 @@ class SirosWallet private constructor(
      * refused this installation.
      */
     private fun endSessionLocally() {
+        // A zkp_req signing still waiting on the user belongs to the session that ends here: nothing of it may act on a later one.
+        stopAllZkSigning()
         engineStateJob?.cancel()
         engineStateJob = null
         engineSession?.disconnect()
@@ -6180,6 +6184,13 @@ class SirosWallet private constructor(
     private class ZkSignJob(val job: kotlinx.coroutines.Job, val messageId: String?)
     private val zkSignJobsByFlow = java.util.concurrent.ConcurrentHashMap<String, ZkSignJob>()
 
+    /** Ends every pending zkp_req signing without refusing (the engine session is gone): used when the session ends. */
+    private fun stopAllZkSigning() {
+        val all = zkSignJobsByFlow.values.toList()
+        zkSignJobsByFlow.clear()
+        all.forEach { it.job.cancel() }
+    }
+
     /**
      * Ends a flow's pending zkp_req signing: nothing is proved or sent for it afterwards, and (when [refuse]) the sign request it
      * was answering is refused, which ends the engine's signing wait instead of leaving it to its timeout.
@@ -7188,6 +7199,9 @@ class SirosWallet private constructor(
      */
     private suspend fun handleCircuitZkEngineSignPresentation(engine: WalletEngineSession, msg: SignRequestMessage) {
         val flowId = msg.flowId
+        // The session this request belongs to: a result that comes back after it ended (a logout, a new login) acts on nothing.
+        val generation = sessionGeneration
+        fun ended() = flowId in terminatedFlowIds || flowId in abandonedFlowIds || sessionGeneration != generation
         try {
             fun refuse(step: String, reason: org.siros.sdk.wallet.dcapi.DCAPIRefusalReason): Nothing = throw CircuitZkEngineRefusal(step, reason)
             val params = msg.params
@@ -7280,7 +7294,7 @@ class SirosWallet private constructor(
                 selectionByQuery = selectionByQuery,
             )
             // The flow may have ended while the user was asked: nothing is recorded or sent for it then.
-            if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
+            if (ended()) return
             val vpToken = JsonObject(answer.tokensByQueryId.mapValues { (_, tokens) -> kotlinx.serialization.json.JsonArray(tokens) }).toString()
             recordPresentation(PresentationRecord(
                 id = randomUint32Id(),
@@ -7294,7 +7308,7 @@ class SirosWallet private constructor(
             ))
             engine.sendSignResponse(flowId, vpToken = vpToken, messageId = msg.messageId)
         } catch (e: CircuitZkEngineRefusal) {
-            if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
+            if (ended()) return
             // Only the step and the coarse reason are logged: never a request content, an id or a value.
             Timber.w("zkp_req request refused on the engine transport (step=${e.step}, reason=${e.reason}) for flow $flowId")
             circuitZkClientMetadataByFlow.remove(flowId)
@@ -7305,7 +7319,7 @@ class SirosWallet private constructor(
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
+            if (ended()) return
             Timber.e("zkp_req presentation failed on the engine transport (${e.javaClass.simpleName}) for flow $flowId")
             circuitZkClientMetadataByFlow.remove(flowId)
             reportSignFailure(flowId, "Request not completed")
@@ -9663,8 +9677,26 @@ class SirosWallet private constructor(
             reason = payload["reason"]?.jsonPrimitive?.contentOrNull,
             entityName = payload["entity_name"]?.jsonPrimitive?.contentOrNull,
             identifier = verifier,
-            context = payload["context"] as? JsonObject,
+            context = (payload["context"] as? JsonObject)?.let(::withPrefixedVerifierIds),
         )
+    }
+
+    /**
+     * The engine relays the PDP's `verifier_ids` with an `x509_san_dns` value as the BARE lower-case A-label; the verifier id the
+     * rulebook hashes is the prefixed `x509_san_dns:<dns>` (byte-exact, nothing else normalised), so the prefix is added here when it is
+     * missing. Every other type (semantic values already carry `semantic_id:`) and every other member is passed through untouched.
+     */
+    private fun withPrefixedVerifierIds(context: JsonObject): JsonObject {
+        val ids = context["verifier_ids"] as? kotlinx.serialization.json.JsonArray ?: return context
+        val fixed = kotlinx.serialization.json.JsonArray(ids.map { entry ->
+            val o = entry as? JsonObject ?: return@map entry
+            val type = (o["verifier_id_type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            val value = (o["verifier_id"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            if (type == "x509_san_dns" && value != null && value.isNotEmpty() && !value.startsWith("x509_san_dns:")) {
+                JsonObject(o + ("verifier_id" to kotlinx.serialization.json.JsonPrimitive("x509_san_dns:$value")))
+            } else entry
+        })
+        return JsonObject(context + ("verifier_ids" to fixed))
     }
 
     /** Drops what a flow's match step left for its sign step; called wherever a flow ends. */
