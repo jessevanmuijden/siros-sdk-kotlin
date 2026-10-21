@@ -6915,6 +6915,25 @@ class SirosWalletTest {
     }
 
     @Test
+    fun circuitZkRedirect_aConnectionThatEndsDuringConsent_doesNotHoldUpAnUnrelatedDcApiRequest() = runTest(dispatcher) {
+        var asked = 0
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>() // the old dialog is never answered
+        val e = engineCzk(consent = { if (asked++ == 0) gate.await() else true })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent()
+        assertEquals(1, e.s.consents.size)
+        e.state.value = WalletEngineSession.State.RECONNECTING
+        runCurrent()
+        val dcApi = async(dispatcher) { e.s.wallet.handleDCAPIRequest(czkRequest(), CzkFixtures.ORIGIN, listOf(1L)) }
+        runCurrent()
+        assertTrue("the DC API request must not wait for the stale dialog", dcApi.isCompleted)
+        assertEquals(1, e.s.prover.calls)
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
+    @Test
     fun circuitZkRedirect_anOverlappingDcApiRequestNeverPresentsTheSameSingleCopyCredentialTwice_underConsumeAll() = runTest(dispatcher) {
         val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
         val e = engineCzk(consent = { gate.await() })
