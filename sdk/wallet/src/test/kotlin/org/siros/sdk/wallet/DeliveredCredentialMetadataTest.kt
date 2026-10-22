@@ -134,32 +134,6 @@ class DeliveredCredentialMetadataTest {
         assertSame(DeliveredMetadataVerdict.None, check(response(members = null, encrypted = false), advertised = false))
     }
 
-    private fun redacted(members: Map<String, JsonElement>? = null, encrypted: Boolean = false) = object : DeliveredResponseMetadata {
-        override val credentialMetadata = members?.let { ResponseCredentialMetadata(JsonObject(it)) }
-        override val credentialMetadataEncryptedResponse = encrypted
-        override val redactedMembers = setOf("credential_metadata", "credential_metadata_encrypted_response")
-    }
-
-    @Test
-    fun aRedactedCompletionMeansTheSeedIsUnavailable_forACredentialThatNeedsOne() {
-        // The credential carries an ssc (so it needs a seed): fail, never accept without it.
-        assertRefused(DeliveredMetadataRefusal.SEED_UNAVAILABLE, DeliveredCredentialMetadata.check(redacted(), listOf(cred()), ns, true))
-        assertRefused(DeliveredMetadataRefusal.SEED_UNAVAILABLE, DeliveredCredentialMetadata.check(redacted(), listOf(cred(N.mdoc(), "mso_mdoc")), ns, true))
-        assertRefused(DeliveredMetadataRefusal.SEED_UNAVAILABLE, DeliveredCredentialMetadata.check(redacted(), listOf(cred("x", "dc+sd-jwt")), ns, true, advertised = true))
-        // Even a response whose flag says encrypted: withheld is withheld.
-        assertRefused(DeliveredMetadataRefusal.SEED_UNAVAILABLE, DeliveredCredentialMetadata.check(redacted(encrypted = true), listOf(cred()), ns, true))
-        // A credential with no commitment does not need one.
-        assertSame(DeliveredMetadataVerdict.None, DeliveredCredentialMetadata.check(redacted(), listOf(cred("x", "dc+sd-jwt")), ns, true))
-    }
-
-    @Test
-    fun aRedactedCompletionThatAlsoCarriesTheObjectIsMalformed_andNothingIsSubstituted() {
-        assertRefused(
-            DeliveredMetadataRefusal.MALFORMED,
-            DeliveredCredentialMetadata.check(redacted(mapOf(member to seedObject()), encrypted = true), listOf(cred()), ns, true),
-        )
-    }
-
     @Test
     fun malformedMetadataAndMalformedSeedMembersAreRefused() {
         assertRefused(DeliveredMetadataRefusal.MALFORMED, check(response(malformed = true)))

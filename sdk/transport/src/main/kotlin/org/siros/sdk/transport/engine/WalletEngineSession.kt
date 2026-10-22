@@ -148,8 +148,17 @@ class WalletEngineSession(
     /** The generation allowed to act (its callbacks count); [NO_LIVE_SOCKET] while a replacement is being made. */
     private val liveGeneration = java.util.concurrent.atomic.AtomicInteger(NO_LIVE_SOCKET)
 
+    private val _connectionGenerations = kotlinx.coroutines.flow.MutableStateFlow(0)
+
     /** Generation of the most recently opened socket. */
     val connectionGeneration: Int get() = generationCounter.get()
+
+    /**
+     * [connectionGeneration] as a flow, so a consumer can react to a socket REPLACEMENT independently of [state]: an automatic
+     * reconnect publishes RECONNECTING before its backoff and only increments the generation when the new socket is opened,
+     * with no further state change.
+     */
+    val connectionGenerations: kotlinx.coroutines.flow.StateFlow<Int> get() = _connectionGenerations
 
     /** Orders overlapping [forceReconnect] calls; only the latest may replace the socket. */
     private val reconnectRequests = java.util.concurrent.atomic.AtomicInteger(0)
@@ -288,6 +297,9 @@ class WalletEngineSession(
             }
             val generation = generationCounter.incrementAndGet()
             liveGeneration.set(generation)
+            // Published in the same atomic step that installs the socket (a superseded attempt returned above, before this): the
+            // one place the generation changes.
+            _connectionGenerations.value = generation
             pendingReconnect?.cancel()
             pendingReconnect = null
             val previous = webSocket
@@ -663,7 +675,13 @@ class WalletEngineSession(
         clientAttestationPoP: String? = null,
         dpopKeyId: String? = null,
         dpopProof: String? = null,
+        credentialResponseEncryptionJwk: kotlinx.serialization.json.JsonObject? = null,
+        transactionId: String? = null,
+        interval: Int? = null,
         responseJwe: String? = null,
+        error: String? = null,
+        errorCode: String? = null,
+        credentialCount: Int? = null,
     ) {
         send(SignResponseMessage.serializer(), SignResponseMessage(
             flowId = flowId,
@@ -676,7 +694,13 @@ class WalletEngineSession(
             clientAttestationPoP = clientAttestationPoP,
             dpopKeyId = dpopKeyId,
             dpopProof = dpopProof,
+            credentialResponseEncryptionJwk = credentialResponseEncryptionJwk,
+            transactionId = transactionId,
+            interval = interval,
             responseJwe = responseJwe,
+            error = error,
+            errorCode = errorCode,
+            credentialCount = credentialCount,
         ))
     }
 

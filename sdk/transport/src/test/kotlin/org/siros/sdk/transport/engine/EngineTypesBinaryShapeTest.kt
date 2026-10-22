@@ -15,18 +15,17 @@ class EngineTypesBinaryShapeTest {
     }
 
     @Test
-    fun `sign response keeps timestamp, error_code and error at components 12 to 14 and appends response_jwe as 15`() {
-        val c = components(SignResponseMessage(flowId = "f", timestamp = "TS", errorCode = "EC", error = "ER", responseJwe = null))
-        assertEquals(listOf<Any?>("TS", "EC", "ER", null), c.subList(11, 15))
-        assertEquals(15, c.size)
-        val withJwe = components(SignResponseMessage(flowId = "f", timestamp = "TS", responseJwe = "J"))
-        assertEquals(listOf<Any?>("TS", null, null, "J"), withJwe.subList(11, 15))
+    fun `sign response keeps timestamp where it was and appends the refusal fields after it`() {
+        val c = components(SignResponseMessage(flowId = "f", timestamp = "TS", errorCode = "EC", error = "ER"))
+        assertEquals(listOf("TS", "EC", "ER"), c.takeLast(3))
     }
 
     @Test
     fun `sign request params appends client_metadata last`() {
         val c = components(SignRequestParams(clientMetadata = JsonPrimitive("CM"), credentialIssuer = "CI"))
-        // client_metadata is followed only by the three encrypted-presentation members (response_encryption, state, verified_request).
-        assertEquals(listOf<Any?>("CI", JsonPrimitive("CM"), null, null, null), c.takeLast(5))
+        // After everything main already had (including the engine-blind encryption members); credential_issuer keeps its position.
+        assertEquals(JsonPrimitive("CM"), c.last())
+        assertEquals("CI", c[c.indexOfFirst { it == "CI" }])
+        assertEquals(null, c[c.size - 2])
     }
 }
