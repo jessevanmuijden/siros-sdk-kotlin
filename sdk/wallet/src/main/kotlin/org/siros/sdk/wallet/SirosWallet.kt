@@ -7351,19 +7351,21 @@ class SirosWallet private constructor(
             if (ended()) return
             // Only the step and the coarse reason are logged: never a request content, an id or a value.
             Timber.w("zkp_req request refused on the engine transport (step=${e.step}, reason=${e.reason}) for flow $flowId")
+            // The sign-stage refusal ends the engine's signing wait and answers the verifier access_denied (no description); the text is
+            // only the coarse step, never a request content. Sent FIRST, before the local cleanup, so the engine's request does not wait
+            // out its timeout behind it, and best effort: a socket that rejects the frame (IllegalStateException) must not escape this
+            // launch, which has no exception handler.
+            sendEngineBestEffort("sign refusal", flowId) { engine.sendSignRefusal(flowId, msg.messageId, e.step) }
             circuitZkClientMetadataByFlow.remove(flowId)
             reportSignFailure(flowId, "Request not completed", notifyError = e.reason != org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
-            // The sign-stage refusal ends the engine's signing wait and answers the verifier access_denied (no description); the text is
-            // only the coarse step, never a request content.
-            engine.sendSignRefusal(flowId, msg.messageId, e.step)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             if (ended()) return
             Timber.e("zkp_req presentation failed on the engine transport (${e.javaClass.simpleName}) for flow $flowId")
+            sendEngineBestEffort("sign refusal", flowId) { engine.sendSignRefusal(flowId, msg.messageId, "error") }
             circuitZkClientMetadataByFlow.remove(flowId)
             reportSignFailure(flowId, "Request not completed")
-            engine.sendSignRefusal(flowId, msg.messageId, "error")
         }
     }
 

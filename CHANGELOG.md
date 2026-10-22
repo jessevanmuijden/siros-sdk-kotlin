@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encryption without a `verified_request.client_id`, or whose key/algorithm cannot be applied, is refused
   (`SIGN_REFUSED`), never answered in the clear. Without `response_encryption` (plain response modes) the answer is
   the `vp_token` as before. New: `SignResponseMessage.responseJwe`, `SignRequestParams.responseEncryption`/`state`/
-  `verifiedRequest`, `WalletEngineSession.sendSignResponse(responseJwe = ...)`. Needs an engine with
+  `verifiedRequest`, `WalletEngineSession.sendSignResponse(responseJwe = ...)` (`responseJwe` is the last component of `SignResponseMessage`, so the positions of `timestamp`, `error_code` and `error` do not move). A refusal is sent before the local cleanup and best effort: a socket that rejects the frame no longer throws out of the signing launch. Needs an engine with
   go-wallet-backend#469/#471: such an engine breaks a client that still returns a `vp_token` for `direct_post.jwt`.
 
 ### Fixed

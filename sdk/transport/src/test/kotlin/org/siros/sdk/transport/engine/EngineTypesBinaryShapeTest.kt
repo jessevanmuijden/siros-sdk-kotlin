@@ -15,9 +15,12 @@ class EngineTypesBinaryShapeTest {
     }
 
     @Test
-    fun `sign response keeps timestamp where it was and appends the refusal fields after it`() {
-        val c = components(SignResponseMessage(flowId = "f", timestamp = "TS", errorCode = "EC", error = "ER"))
-        assertEquals(listOf("TS", "EC", "ER"), c.takeLast(3))
+    fun `sign response keeps timestamp, error_code and error at components 12 to 14 and appends response_jwe as 15`() {
+        val c = components(SignResponseMessage(flowId = "f", timestamp = "TS", errorCode = "EC", error = "ER", responseJwe = null))
+        assertEquals(listOf<Any?>("TS", "EC", "ER", null), c.subList(11, 15))
+        assertEquals(15, c.size)
+        val withJwe = components(SignResponseMessage(flowId = "f", timestamp = "TS", responseJwe = "J"))
+        assertEquals(listOf<Any?>("TS", null, null, "J"), withJwe.subList(11, 15))
     }
 
     @Test

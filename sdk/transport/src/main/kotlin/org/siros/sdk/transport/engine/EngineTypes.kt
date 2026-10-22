@@ -216,11 +216,6 @@ data class SignResponseMessage(
      */
     @SerialName("dpop_key_id") val dpopKeyId: String? = null,
     @SerialName("dpop_proof") val dpopProof: String? = null,
-    /**
-     * Answer to a `direct_post.jwt` `sign_presentation` that carried [SignRequestParams.responseEncryption]: the
-     * compact JWE of the whole authorization response. Replaces [vpToken], which the engine then never sees.
-     */
-    @SerialName("response_jwe") val responseJwe: String? = null,
     val timestamp: String? = null,
     // Appended after timestamp (append-only: a data class's property order is part of its binary API).
     /**
@@ -231,6 +226,13 @@ data class SignResponseMessage(
      */
     @SerialName("error_code") val errorCode: String? = null,
     val error: String? = null,
+    // Appended after error: a data class's property order is part of its binary API (componentN, copy, constructor), so
+    // timestamp, error_code and error keep their positions.
+    /**
+     * Answer to a `direct_post.jwt` `sign_presentation` that carried [SignRequestParams.responseEncryption]: the
+     * compact JWE of the whole authorization response. Replaces [vpToken], which the engine then never sees.
+     */
+    @SerialName("response_jwe") val responseJwe: String? = null,
 ) {
     init {
         require(responseJwe == null || (error == null && errorCode == null)) {

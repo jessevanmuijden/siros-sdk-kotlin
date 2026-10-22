@@ -21,7 +21,8 @@ internal object BlindPresentation {
      * @param parts one `(credentialQueryId, token)` per presented credential, in presentation order.
      */
     fun vpToken(parts: List<Pair<String?, String>>): JsonElement {
-        if (parts.none { it.first != null }) return JsonPrimitive(parts.joinToString("\n") { it.second })
+        // The same test as the grouping below: an empty query id is no query id.
+        if (parts.none { !it.first.isNullOrEmpty() }) return JsonPrimitive(parts.joinToString("\n") { it.second })
         val byQuery = LinkedHashMap<String, MutableList<String>>()
         for ((queryId, token) in parts) {
             if (queryId.isNullOrEmpty()) continue

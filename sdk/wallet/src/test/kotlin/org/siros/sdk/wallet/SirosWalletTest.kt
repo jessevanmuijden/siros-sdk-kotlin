@@ -6418,6 +6418,9 @@ class SirosWalletTest {
         }
     }
 
+    /** What escaped a signing launch of a czkSetup wallet (its scope has no other handler, like the real one). */
+    private val czkUncaught = mutableListOf<Throwable>()
+
     private fun czkSetup(
         functions: List<org.siros.sdk.credentials.CircuitZkFunction> = listOf(
             org.siros.sdk.credentials.CircuitZkFunction(
@@ -6516,7 +6519,7 @@ class SirosWalletTest {
         val consentHandler = PresentationConsentHandler { r -> events += "consent"; consents += r; consent(r) }
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "Alice")),
-            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob() + kotlinx.coroutines.CoroutineExceptionHandler { _, t -> czkUncaught += t }),
             "apiClient" to apiClient,
             "keystore" to keystore,
             "credentialStore" to store,
@@ -6895,6 +6898,33 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "response-encryption") }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_aSocketThatRejectsTheAnswerAndTheRefusal_letsNoExceptionEscape() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        every { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) } throws IllegalStateException("socket refused the frame")
+        every { e.engine.sendSignRefusal(any(), any(), any()) } throws IllegalStateException("socket refused the frame")
+        e.sign.emit(redirectSignEncrypted(verifierKey()))
+        advanceUntilIdle() // an exception escaping the signing launch would fail the test here
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "error") }
+        assertTrue("nothing escaped the launch: $czkUncaught", czkUncaught.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aRefusalSurvivesARejectingSocket() = runTest(dispatcher) {
+        val e = engineCzk(consent = { false })
+        e.matchOnce()
+        advanceUntilIdle()
+        every { e.engine.sendSignRefusal(any(), any(), any()) } throws IllegalStateException("socket refused the frame")
+        e.sign.emit(redirectSignEncrypted(verifierKey()))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "consent-declined") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        assertTrue("nothing escaped the launch: $czkUncaught", czkUncaught.isEmpty())
     }
 
     private fun czkTwoCredentials() = listOf(
