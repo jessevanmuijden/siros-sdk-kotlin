@@ -351,5 +351,97 @@ class BlindIssuanceTest {
         b.open("f", issuerRaw(jwk, """{"credentials":[{"credential":"c"}],"x":${nestedObjects(40)}}"""), deferred = false)
         assertEquals(listOf("c"), b.take("f")!!.credentials)
     }
+
+    // ---- lifecycle races and retention (review round 3) ----
+
+    private fun pausedHolder(): Triple<BlindIssuance, java.util.concurrent.CountDownLatch, java.util.concurrent.CountDownLatch> {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val holder = BlindIssuance(keyFactory = { alg, enc ->
+            started.countDown()
+            release.await()
+            CredentialResponseKey.generate(alg, enc)
+        })
+        return Triple(holder, started, release)
+    }
+
+    private fun offerInBackground(holder: BlindIssuance, flowId: String): java.util.concurrent.Future<Result<JsonObject?>> =
+        java.util.concurrent.Executors.newSingleThreadExecutor().submit<Result<JsonObject?>> { runCatching { holder.offer(flowId, request) } }
+
+    @Test
+    fun aClearThatFinishesWhileTheKeyIsBeingGenerated_isNotUndoneByTheLateInsertion() {
+        val (holder, started, release) = pausedHolder()
+        val result = offerInBackground(holder, "f")
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        holder.clear()
+        release.countDown()
+        assertTrue("the offer fails instead of returning a key nobody holds", result.get(5, java.util.concurrent.TimeUnit.SECONDS).isFailure)
+        assertFalse("the cleared flow is not resurrected", holder.holdsKey("f"))
+        assertNull(holder.take("f"))
+    }
+
+    @Test
+    fun aDropOfThatFlowDuringGeneration_isNotUndoneEither_butADropOfAnotherFlowIsNoReason() {
+        val (holder, started, release) = pausedHolder()
+        val result = offerInBackground(holder, "f")
+        assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        holder.drop("f")
+        release.countDown()
+        assertTrue(result.get(5, java.util.concurrent.TimeUnit.SECONDS).isFailure)
+        assertFalse(holder.holdsKey("f"))
+
+        val (holder2, started2, release2) = pausedHolder()
+        val other = offerInBackground(holder2, "f")
+        assertTrue(started2.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        holder2.drop("some-other-flow")
+        release2.countDown()
+        assertTrue("an unrelated drop does not invalidate this offer", other.get(5, java.util.concurrent.TimeUnit.SECONDS).isSuccess)
+        assertTrue(holder2.holdsKey("f"))
+    }
+
+    @Test
+    fun repeatedPendingResponsesRetainNothing_onlyAResponseWithCredentialsIsKept() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        val bigMetadata = """{"display":[{"name":"${"p".repeat(200_000)}"}]}"""
+        repeat(25) { n ->
+            val control = b.open(
+                "f",
+                issuerRaw(jwk, """{"transaction_id":"tx-$n","interval":5,"credential_metadata":$bigMetadata}"""),
+                deferred = n > 0,
+            )
+            assertEquals("tx-$n", control.transactionId)
+        }
+        // Nothing of the 25 pending answers is held: not even an empty entry.
+        assertNull(b.take("f"))
+        val jwk2 = b.offer("f", request)!!
+        repeat(3) { n -> b.open("f", issuerRaw(jwk2, """{"transaction_id":"tx","credential_metadata":$bigMetadata}"""), deferred = n > 0) }
+        b.open("f", issuerRaw(jwk2, """{"credentials":[{"credential":"done"}],"notification_id":"n","credential_metadata":{"display":[]}}"""), deferred = true)
+        val taken = b.take("f")!!
+        assertEquals(listOf("done"), taken.credentials)
+        assertEquals("n", taken.notificationId)
+    }
+
+    @Test
+    fun aFlowOnAnOlderSocketLosesItsKeyButKeepsWhatItOpenedUntilPurged_andAnUntaggedFlowIsUntouched() {
+        val b = BlindIssuance()
+        val older = b.offer("old", request, generation = 1)!!
+        b.open("old", issuer(older, response("kept")), deferred = false)
+        b.offer("same", request, generation = 2)
+        b.offer("untagged", request)
+        b.markStaleBefore(2, now = 1_000)
+        assertFalse(b.holdsKey("old"))
+        assertTrue("a flow of the current socket is kept", b.holdsKey("same"))
+        assertTrue("a flow with no generation is kept", b.holdsKey("untagged"))
+        assertThrows(BlindIssuanceException::class.java) { b.open("old", issuer(older, response("x")), deferred = false) }
+        b.purgeStale(graceMs = 30_000, now = 20_000)
+        assertEquals("still within the grace", listOf("kept"), b.take("old")!!.credentials)
+        // And after the grace it is gone.
+        val jwk = b.offer("old2", request, generation = 1)!!
+        b.open("old2", issuer(jwk, response("kept")), deferred = false)
+        b.markStaleBefore(2, now = 1_000)
+        b.purgeStale(graceMs = 30_000, now = 31_001)
+        assertNull(b.take("old2"))
+    }
 }
 

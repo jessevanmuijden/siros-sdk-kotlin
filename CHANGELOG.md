@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     encrypted response (no verified `client_id`, unsupported pair, oversized, missing token) is answered with a sanitized
     error-only `sign_response` for the original `message_id` before local cleanup, on the ordinary and the `transaction_data`
     handlers, with no plaintext fallback.
+  - **Review follow-ups, round 3.** `BlindIssuance.offer` claims the flow's state before it generates the key and stores the key
+    only while that state is still the flow's, so a `clear()`/`drop()` that finishes during generation (a WMP handler can
+    outlive the teardown that cancelled its scope) is not undone; the offer then fails. `reloginAfterCutOff()` clears the holder
+    at the start of its teardown, whatever the replacement login does. A new socket on the SAME engine session (a forced or
+    automatic reconnect) drops the private key of every flow that lived on an older one; what such a flow had already opened is
+    kept for 30 s (so a completion buffered before the replacement can still be processed) and then forgotten. A pending
+    (`transaction_id`) response is validated and answered but retains nothing; only a response that carries credentials is kept.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

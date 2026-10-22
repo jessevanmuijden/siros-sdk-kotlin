@@ -57,9 +57,16 @@ internal class OpenedIssuance(
  * key; the key of the request that produced the issuer's reply is the latest one) and lives only here, in memory.
  * [drop] and [clear] forget a flow's key and everything opened for it.
  */
-internal class BlindIssuance {
-    private class FlowState {
+internal class BlindIssuance(
+    /** Generates the key for a negotiated pair; replaceable so a test can pause generation. */
+    private val keyFactory: (String, String) -> CredentialResponseKey? = { alg, enc -> CredentialResponseKey.generate(alg, enc) },
+    /** Milliseconds, for the grace of a stale flow; replaceable so a test can use virtual time. */
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private class FlowState(val generation: Int) {
         @Volatile var key: CredentialResponseKey? = null
+        /** When the socket this flow lived on was replaced (NOT_STALE: it was not). The key is gone then; opened responses wait out a grace. */
+        @Volatile var staleAt: Long = NOT_STALE
         val opened = mutableListOf<OpenedIssuance>()
     }
 
@@ -72,21 +79,47 @@ internal class BlindIssuance {
      * @throws BlindIssuanceException when the issuer REQUIRES encryption and the wallet cannot provide a key for the
      *   negotiated pair: the issuance fails here, with a message that says why, instead of at the issuer.
      */
-    fun offer(flowId: String, request: CredentialResponseEncryptionRequest?): JsonObject? {
+    fun offer(flowId: String, request: CredentialResponseEncryptionRequest?, generation: Int = NO_GENERATION): JsonObject? {
         if (request == null) {
             flows[flowId]?.key = null
             return null
         }
-        val key = CredentialResponseKey.generate(request.alg, request.enc)
+        // The flow's state is claimed BEFORE the key is generated and the key is stored only while that very state is still
+        // the flow's: a clear() or drop() that finishes during generation removes it, and the stale insertion is discarded
+        // instead of resurrecting the flow (a handler can outlive the teardown that cancelled its scope).
+        val state = flows.compute(flowId) { _, old -> if (old == null || old.staleAt != NOT_STALE) FlowState(generation) else old }!!
+        val key = keyFactory(request.alg, request.enc)
         if (key == null) {
-            flows[flowId]?.key = null
+            state.key = null
+            if (state.opened.isEmpty()) flows.remove(flowId, state)
             if (request.required) {
                 throw BlindIssuanceException("The issuer requires an encrypted credential response (${request.alg}/${request.enc}) and this wallet cannot decrypt it")
             }
             return null
         }
-        flows.getOrPut(flowId) { FlowState() }.key = key
+        if (flows[flowId] !== state) throw BlindIssuanceException("The issuance ended while its response key was being generated")
+        // (A teardown after this check is a teardown right after the offer returned: the state is out of the map and so is the key.)
+        state.key = key
         return key.publicJwk
+    }
+
+    /**
+     * The socket of connection [generation] replaced the ones before it: a flow that lived on an older one is dead on the
+     * engine, so its private key is dropped now. What it already opened is kept for [purgeStale] (a completion that was
+     * buffered before the replacement still has to be processed against it) and is NOT readable through a key any more.
+     */
+    fun markStaleBefore(generation: Int, now: Long = clock()) {
+        for (state in flows.values) {
+            if (state.generation < generation && state.staleAt == NOT_STALE) {
+                state.key = null
+                state.staleAt = now
+            }
+        }
+    }
+
+    /** Forgets the flows that went stale at least [graceMs] ago. */
+    fun purgeStale(graceMs: Long, now: Long = clock()) {
+        flows.entries.removeIf { (_, s) -> s.staleAt != NOT_STALE && now - s.staleAt >= graceMs }
     }
 
     /**
@@ -135,8 +168,12 @@ internal class BlindIssuance {
         if (credentials.size > BlindIssuanceControl.MAX_CREDENTIAL_COUNT) {
             throw BlindIssuanceException("The credential response carries more than ${BlindIssuanceControl.MAX_CREDENTIAL_COUNT} credentials", notificationId)
         }
-        synchronized(state.opened) {
-            state.opened += OpenedIssuance(credentials, metadata, notificationId, deferred)
+        // Only a response that carries credentials is retained: a pending one (a transaction_id) is validated and answered but
+        // keeps nothing, so repeated deferrals do not accumulate up to 1 MiB of metadata each.
+        if (credentials.isNotEmpty()) {
+            synchronized(state.opened) {
+                state.opened += OpenedIssuance(credentials, metadata, notificationId, deferred)
+            }
         }
         return if (transactionId != null) {
             BlindIssuanceControl(credentialCount = null, transactionId = transactionId, interval = interval)
@@ -176,6 +213,12 @@ internal class BlindIssuance {
 
     /** Whether a key is currently held for [flowId]. */
     fun holdsKey(flowId: String): Boolean = flows[flowId]?.key != null
+
+    companion object {
+        /** A flow not tied to a connection generation (WMP) is never made stale by a socket replacement. */
+        const val NO_GENERATION = Int.MAX_VALUE
+        private const val NOT_STALE = Long.MIN_VALUE
+    }
 
     private fun credentialString(value: JsonElement): String = when {
         value is JsonPrimitive && value.isString -> value.content

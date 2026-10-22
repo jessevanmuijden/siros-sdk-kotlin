@@ -11183,6 +11183,7 @@ class SirosWalletTest {
         progressFlow: MutableSharedFlow<FlowProgressMessage> = MutableSharedFlow(),
         flowComplete: MutableSharedFlow<FlowCompleteMessage> = MutableSharedFlow(),
         flowErrors: MutableSharedFlow<FlowErrorMessage> = MutableSharedFlow(),
+        state: MutableStateFlow<WalletEngineSession.State> = MutableStateFlow(WalletEngineSession.State.CONNECTED),
     ): WalletEngineSession {
         val engine = mockk<WalletEngineSession>()
         every { engine.connect(any(), any(), any()) } just runs
@@ -11190,7 +11191,7 @@ class SirosWalletTest {
         // Each reconnect opens a new connection generation, as the real session does.
         coEvery { engine.forceReconnect() } coAnswers { engineGeneration.incrementAndGet() }
         every { engine.connectionGeneration } answers { engineGeneration.get() }
-        every { engine.state } returns MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        every { engine.state } returns state
         every { engine.sendSignResponse(any(), any(), any(), any()) } just runs
         every { engine.sendMatchResponse(any(), any(), any()) } just runs
         every { engine.sendCredentialsMatched(any(), any(), any()) } just runs
@@ -12818,6 +12819,106 @@ class SirosWalletTest {
         assertFalse(blind.holdsKey("flow-a"))
         assertEquals(null, blind.take("flow-a"))
         assertTrue("another flow is untouched", blind.holdsKey("flow-b"))
+    }
+
+    @Test
+    fun aFailedReauthentication_stillReleasesTheIssuanceMaterialOfTheEndedSession() = runTest(dispatcher) {
+        val blind = heldBlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "blindIssuance" to blind,
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "reloginAfterCutOff" }
+        method.isAccessible = true
+        // The teardown is cut short here (no token store in this fixture), as a login that ends in an error leaves nothing to
+        // replace the old connection: the holder must already be empty.
+        runCatching { runBlocking { method.callSuspend(wallet, 0) } }
+        assertBlindEmpty(blind)
+    }
+
+    @Test
+    fun aSocketReplacedOnTheSameSession_dropsTheAbandonedFlowsKey_keepsWhatItOpenedForAGraceOnly() = runTest(dispatcher) {
+        val state = MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        val engine = mockEngineConstructor(state = state)
+        val blind = BlindIssuance(clock = { dispatcher.scheduler.currentTime })
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val request = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false)
+        val jwk = blind.offer("flow-a", request, engine.connectionGeneration)!!
+        blind.open("flow-a", issuerEncrypt(jwk, "ECDH-ES", "A256GCM", issuerBody("buffered credential").toString()), deferred = false)
+        blind.offer("flow-b", request, engine.connectionGeneration)
+        // The SAME session object gets a new socket (forceReconnect() or an automatic reconnect): none is constructed.
+        engineGeneration.incrementAndGet()
+        state.value = WalletEngineSession.State.RECONNECTING
+        dispatcher.scheduler.runCurrent()
+        assertFalse("the abandoned flow's private key is gone", blind.holdsKey("flow-a"))
+        assertFalse(blind.holdsKey("flow-b"))
+        // A completion buffered before the replacement still finds what its flow opened...
+        // ...but only within the grace.
+        dispatcher.scheduler.advanceTimeBy(SirosWallet.BLIND_STALE_GRACE_MS + 1)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("forgotten after the grace", null, blind.take("flow-a"))
+    }
+
+    @Test
+    fun aKeyOfferedByTheLegacyHandler_isTiedToTheSocketItWasOfferedOn() = runTest(dispatcher) {
+        val state = MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow, state = state)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-k", messageId = "m", action = "generate_proof",
+                params = SignRequestParams(credentialResponseEncryption = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", true)),
+            )
+        )
+        advanceUntilIdle()
+        assertTrue(blind.holdsKey("flow-k"))
+        engineGeneration.incrementAndGet()
+        state.value = WalletEngineSession.State.RECONNECTING
+        dispatcher.scheduler.runCurrent()
+        assertFalse("the new socket abandons the flow of the old one", blind.holdsKey("flow-k"))
+    }
+
+    @Test
+    fun aSocketReplacedOnTheSameSession_leavesABufferedCompletionItsOpenedResponseWithinTheGrace() = runTest(dispatcher) {
+        val state = MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        val engine = mockEngineConstructor(state = state)
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val jwk = blind.offer("flow-a", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false), engine.connectionGeneration)!!
+        blind.open("flow-a", issuerEncrypt(jwk, "ECDH-ES", "A256GCM", issuerBody("buffered credential").toString()), deferred = false)
+        engineGeneration.incrementAndGet()
+        state.value = WalletEngineSession.State.RECONNECTING
+        dispatcher.scheduler.runCurrent()
+        assertFalse(blind.holdsKey("flow-a"))
+        assertEquals(listOf("buffered credential"), blind.take("flow-a")!!.credentials)
     }
 
     private fun legacyEncryptedPresentationWallet(

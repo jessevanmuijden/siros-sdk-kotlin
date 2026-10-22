@@ -851,6 +851,9 @@ class SirosWallet private constructor(
      * anything else to [WalletState.Error].
      */
     private suspend fun reloginAfterCutOff(generation: Int) {
+        // This session's issuance material goes with its connections and keystore, whether or not the replacement login
+        // succeeds (a login that ends in WalletState.Error leaves no new connection to replace it).
+        blindIssuance.clear()
         engineStateJob?.cancel()
         engineStateJob = null
         engineSession?.disconnect()
@@ -7030,6 +7033,19 @@ class SirosWallet private constructor(
         }
     }
 
+    /**
+     * The engine session got a new socket (connection [generation]): the response keys of the flows that lived on an older one
+     * are dropped now, and what they had opened is kept for [BLIND_STALE_GRACE_MS] only, so a completion that was already
+     * buffered can still be processed against it.
+     */
+    private fun onEngineSocketReplaced(generation: Int) {
+        blindIssuance.markStaleBefore(generation)
+        scope.launch {
+            kotlinx.coroutines.delay(BLIND_STALE_GRACE_MS)
+            blindIssuance.purgeStale(BLIND_STALE_GRACE_MS)
+        }
+    }
+
     /** The OpenID4x profile this wallet runs over [peer]: every callback is the wallet's own. */
     private fun wmpProfile(peer: org.siros.sdk.transport.wmp.WmpPeer?): org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile =
         org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile(
@@ -7579,7 +7595,15 @@ class SirosWallet private constructor(
         credentialNotifier = engine
         engineStateJob?.cancel()
         engineStateJob = scope.launch {
+            var seenGeneration = engine.connectionGeneration
             engine.state.collect { s ->
+                // A new socket on the SAME session (an automatic or forced reconnect) abandons the flows of the old one.
+                engine.connectionGeneration.let { g ->
+                    if (g != seenGeneration) {
+                        seenGeneration = g
+                        onEngineSocketReplaced(g)
+                    }
+                }
                 if (s == WalletEngineSession.State.REAUTH_REQUIRED) {
                     handleReauthenticationRequired()
                 }
@@ -7618,7 +7642,7 @@ class SirosWallet private constructor(
                             // Before any proof is made (which can prompt the user): an issuer that requires an
                             // encrypted response this wallet cannot open fails the issuance here.
                             val responseKeyJwk = try {
-                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption)
+                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption, engine.connectionGeneration)
                             } catch (e: BlindIssuanceException) {
                                 // Answer the request (its message_id echoed) so the engine does not wait out its signing
                                 // timeout; the failure is also reported locally below.
@@ -9980,6 +10004,12 @@ class SirosWallet private constructor(
         /** Thrown wherever a call needs the backend and the wallet has no session yet. */
         private const val NOT_CONNECTED = "Not connected"
         private const val ABANDONED_START_TTL_MS = 30_000L
+
+        /**
+         * How long what an abandoned issuance opened stays readable after its socket was replaced: long enough for a completion
+         * that was already buffered to be processed against it, short enough not to retain a credential or seed.
+         */
+        internal const val BLIND_STALE_GRACE_MS = 30_000L
 
         /** Shown when a sign request fails without a message. */
         private const val SIGNING_FAILED_MESSAGE = "Signing failed"
