@@ -437,11 +437,13 @@ class PrivateDataSchemaV4Test {
         assertRefused(plaintext(version = kotlinx.serialization.json.JsonUnquotedLiteral("5.0")), Kind.STATE_VERSION, 5)
         assertRefused(plaintext(version = kotlinx.serialization.json.JsonUnquotedLiteral("99999999999")), Kind.STATE_VERSION, null)
         // Out of range by magnitude: rejected without ever building the integer (this would otherwise exhaust memory).
-        for (huge in listOf("4e100000000", "4e-100000000", "-4e100000000", "1" + "0".repeat(40))) {
+        for (huge in listOf("4e100000000", "4e-100000000", "-4e100000000", "1" + "0".repeat(40), "4e2147483647", "100e2147483647", "4e-2147483648")) {
             assertRefused(plaintext(version = kotlinx.serialization.json.JsonUnquotedLiteral(huge)), Kind.STATE_VERSION, null)
             assertRefused(plaintext(events = listOf(event("alter_settings", kotlinx.serialization.json.JsonUnquotedLiteral(huge)))), Kind.EVENT_VERSION, null, "alter_settings")
         }
-        assertEquals(null, PrivateDataSchema.longOrNull(kotlinx.serialization.json.JsonUnquotedLiteral("2e100000000")))
+        for (huge in listOf("2e100000000", "4e2147483647", "100e2147483647")) {
+            assertEquals(huge, null, PrivateDataSchema.longOrNull(kotlinx.serialization.json.JsonUnquotedLiteral(huge)))
+        }
         assertEquals(9223372036854775807L, PrivateDataSchema.longOrNull(kotlinx.serialization.json.JsonUnquotedLiteral("9223372036854775807")))
         assertEquals(null, PrivateDataSchema.longOrNull(kotlinx.serialization.json.JsonUnquotedLiteral("9223372036854775808")))
     }

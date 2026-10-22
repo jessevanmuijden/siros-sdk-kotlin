@@ -88,12 +88,17 @@ internal object PrivateDataSchema {
         val n = p.content.toBigDecimalOrNull() ?: return null
         if (n.signum() == 0) return 0L
         // Rejected by magnitude BEFORE any integer is built: a short literal such as 4e100000000 must not be expanded into a huge
-        // number (memory) just to be found out of range.
-        val s = n.stripTrailingZeros()
-        if (s.scale() > 0) return null // fractional
-        if (s.precision() - s.scale() > 19) return null // more integer digits than a Long can hold
-        val i = s.toBigIntegerExact()
-        return if (i.bitLength() <= 63) i.toLong() else null
+        // number (memory) just to be found out of range. Every step is overflow-safe: scale arithmetic is done in Long, and an
+        // ArithmeticException (stripTrailingZeros overflowing the scale of 100e2147483647) means out of range too.
+        return try {
+            val s = n.stripTrailingZeros()
+            if (s.scale() > 0) return null // fractional
+            if (s.precision().toLong() - s.scale().toLong() > 19L) return null // more integer digits than a Long can hold
+            val i = s.toBigIntegerExact()
+            if (i.bitLength() <= 63) i.toLong() else null
+        } catch (_: ArithmeticException) {
+            null
+        }
     }
 
     /** A JSON number whose VALUE is an integer in the Int range (4, 4.0, 4e0), else null: a string "4" or 4.5 is not a version. */
