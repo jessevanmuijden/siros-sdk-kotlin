@@ -873,7 +873,8 @@ object CredentialUtils {
     /**
      * [eligibleInstances] for the candidates of one matched query, with the ZK status taken from the QUERY: a `zkp_req` query is
      * answered with a proof whatever the stored format of its candidates is (an mdoc), so under
-     * [CredentialConsumptionPolicy.CONSUME_NON_ZKP] it does not consume them. Callers that only have the stored format
+     * [CredentialConsumptionPolicy.CONSUME_NON_ZKP] it does not consume them (nor does a legacy `mso_mdoc_zk` query, whose
+     * candidates are stored as plain `mso_mdoc` too). Callers that only have the stored format
      * (the overload above) would wrongly treat such a candidate as a raw presentation and refuse its reuse.
      */
     fun eligibleInstances(
@@ -883,7 +884,7 @@ object CredentialUtils {
         availableKeyIds: Set<String>,
     ): List<StoredCredential> = eligibleInstances(
         result.candidates, policy, presentationHistory, availableKeyIds,
-        isZkPresentation = { isZkpFormat(it.format) || isCircuitZkFormat(result.format) },
+        isZkPresentation = { isZkpFormat(it.format) || isZkpFormat(result.format.orEmpty()) || isCircuitZkFormat(result.format) },
     )
 
     /**

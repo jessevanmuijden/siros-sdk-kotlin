@@ -247,5 +247,10 @@ class CredentialUtilsEligibleInstancesTest {
         // A raw mdoc query still consumes, and CONSUME_ALL consumes everything.
         assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(matchResult("mso_mdoc", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")))
         assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(matchResult("zkp_req", mdoc), CredentialConsumptionPolicy.CONSUME_ALL, history, setOf("k")))
+        // A legacy mso_mdoc_zk query is a proof too, though its candidates are stored as plain mso_mdoc.
+        assertEquals(
+            listOf(mdoc),
+            CredentialUtils.eligibleInstances(matchResult("mso_mdoc_zk", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")),
+        )
     }
 }
