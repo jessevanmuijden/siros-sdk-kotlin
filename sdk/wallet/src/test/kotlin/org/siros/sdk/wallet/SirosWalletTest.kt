@@ -6824,6 +6824,8 @@ class SirosWalletTest {
                 responseEncryption = org.siros.sdk.transport.ResponseEncryptionRequest(
                     jwk = Json.parseToJsonElement(key.toPublicJWK().toJSONString()).jsonObject, alg = alg, enc = enc,
                 ),
+                // The engine's own thumbprint of the same key (they agree; a mismatch is refused, see below).
+                verifierJwkThumbprint = key.computeThumbprint().toString(),
                 state = state,
                 verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = verifiedClientId, responseMode = "direct_post.jwt", signed = true, signatureVerification = "verified"),
             ),
@@ -6891,6 +6893,76 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "jarm-audience") }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_anEngineThumbprintThatIsNotTheEncryptionKeys_isRefusedAndNothingIsSent() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // The transcript's thumbprint and the key the JWE goes to must be the same key's: one source, a mismatch is refused.
+        val m = redirectSignEncrypted(verifierKey())
+        e.sign.emit(m.copy(params = m.params.copy(verifierJwkThumbprint = redirectThumbprint)))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "handover-thumbprint") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+    }
+
+    @Test
+    fun theSessionTranscriptThumbprintOfADirectPostJwtRequestComesFromTheEncryptionKey_aMismatchIsRefused() {
+        val wallet = newWallet()
+        val key = verifierKey()
+        val own = key.computeThumbprint().toString()
+        val encryption = org.siros.sdk.transport.ResponseEncryptionRequest(Json.parseToJsonElement(key.toPublicJWK().toJSONString()).jsonObject, "ECDH-ES", "A128GCM")
+        // No engine value, or the same one: the key's own thumbprint.
+        assertEquals(own, wallet.transcriptThumbprint(SignRequestParams(responseEncryption = encryption)))
+        assertEquals(own, wallet.transcriptThumbprint(SignRequestParams(responseEncryption = encryption, verifierJwkThumbprint = own)))
+        // A different engine value: refused, never preferred.
+        org.junit.Assert.assertThrows(WalletException::class.java) {
+            wallet.transcriptThumbprint(SignRequestParams(responseEncryption = encryption, verifierJwkThumbprint = redirectThumbprint))
+        }
+        // An unusable key: refused.
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            wallet.transcriptThumbprint(SignRequestParams(responseEncryption = org.siros.sdk.transport.ResponseEncryptionRequest(buildJsonObject { put("kty", JsonPrimitive("EC")) }, "ECDH-ES", "A128GCM")))
+        }
+        // A plain mode (no response encryption) keeps the engine's value.
+        assertEquals(redirectThumbprint, wallet.transcriptThumbprint(SignRequestParams(verifierJwkThumbprint = redirectThumbprint)))
+        assertEquals(null, wallet.transcriptThumbprint(SignRequestParams()))
+    }
+
+    @Test
+    fun legacySignPresentation_overDirectPostJwt_anEngineThumbprintThatIsNotTheEncryptionKeys_isAnsweredWithAnErrorBeforeAnythingIsSigned() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to keystore,
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-t", messageId = "m-t", action = "sign_presentation",
+                params = SignRequestParams(
+                    audience = "admin", nonce = "n", responseEncryption = blindResponseEncryption(), verifierJwkThumbprint = redirectThumbprint,
+                    verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "client-id-1", responseMode = "direct_post.jwt"),
+                ),
+            )
+        )
+        repeat(5) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            advanceUntilIdle()
+        }
+        verify(exactly = 1) { engine.sendSignResponse(flowId = "flow-t", messageId = "m-t", error = any()) }
+        coVerify(exactly = 0) { keystore.signMdocPresentation(any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { keystore.signVpToken(any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -13412,6 +13484,7 @@ class SirosWalletTest {
             "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
             "keystore" to org.siros.sdk.keystore.JweKeystore(),
             "eventListener" to listener,
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
             "blindIssuance" to blind,
         )
         val method = wallet::class.declaredMemberFunctions.first { it.name == "onWmpFlowComplete" }
@@ -13420,12 +13493,14 @@ class SirosWalletTest {
         val plain = Json.parseToJsonElement("""{"credentials":[{"format":"dc+sd-jwt","credential":"x"}]}""").jsonObject
         runBlocking { method.callSuspend(wallet, null, "flow-b", plain) }
         assertFalse("a plain completion releases the key", blind.holdsKey("flow-b"))
-        verify(exactly = 1) { listener.onFlowComplete("flow-b", any()) }
+        // ... and is an error, not a success: a key was offered.
+        verify(exactly = 0) { listener.onFlowComplete("flow-b", any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-b", match { it.contains("answered in clear") }, any()) }
         // flow-a: an encrypted completion is processed against the opened response, and only then released.
         val encrypted = Json.parseToJsonElement("""{"credentials":[{"format":"dc+sd-jwt"}],"credential_response_encrypted":true}""").jsonObject
         runBlocking { method.callSuspend(wallet, null, "flow-a", encrypted) }
         verify(exactly = 1) { listener.onFlowComplete("flow-a", any()) }
-        verify(exactly = 0) { listener.onFlowError(any(), any(), any()) }
+        verify(exactly = 0) { listener.onFlowError("flow-a", any(), any()) }
         assertFalse(blind.holdsKey("flow-a"))
         assertEquals(null, blind.take("flow-a"))
     }
@@ -13436,7 +13511,10 @@ class SirosWalletTest {
             listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
             encrypted = false, offeredKey = true,
         )
-        assertEquals(1, s.store.getAll().size)
+        // A key was offered, so a plaintext completion is an ERROR and nothing is stored; the issuer is told.
+        assertNothingStored(s)
+        verify(exactly = 1) { s.engine.sendCredentialNotification("flow-delivered", "notif-1", CredentialNotificationEvent.FAILURE, any()) }
+        verify(exactly = 1) { s.listener.onFlowError("flow-delivered", match { it.contains("answered in clear") }, any()) }
         assertFalse(s.blind.holdsKey("flow-delivered"))
     }
 

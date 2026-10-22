@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Engine-blind encryption review follow-ups (wallet-frontend review of the contract, points 3, 5, 6, 8, 9).** BEHAVIOUR CHANGES:
+  - For `direct_post.jwt` the mdoc session-transcript thumbprint is computed from `response_encryption.jwk`, the key the response is
+    encrypted to (one source). An engine-supplied `verifier_jwk_thumbprint` that differs is REFUSED (an error `sign_response` on
+    the legacy path, `handover-thumbprint` on the `zkp_req` redirect path), never preferred. Plain modes keep the engine's value.
+  - A PLAINTEXT `flow_complete` (no `credential_response_encrypted`) that carries credentials is an ERROR when a response-encryption
+    key was held for the flow, on both transports (`DeliveredMetadataRefusal.PLAIN_RESPONSE`): nothing is stored, the issuer is sent
+    `credential_failure`, the listener is told. A flow that offered no key is unaffected.
+  - A seed (`org.siros.secret_seed`) on a response to a Deferred Credential Request is refused at decryption (it used to be accepted
+    there and refused later by the receipt check), as a pending response already was, with the notification id kept so
+    `credential_failure` is sent. Metadata is not carried between responses (verified: only a credential-bearing response is kept).
+  - Every `credentials[]` entry of the decrypted response must be an object with a STRING `credential` (OID4VCI 1.0 section 8.3): the
+    inner value is stored; a bare string, a non-object entry or a non-string/empty inner value (an `ldp_vc` object) is refused. The
+    pre-1.0 draft shape, a top-level string `credential`, is still accepted.
+  - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
+    `enc` and `kid` only.
+
 ## [0.21.0] - 2026-10-22
 
 BREAKING: engine-blind encryption. The wallet, not the engine, now holds the OID4VCI credential-response key and builds the OID4VP direct_post.jwt response, so the engine relays ciphertext and never sees credentials, the delivered secret seed or a vp_token. This SDK REQUIRES a backend with go-wallet-backend #469 + #471; an older backend cannot issue to it or complete direct_post.jwt presentations, and an upgraded backend cannot serve an older SDK (no compatibility shims).

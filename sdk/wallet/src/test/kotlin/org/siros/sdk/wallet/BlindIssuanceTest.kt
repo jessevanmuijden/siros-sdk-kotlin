@@ -120,7 +120,7 @@ class BlindIssuanceTest {
         )
         assertEquals("tx-9", pending.transactionId)
         assertEquals(5, pending.interval)
-        val metadata = buildJsonObject { put("org.siros.secret_seed", buildJsonObject { put("ns", JsonPrimitive("00")) }) }
+        val metadata = buildJsonObject { put("display", JsonArray(listOf(buildJsonObject { put("name", JsonPrimitive("N")) }))) }
         b.open(
             "f",
             issuer(jwk, response("late") { mapOf("notification_id" to JsonPrimitive("n-2"), "credential_metadata" to metadata) }),
@@ -134,24 +134,76 @@ class BlindIssuanceTest {
     }
 
     @Test
-    fun theLegacySingleCredentialMemberAndOddCredentialShapesAreNormalised() {
+    fun metadataIsNeverCarriedBetweenResponses_aPendingResponsesMetadataIsNotAttachedToTheDeferredCredentials() {
         val b = BlindIssuance()
         val jwk = b.offer("f", request)!!
-        b.open(
+        // The initial pending response carries display metadata (a seed would be refused, below).
+        b.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx")); put("credential_metadata", buildJsonObject { put("display", JsonArray(listOf(buildJsonObject { put("name", JsonPrimitive("from-pending")) }))) }) }), deferred = false)
+        // The deferred response that delivers the credentials carries none.
+        b.open("f", issuer(jwk, response("late") { mapOf("notification_id" to JsonPrimitive("n")) }), deferred = true)
+        val taken = b.take("f")!!
+        assertEquals(listOf("late"), taken.credentials)
+        assertNull("nothing of the pending response is attached", taken.credentialMetadata)
+    }
+
+    @Test
+    fun aDeferredCredentialResponseCarryingASeedIsRefusedAtDecryption_withItsNotificationIdAndNothingRetained() {
+        val seed = buildJsonObject { put("org.siros.secret_seed", buildJsonObject { put("org.siros.nym_auth", JsonPrimitive("00112233445566778899aabbccddeeff")) }) }
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        // First a pending response, then the deferred response WITH the credentials and a seed (deferred = true).
+        b.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx")) }), deferred = false)
+        val e = assertThrows(BlindIssuanceException::class.java) {
+            b.open("f", issuer(jwk, response("late") { mapOf("notification_id" to JsonPrimitive("n-seed"), "credential_metadata" to seed) }), deferred = true)
+        }
+        assertEquals("n-seed", e.notificationId)
+        assertFalse(e.message!!.contains("00112233"))
+        assertNull("nothing is retained", b.take("f"))
+        // A first (non-deferred) response with credentials may still carry a seed: that is the normal delivery.
+        val b2 = BlindIssuance()
+        val jwk2 = b2.offer("g", request)!!
+        b2.open("g", issuer(jwk2, response("c") { mapOf("notification_id" to JsonPrimitive("n"), "credential_metadata" to seed) }), deferred = false)
+        assertNotNull(b2.take("g")!!.credentialMetadata)
+    }
+
+    @Test
+    fun everyCredentialsEntryMustBeAnObjectWithAStringCredential_theInnerValueIsStored() {
+        // Accepted: wrapped entries (the inner string is stored), and the one pre-1.0 draft shape, a top-level string `credential`.
+        val ok = BlindIssuance()
+        val jwk = ok.offer("f", request)!!
+        ok.open(
             "f",
             issuer(
                 jwk,
                 buildJsonObject {
                     put("credential", JsonPrimitive("legacy"))
-                    put(
-                        "credentials",
-                        JsonArray(listOf(JsonPrimitive("plain"), buildJsonObject { put("credential", JsonPrimitive("wrapped")) }, buildJsonObject { put("x", JsonPrimitive(1)) })),
-                    )
+                    put("credentials", JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive("wrapped")) })))
                 },
             ),
             deferred = false,
         )
-        assertEquals(listOf("legacy", "plain", "wrapped", """{"x":1}"""), b.take("f")!!.credentials)
+        assertEquals(listOf("legacy", "wrapped"), ok.take("f")!!.credentials)
+        // Refused, each keeping the decrypted notification_id and retaining nothing.
+        fun refused(entries: JsonArray?, topLevel: kotlinx.serialization.json.JsonElement? = null) {
+            val b = BlindIssuance()
+            val k = b.offer("f", request)!!
+            val body = buildJsonObject {
+                put("notification_id", JsonPrimitive("n-bad"))
+                topLevel?.let { put("credential", it) }
+                entries?.let { put("credentials", it) }
+            }
+            val e = assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(k, body), deferred = false) }
+            assertEquals("n-bad", e.notificationId)
+            assertNull(b.take("f"))
+        }
+        refused(JsonArray(listOf(JsonPrimitive("bare string"))))
+        refused(JsonArray(listOf(buildJsonObject { put("credential", buildJsonObject { put("@context", JsonPrimitive("x")) }) })))
+        refused(JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive(7)) })))
+        refused(JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive("")) })))
+        refused(JsonArray(listOf(buildJsonObject { put("x", JsonPrimitive(1)) })))
+        refused(JsonArray(listOf(JsonPrimitive("ok-ish"), buildJsonObject { put("credential", JsonPrimitive("fine")) })))
+        refused(null, topLevel = buildJsonObject { put("credential", JsonPrimitive("nested")) })
+        refused(null, topLevel = JsonPrimitive(5))
     }
 
     @Test
