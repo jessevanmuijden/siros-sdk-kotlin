@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - A request that discloses no claims no longer asks the user to confirm what is shared. New `PresentationRequest.disclosesNoClaims` (every
-  matched query is a circuit_zk / `zkp_req` query without claims: a pseudonym or an age proof, answered with a zero-knowledge proof) and
+  matched query is a circuit_zk / `zkp_req` query whose PLAN consists only of the `pseudonym` and `age_check` functions: answered with a
+  zero-knowledge proof, no claim disclosed; the legacy `zk-claim-disclosure-v1` plans, unknown functions and plan-less queries keep every step) and
   `PresentationRequest.consentStepCount` (1 for such a request, otherwise preview + one step per query + summary as before). The sample
   consent screen follows it: choose the credential, then Share or Decline, with no empty claim-selection or summary step, and the
   overview says that no data fields are shared instead of "0 data fields requested". Requests in any other format keep every step, also
