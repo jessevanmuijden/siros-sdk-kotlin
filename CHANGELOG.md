@@ -42,6 +42,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The vendored privatedata-spec vectors are re-copied verbatim from privatedata-spec main at 64315a5 (with the fixtures
   they reference); `vectors.PROVENANCE.txt` records the commit and digests.
 
+- **BREAKING (unreleased): engine-blind encryption: the wallet, not the engine, holds the response-encryption keys.**
+  The engine now relays ciphertext and never sees an issued credential, a delivered `secret_seed` or a `vp_token`
+  (go-wallet-backend#463 had to state that the engine decrypted the seed in clear). No compatibility shim: engine and
+  wallet change together. Both transports (legacy engine WebSocket and WMP sign sub-flow) carry the same members.
+  - **Issuance.** A `generate_proof` request carrying `credential_response_encryption {alg, enc, required}` is answered with
+    the public JWK (`credential_response_encryption_jwk`) of a FRESH ephemeral P-256 key per request; the private key is held
+    in memory per flow (`BlindIssuance`) and forgotten at flow completion, error, cancel, logout and when the connection is
+    replaced. `required` with a pair the wallet cannot decrypt fails the issuance before any proof is made. The new sign action
+    `decrypt_credential_response {jwe, deferred}` opens the issuer's JWE (ECDH-ES and ECDH-ES+A128KW/A192KW/A256KW with
+    A128/A192/A256GCM and A128CBC-HS256/A192CBC-HS384/A256CBC-HS512; any other pair than the negotiated one is refused) and
+    answers with `transaction_id`/`interval` only, or `error`. An encrypted `flow_complete` (`credential_response_encrypted`)
+    lists its credentials without values: each is filled from the wallet's own decrypted response, entry by entry (a count
+    mismatch or a missing response refuses the issuance, `DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE`, nothing stored).
+    The delivered `credential_metadata` (and so the `secret_seed` receipt check) and the `notification_id` come from that
+    response, never from the engine. `FlowCompleteMessage.credentialMetadata`, `credentialMetadataEncryptedResponse` and the
+    `credential_metadata*` members of `redacted_members` (and `FlowCompleteResult`'s) are removed; `redacted_members` lists the
+    renewal material only. A PLAIN (unencrypted) issuer response may still relay the display-only members of its
+    response-level `credential_metadata` on `flow_complete`: `FlowCompleteMessage.credentialMetadata` and
+    `FlowCompleteResult.credentialMetadata` are decoded through an allowlist (`display`, `claims`), every other member is
+    dropped on decoding (an extension such as `org.siros.secret_seed` is never taken from the engine's frame and is never
+    stored or merged), and the member is ignored when `credential_response_encrypted` is true, where only the wallet's own
+    decrypted object is read.
+  - **Presentation.** A `direct_post.jwt` `sign_presentation` carrying `response_encryption {jwk, alg, enc}` is answered with
+    `response_jwe`, not `vp_token`: the wallet builds the `vp_token` (the DCQL `{queryId: [token]}` object, moved from the
+    engine), the JARM claims (`iss`, `aud`, `iat`, `exp` = `iat` + 300, `vp_token`, `state`) and the compact JWE (`kid` and
+    `cty: JWT` in the protected header; EC or RSA verifier keys). `aud` is the `client_id` of the engine's `verified_request`,
+    never the request's `audience`; without it nothing is built (fail closed). The engine alone POSTs. Other response modes are
+    unchanged and engine-visible by the verifier's choice.
+  - **Final engine shapes (go-wallet-backend #469 / #471).** `decrypt_credential_response` answers EXACTLY ONE of
+    `credential_count` (1..256, credentials issued; new `SignResponseMessage`/`SignSubFlowResult` member), `transaction_id`
+    with an OPTIONAL `interval` (deferred; no client-side default, a deferred answer may report a `transaction_id` again) or
+    `error`; a response with both or neither, or more than 256 credentials, is refused and, when it decrypted and carried a
+    `notification_id`, reported to the issuer (`credential_failure`) BEFORE the error answer. A `generate_proof` with
+    `credential_response_encryption` and no `proof_types_supported` is key-only: the key and no proofs, on both transports.
+    The advertised JWK has exactly `kty, crv, x, y, use, alg`. The encrypted presentation response is checked against the
+    engine's rules before it is sent (five base64url segments, none empty except the encrypted-key segment of direct
+    `ECDH-ES`; at most 4 MiB; protected header `alg`/`enc` equal to the request's and `kid` equal to the JWK's, none when the
+    JWK has none) and is never sent with a `vp_token`; it is built only when `response_encryption` is present and only for
+    `direct_post.jwt` (plain `direct_post`/`query`/`fragment` keep returning `vp_token`). `CredentialResponseKey` and
+    `AuthorizationResponseEncryption` are `internal` to sdk:wallet (no new public API for them).
+  - **Review follow-ups.** The response keys and opened responses are cleared synchronously by `logout()`/`endSessionLocally()` and
+    `destroy()` (not only when a later connection replaces the old one). On WMP, a `generate_proof`/`decrypt_credential_response`
+    that fails, an engine flow error and every completion release the flow's key and opened response (after a completion has
+    been processed against the response it needs). A required encryption the wallet cannot provide now answers the engine's
+    request with an error `sign_response` carrying the ORIGINAL `message_id` instead of leaving it to wait out its signing
+    timeout. The decrypted response-level `credential_metadata` is checked wallet-side with the limits the engine used to enforce
+    (1 MiB encoded, depth 16, 256 members per object, member names of at most 256 bytes, no duplicate names at the top level or
+    inside `org.siros.secret_seed`) before anything is retained or passed to the receipt check; a response that fails them is
+    refused and, when it decrypted and carried a `notification_id`, reported as `credential_failure`.
+  - **Review follow-ups, round 2.** An ENCRYPTED completion's `notification_id` is the one in the response the wallet decrypted
+    (none when it had none), never the engine frame's, on both transports; a plain completion keeps the engine's. The response
+    key and opened response are released per FLOW (a presentation or an unrelated failure no longer clears another flow's), on
+    sign failure, refusal, engine flow error, local cancel, completion and, new, an incoming `wmp.flow.cancel`
+    (`OpenID4xConfig.onCancel`); session-wide teardown and connection replacement still clear everything. An empty query id is
+    treated as no query id when shaping the `vp_token`. A `direct_post.jwt` presentation is built only from one token per
+    selected credential (a credential that left the store is an error, never a partial response), and any failure building the
+    encrypted response (no verified `client_id`, unsupported pair, oversized, missing token) is answered with a sanitized
+    error-only `sign_response` for the original `message_id` before local cleanup, on the ordinary and the `transaction_data`
+    handlers, with no plaintext fallback.
+  - **Review follow-ups, round 3.** `BlindIssuance.offer` claims the flow's state before it generates the key and stores the key
+    only while that state is still the flow's, so a `clear()`/`drop()` that finishes during generation (a WMP handler can
+    outlive the teardown that cancelled its scope) is not undone; the offer then fails. `reloginAfterCutOff()` clears the holder
+    at the start of its teardown, whatever the replacement login does. A new socket on the SAME engine session (a forced or
+    automatic reconnect) drops the private key of every flow that lived on an older one; what such a flow had already opened is
+    kept for 30 s (so a completion buffered before the replacement can still be processed) and then forgotten. A pending
+    (`transaction_id`) response is validated and answered but retains nothing; only a response that carries credentials is kept.
+  - **Review follow-ups, round 4.** `logout()` and `destroy()` now really close the WMP peer: it is captured before the field is
+    nulled (the old asynchronous `wmpPeer?.close()` read the field after it was null, so it never closed) and closed on a scope
+    of its own, so a `destroy()` that cancels the wallet's scope does not cancel it. A request that reaches an ENDED session is
+    refused before it allocates anything: the WMP callbacks check the session generation and `isDestroyed`, and the legacy
+    sign-request collector ignores requests of a session that was ended or replaced. A `generate_proof`/
+    `decrypt_credential_response` stamped with an older socket of the session is dropped (no key, no answer), and an accepted
+    offer is tied to the generation stamped on its frame, not the one current when it happens to be processed.
+  - **Review follow-ups, round 5.** FIXES A REGRESSION OF ROUND 4: the WMP callbacks were bound to the session generation captured when
+    the profile was built, but a registration or login ends that generation right after connecting, so every WMP sign request of a
+    freshly logged-in wallet was refused as belonging to an ended session. They are now bound to the lifetime of their own WMP peer
+    (ended by logout, destroy, the re-login teardown and the replacement of the peer); registration and login share
+    `connectEngineForNewSession()`. `WalletEngineSession.connectionGenerations` (new, a `StateFlow<Int>` beside
+    `connectionGeneration`) publishes every new socket, and the wallet observes it instead of inferring a replacement from
+    `state`: an automatic reconnect publishes RECONNECTING before its backoff and increments the generation later with no
+    state change of its own. Under the single-flight reconnect, the generation is incremented and published in the one atomic step
+    that installs the socket (`doConnect`, under `connLock`); a superseded attempt returns before it and publishes nothing.
+  - **Review follow-up: malformed plain completions.** `CredentialResult.credential` now defaults to empty (an encrypted completion's
+    placeholders), which would have let a plain completion without a credential value decode. `FlowCompleteMessage` and the WMP
+    `FlowCompleteResult` now refuse, at decoding, a completion that is not `credential_response_encrypted` unless every credential
+    has a non-empty value (as a missing value always did before this PR); encrypted placeholders stay valid. A renewal no longer
+    deletes the old batch and its refresh token BEFORE the replacement is known: they are removed only once at least one
+    replacement credential has been stored, so a rejected, unreadable or (encrypted) unavailable replacement leaves the old
+    batch in place.
+  - **Review follow-ups, round 7.** The liveness check of a WMP callback (and the guards of the legacy sign-request collector) and the
+    claim of the flow's response-key state were separate operations, so a logout or destroy between them was undone by the late
+    claim. `BlindIssuance.epoch` (counts session-wide teardowns) is read BEFORE the liveness check, handed to `offer`, and
+    re-checked under the holder's lock when the state is claimed; a teardown after the claim removes the claimed state, which the
+    key insertion notices. A legacy request of a session that ended in the meantime is not answered. A PENDING (`transaction_id`)
+    response that carries `org.siros.secret_seed` is refused like any deferred seed (its metadata used to be dropped unread), with
+    its `notification_id` kept so `credential_failure` reaches the issuer on both transports.
+  - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
+    together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
+  - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the
+    key and JWE machinery, `CredentialResponseKey` and `AuthorizationResponseEncryption`, is `internal` to sdk:wallet), `SignRequestParams`/`SignSubFlowParams`
+    members `credential_response_encryption`, `jwe`, `deferred`, `response_encryption`, `state`, `verified_request`,
+    `SignResponseMessage`/`SignSubFlowResult` members `credential_response_encryption_jwk`, `transaction_id`, `interval`,
+    `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
+
 ### Added
 - **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`
   `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`

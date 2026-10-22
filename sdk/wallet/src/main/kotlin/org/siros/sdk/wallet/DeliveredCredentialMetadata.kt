@@ -10,7 +10,7 @@ import org.siros.sdk.transport.DeliveredResponseMetadata
 
 /** Why delivered credential metadata was refused. The text names no value. */
 internal enum class DeliveredMetadataRefusal(val text: String) {
-    /** A secret arrived in a response the engine did not report as JWE-decrypted (or an advertised one was not encrypted). */
+    /** A secret arrived in a response this wallet did not decrypt itself (or an advertised one was not encrypted). */
     NOT_ENCRYPTED("the secret was not delivered in an encrypted response"),
 
     /** The response's `credential_metadata` or its secret member is not in the required form. */
@@ -22,7 +22,7 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
     /** A Deferred Credential Response carried a seed: not supported in this version, even when encrypted. */
     DEFERRED_SEED("a deferred credential response cannot deliver a secret"),
 
-    /** The seed was withheld (a replayed or resumed completion) or an advertised seed did not arrive: it is unavailable, never invented. */
+    /** An advertised seed did not arrive: it is unavailable, never invented. */
     SEED_UNAVAILABLE("the delivered secret is unavailable for this issuance"),
 
     /** The credential type's designated namespace is absent from the delivered seeds. */
@@ -36,6 +36,13 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
 
     /** This keystore cannot hold the secret. */
     NO_STORAGE("this wallet cannot store the delivered secret"),
+
+    /**
+     * The engine completed an issuance whose Credential Response only this wallet could open, and the wallet holds no
+     * such response (the app restarted mid-flow, the key was dropped, or the credential count does not match): the
+     * credentials are unavailable and nothing is invented.
+     */
+    RESPONSE_UNAVAILABLE("the encrypted credential response is not available in this wallet"),
 }
 
 /** One received credential, as far as the receipt check needs it. */
@@ -92,16 +99,6 @@ internal object DeliveredCredentialMetadata {
         /** The issuer metadata of the configuration advertised a seed (`namespaces`): the response must have been encrypted. */
         advertised: Boolean = false,
     ): DeliveredMetadataVerdict {
-        if (response.credentialMetadataRedacted) {
-            // Withheld, not absent: a replayed or resumed completion. A redacted completion that also carries the object
-            // contradicts itself; one for a credential that needs a seed cannot be completed.
-            if (response.credentialMetadata != null) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
-            return if (advertised || credentials.any { needsSeed(it) }) {
-                DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.SEED_UNAVAILABLE)
-            } else {
-                DeliveredMetadataVerdict.None
-            }
-        }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         }
@@ -120,7 +117,7 @@ internal object DeliveredCredentialMetadata {
             else -> DeliveredMetadataVerdict.Accept(all)
         }
         if (response.deferredResponse) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.DEFERRED_SEED)
-        // Plain JSON never carries a secret: the engine sets the flag only for a JWE-decrypted response.
+        // Plain JSON never carries a secret: only a response this wallet decrypted itself counts as encrypted.
         if (!response.credentialMetadataEncryptedResponse) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         val seeds = SecretSeedDelivery.parseDelivery(seedMember) ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)

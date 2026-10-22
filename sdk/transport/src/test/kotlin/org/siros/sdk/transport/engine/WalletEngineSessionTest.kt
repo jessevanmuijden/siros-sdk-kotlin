@@ -209,7 +209,7 @@ class WalletEngineSessionTest {
     }
 
     @Test
-    fun flow_complete_parses_the_response_level_credential_metadata() = runTest {
+    fun flow_complete_of_an_encrypted_issuance_has_empty_credentials_and_says_so() = runTest {
         val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
         session.connect("app-token")
 
@@ -217,75 +217,34 @@ class WalletEngineSessionTest {
             listener.onMessage(
                 webSocket,
                 """{"type":"flow_complete","flow_id":"flow-1","credentials":""" +
-                    """[{"format":"dc+sd-jwt","credential":"jwt-token","notification_id":"n1"},""" +
-                    """{"format":"dc+sd-jwt","credential":"plain","notification_id":"n1"}],""" +
-                    """"credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},""" +
-                    """"other":{"k":1}},"credential_metadata_encrypted_response":true}""",
+                    """[{"format":"dc+sd-jwt","vct":"urn:eu:pid:1"},{"format":"dc+sd-jwt","vct":"urn:eu:pid:1"}],""" +
+                    """"credential_response_encrypted":true}""",
             )
 
             val message = awaitItem()
-            val metadata = message.credentialMetadata!!
-            assertEquals(false, metadata.malformed)
-            assertEquals(listOf("org.siros.secret_seed", "other"), metadata.members.keys.toList())
-            val seed = (metadata.members["org.siros.secret_seed"] as kotlinx.serialization.json.JsonObject)["org.siros.nym_auth"]
-            assertEquals("00112233445566778899aabbccddeeff", (seed as kotlinx.serialization.json.JsonPrimitive).content)
-            assertEquals(true, message.credentialMetadataEncryptedResponse)
-            assertEquals(2, message.credentials!!.size)
+            assertEquals(true, message.credentialResponseEncrypted)
+            // The engine never held the credentials: the member is absent and decodes as empty.
+            assertEquals(listOf("", ""), message.credentials!!.map { it.credential })
+            assertEquals("urn:eu:pid:1", message.credentials!!.first().vct)
             cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun flow_complete_without_credential_metadata_has_none_and_is_not_encrypted() = runTest {
+    fun flow_complete_without_the_encrypted_marker_is_a_plain_issuance() = runTest {
         val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
         session.connect("app-token")
         session.flowComplete().test {
             listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j"}]}""")
             val message = awaitItem()
-            assertEquals(null, message.credentialMetadata)
-            assertEquals(false, message.credentialMetadataEncryptedResponse)
+            assertEquals(false, message.credentialResponseEncrypted)
+            assertEquals("j", message.credentials!!.single().credential)
             cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun flow_complete_keeps_unknown_members_of_the_response_metadata_verbatim_and_in_order() = runTest {
-        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
-        session.connect("app-token")
-        session.flowComplete().test {
-            listener.onMessage(
-                webSocket,
-                """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j"}],""" +
-                    """"credential_metadata":{"z.last":{"n":1.50},"a.first":[1,2],"x":null}}""",
-            )
-            val members = awaitItem().credentialMetadata!!.members
-            assertEquals(listOf("z.last", "a.first", "x"), members.keys.toList())
-            assertEquals("1.50", ((members["z.last"] as kotlinx.serialization.json.JsonObject)["n"] as kotlinx.serialization.json.JsonPrimitive).content)
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
-
-    @Test
-    fun flow_complete_with_credential_metadata_that_is_not_an_object_still_emits_with_a_malformed_placeholder() = runTest {
-        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
-        session.connect("app-token")
-        session.flowComplete().test {
-            listOf("""[{"type":"other","value":1}]""", """"text"""", "5", "true").forEach { md ->
-                listener.onMessage(
-                    webSocket,
-                    """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j",""" +
-                        """"notification_id":"notif-1"}],"credential_metadata":$md}""",
-                )
-                val m = awaitItem()
-                assertEquals(md, "notif-1", m.credentials!!.single().notificationId)
-                assertTrue(md, m.credentialMetadata!!.malformed)
-            }
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
-
-    @Test
-    fun flow_complete_with_a_non_boolean_encrypted_flag_still_emits_with_the_flag_false() = runTest {
+    fun flow_complete_with_a_non_boolean_encrypted_marker_still_emits_with_the_marker_false() = runTest {
         val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
         session.connect("app-token")
         session.flowComplete().test {
@@ -293,10 +252,10 @@ class WalletEngineSessionTest {
                 listener.onMessage(
                     webSocket,
                     """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j",""" +
-                        """"notification_id":"n1"}],"credential_metadata":{"t":1},"credential_metadata_encrypted_response":$flag}""",
+                        """"notification_id":"n1"}],"credential_response_encrypted":$flag}""",
                 )
                 val m = awaitItem()
-                assertEquals(flag, false, m.credentialMetadataEncryptedResponse)
+                assertEquals(flag, false, m.credentialResponseEncrypted)
                 assertEquals("n1", m.credentials!!.single().notificationId)
             }
             cancelAndIgnoreRemainingEvents()
@@ -304,23 +263,203 @@ class WalletEngineSessionTest {
     }
 
     @Test
-    fun the_delivered_seed_is_in_no_string_form_of_the_decoded_frame() = runTest {
+    fun a_plain_completion_keeps_only_the_display_members_of_the_relayed_credential_metadata_in_order() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        session.flowComplete().test {
+            listener.onMessage(
+                webSocket,
+                """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j"}],""" +
+                    """"credential_metadata":{"claims":[{"path":["a"]}],"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"},""" +
+                    """"display":[{"name":"Nym","logo":{"uri":"data:x"}}],"other.extension":{"k":1}}}""",
+            )
+            val metadata = awaitItem().credentialMetadata!!
+            assertEquals(false, metadata.malformed)
+            assertEquals(listOf("claims", "display"), metadata.members.keys.toList())
+            assertTrue(!metadata.members.toString().contains("00112233445566778899aabbccddeeff"))
+            assertEquals("ResponseCredentialMetadata(redacted)", metadata.toString())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun a_relayed_credential_metadata_that_is_not_an_object_is_the_malformed_placeholder_and_an_absent_one_is_null() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        session.flowComplete().test {
+            listOf("""[{"type":"other"}]""", """"text"""", "5").forEach { md ->
+                listener.onMessage(
+                    webSocket,
+                    """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j","notification_id":"n1"}],"credential_metadata":$md}""",
+                )
+                val m = awaitItem()
+                assertTrue(md, m.credentialMetadata!!.malformed)
+                assertEquals(md, "n1", m.credentials!!.single().notificationId)
+            }
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"j"}]}""")
+            assertEquals(null, awaitItem().credentialMetadata)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun the_engine_relays_no_extension_members_so_a_stray_seed_is_ignored() = runTest {
         val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
         session.connect("app-token")
         session.flowComplete().test {
             listener.onMessage(
                 webSocket,
                 """{"type":"flow_complete","flow_id":"flow-1","credentials":[{"format":"dc+sd-jwt","credential":"secret-credential"}],""" +
-                    """"credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}},""" +
-                    """"credential_metadata_encrypted_response":true}""",
+                    """"credential_metadata":{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}}""",
             )
             val message = awaitItem()
-            for (text in listOf(message.toString(), message.credentialMetadata.toString(), message.credentials.toString())) {
-                assertTrue(text, !text.contains("00112233445566778899aabbccddeeff"))
-                assertTrue(text, !text.contains("secret-credential"))
-            }
+            // Dropped by the allowlist, so it is in no string form of the frame either.
+            assertEquals(emptySet<String>(), message.credentialMetadata!!.members.keys)
+            assertTrue(!message.toString().contains("00112233445566778899aabbccddeeff"))
+            assertTrue(!message.credentials.toString().contains("secret-credential"))
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    @Test
+    fun a_plain_completion_must_carry_a_value_for_every_credential_but_an_encrypted_one_may_not() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        fun decode(body: String) = json.decodeFromString(FlowCompleteMessage.serializer(), """{"type":"flow_complete","flow_id":"f",$body}""")
+        // Missing, empty, and one entry among several: refused.
+        assertThrows(IllegalArgumentException::class.java) { decode(""""credentials":[{"format":"dc+sd-jwt"}]""") }
+        assertThrows(IllegalArgumentException::class.java) { decode(""""credentials":[{"format":"dc+sd-jwt","credential":""}]""") }
+        assertThrows(IllegalArgumentException::class.java) {
+            decode(""""credentials":[{"format":"dc+sd-jwt","credential":"x"},{"format":"dc+sd-jwt"}]""")
+        }
+        // Encrypted placeholders are valid; so is a completion with no credentials at all (a presentation).
+        assertEquals(2, decode(""""credentials":[{"format":"dc+sd-jwt"},{"format":"dc+sd-jwt"}],"credential_response_encrypted":true""").credentials!!.size)
+        assertEquals(null, decode(""""redirect_uri":"https://x"""").credentials)
+        assertEquals("x", decode(""""credentials":[{"format":"dc+sd-jwt","credential":"x"}]""").credentials!!.single().credential)
+    }
+
+    @Test
+    fun a_malformed_plain_completion_frame_emits_nothing_and_does_not_stop_the_next_frame() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        session.flowComplete().test {
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"bad","credentials":[{"format":"dc+sd-jwt"}]}""")
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"good","credentials":[{"format":"dc+sd-jwt","credential":"j"}]}""")
+            assertEquals("good", awaitItem().flowId)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun a_sign_request_decodes_the_blind_encryption_members() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val issuance = json.decodeFromString(
+            SignRequestParams.serializer(),
+            """{"audience":"a","nonce":"n","credential_response_encryption":{"alg":"ECDH-ES+A256KW","enc":"A128GCM","required":true}}""",
+        )
+        assertEquals("ECDH-ES+A256KW", issuance.credentialResponseEncryption!!.alg)
+        assertEquals("A128GCM", issuance.credentialResponseEncryption!!.enc)
+        assertEquals(true, issuance.credentialResponseEncryption!!.required)
+        val decrypt = json.decodeFromString(SignRequestParams.serializer(), """{"jwe":"a.b.c.d.e","deferred":true}""")
+        assertEquals("a.b.c.d.e", decrypt.jwe)
+        assertEquals(true, decrypt.deferred)
+        val vp = json.decodeFromString(
+            SignRequestParams.serializer(),
+            """{"audience":"v","nonce":"n","state":"st","response_encryption":{"jwk":{"kty":"EC","kid":"k1"},"alg":"ECDH-ES","enc":"A128GCM"}}""",
+        )
+        assertEquals("st", vp.state)
+        assertEquals("k1", (vp.responseEncryption!!.jwk["kid"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals("ECDH-ES", vp.responseEncryption!!.alg)
+        // No member decodes as no encryption: every other sign request is unchanged.
+        val none = json.decodeFromString(SignRequestParams.serializer(), """{"audience":"a","nonce":"n"}""")
+        assertEquals(null, none.credentialResponseEncryption)
+        assertEquals(null, none.responseEncryption)
+        assertEquals(null, none.jwe)
+    }
+
+    @Test
+    fun a_sign_request_decodes_the_engines_verified_request_and_ignores_members_it_does_not_know() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val params = json.decodeFromString(
+            SignRequestParams.serializer(),
+            """{"audience":"admin","nonce":"n","verified_request":{"client_id":"x509_san_dns:v.example","client_id_scheme":"x509_san_dns",""" +
+                """"response_mode":"direct_post.jwt","response_uri":"https://v.example/r","signed":true,"signature_verification":"verified",""" +
+                """"client_metadata":{"jwks":{"keys":[]}},"future_member":1}}""",
+        )
+        val v = params.verifiedRequest!!
+        assertEquals("x509_san_dns:v.example", v.clientId)
+        assertEquals("https://v.example/r", v.responseUri)
+        assertEquals(true, v.signed)
+        assertEquals("verified", v.signatureVerification)
+        assertEquals(null, json.decodeFromString(SignRequestParams.serializer(), """{"audience":"a"}""").verifiedRequest)
+        // `signed` absent reads as not signed.
+        assertEquals(false, json.decodeFromString(SignRequestParams.serializer(), """{"verified_request":{"client_id":"c"}}""").verifiedRequest!!.signed)
+    }
+
+    @Test
+    fun a_refusal_keeps_its_error_code_and_can_never_carry_a_response_jwe() {
+        val json = kotlinx.serialization.json.Json { encodeDefaults = false }
+        val refusal = json.encodeToJsonElement(
+            SignResponseMessage.serializer(),
+            SignResponseMessage(flowId = "f", messageId = "m", errorCode = SignResponseMessage.SIGN_REFUSED),
+        ) as kotlinx.serialization.json.JsonObject
+        assertEquals("SIGN_REFUSED", (refusal["error_code"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(null, refusal["response_jwe"])
+        // The encrypted-response member cannot be set alongside either error member, so it cannot shadow a refusal.
+        assertThrows(IllegalArgumentException::class.java) {
+            SignResponseMessage(flowId = "f", responseJwe = "h.k.i.c.t", errorCode = SignResponseMessage.SIGN_REFUSED)
+        }
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", responseJwe = "h.k.i.c.t", error = "x") }
+        // And a frame that arrives that way is refused too, not read as an answer.
+        assertThrows(IllegalArgumentException::class.java) {
+            kotlinx.serialization.json.Json.decodeFromString(
+                SignResponseMessage.serializer(),
+                """{"type":"sign_response","flow_id":"f","response_jwe":"a.b.c.d.e","error_code":"SIGN_REFUSED"}""",
+            )
+        }
+    }
+
+    @Test
+    fun a_decrypt_answer_carries_exactly_one_of_credential_count_transaction_id_or_error() {
+        val json = kotlinx.serialization.json.Json { encodeDefaults = false }
+        val count = json.encodeToJsonElement(SignResponseMessage.serializer(), SignResponseMessage(flowId = "f", credentialCount = 2)) as kotlinx.serialization.json.JsonObject
+        assertEquals(2, (count["credential_count"] as kotlinx.serialization.json.JsonPrimitive).content.toInt())
+        assertEquals(null, count["transaction_id"])
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", credentialCount = 1, transactionId = "tx") }
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", credentialCount = 1, error = "x") }
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", transactionId = "tx", error = "x") }
+    }
+
+    @Test
+    fun a_sign_response_never_carries_a_response_jwe_together_with_a_vp_token() {
+        assertThrows(IllegalArgumentException::class.java) { SignResponseMessage(flowId = "f", responseJwe = "a.b.c.d.e", vpToken = "t") }
+        SignResponseMessage(flowId = "f", vpToken = "t")
+        SignResponseMessage(flowId = "f", responseJwe = "a.b.c.d.e")
+    }
+
+    @Test
+    fun a_sign_response_carries_the_blind_encryption_members_under_their_wire_names() {
+        val json = kotlinx.serialization.json.Json { encodeDefaults = false }
+        val jwk = kotlinx.serialization.json.buildJsonObject { put("kty", kotlinx.serialization.json.JsonPrimitive("EC")) }
+        val encoded = json.encodeToJsonElement(
+            SignResponseMessage.serializer(),
+            SignResponseMessage(
+                flowId = "f",
+                credentialResponseEncryptionJwk = jwk,
+                transactionId = "tx-1",
+                interval = 5,
+                responseJwe = "h.k.i.c.t",
+            ),
+        ) as kotlinx.serialization.json.JsonObject
+        assertEquals(jwk, encoded["credential_response_encryption_jwk"])
+        assertEquals("tx-1", (encoded["transaction_id"] as kotlinx.serialization.json.JsonPrimitive).content)
+        assertEquals(5, (encoded["interval"] as kotlinx.serialization.json.JsonPrimitive).content.toInt())
+        assertEquals("h.k.i.c.t", (encoded["response_jwe"] as kotlinx.serialization.json.JsonPrimitive).content)
+        val failed = json.encodeToJsonElement(SignResponseMessage.serializer(), SignResponseMessage(flowId = "f", error = "nope")) as kotlinx.serialization.json.JsonObject
+        assertEquals("nope", (failed["error"] as kotlinx.serialization.json.JsonPrimitive).content)
+        // An ordinary proof answer stays free of them.
+        val plain = json.encodeToJsonElement(SignResponseMessage.serializer(), SignResponseMessage(flowId = "f", proofJwt = "p")) as kotlinx.serialization.json.JsonObject
+        assertEquals(null, plain["credential_response_encryption_jwk"])
+        assertEquals(null, plain["response_jwe"])
     }
 
     @Test
@@ -896,6 +1035,18 @@ class WalletEngineSessionTest {
     }
 
     @Test
+    fun connectionGenerations_publishesEachNewSocketOnItsOwn_independentlyOfTheState() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        assertEquals(0, session.connectionGenerations.value)
+        session.connect("app-token")
+        assertEquals(1, session.connectionGenerations.value)
+        assertEquals(session.connectionGeneration, session.connectionGenerations.value)
+        session.forceReconnect()
+        assertEquals("the replacement socket is published", 2, session.connectionGenerations.value)
+        assertEquals(session.connectionGeneration, session.connectionGenerations.value)
+    }
+
+    @Test
     fun forceReconnect_discardsFlowRepliesBufferedFromTheReplacedConnection() = runTest {
         val session = WalletEngineSession(
             baseUrl = "https://wallet.example.com",
@@ -998,6 +1149,24 @@ class WalletEngineSessionTest {
         // The superseded call must not cancel/replace the newer caller's socket.
         verify(exactly = 2) { client.newWebSocket(any(), any()) }
         verify(exactly = 1) { webSocket.cancel() }
+    }
+
+    @Test
+    fun overlappingForceReconnect_publishesOnlyTheSocketThatWasActuallyInstalled() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "t", client = client)
+        val gate = kotlinx.coroutines.CompletableDeferred<String>()
+        var calls = 0
+        session.connect("app-token", tokenProvider = { if (calls++ == 0) gate.await() else "fresh-token" })
+        assertEquals(1, session.connectionGenerations.value)
+
+        val first = launch(start = CoroutineStart.UNDISPATCHED) { session.forceReconnect() }
+        session.forceReconnect()
+        assertEquals("the newer caller's socket is published", 2, session.connectionGenerations.value)
+        gate.complete("stale-token")
+        first.join()
+        // The superseded call installed nothing, so nothing more is published, and the flow and the counter agree.
+        assertEquals(2, session.connectionGenerations.value)
+        assertEquals(session.connectionGeneration, session.connectionGenerations.value)
     }
 
     @Test
