@@ -264,4 +264,92 @@ class BlindIssuanceTest {
         val e = assertThrows(BlindIssuanceException::class.java) { b.open("f", "a.b.c.d.e", deferred = false) }
         assertNull(e.notificationId)
     }
+
+    // ---- the shape limits the engine used to enforce on credential_metadata (go-wallet-backend#463) ----
+
+    private fun issuerRaw(jwk: JsonObject, text: String): String {
+        val obj = JWEObject(JWEHeader.Builder(JWEAlgorithm.ECDH_ES, EncryptionMethod.A256GCM).build(), Payload(text))
+        obj.encrypt(ECDHEncrypter(ECKey.parse(jwk.toString())))
+        return obj.serialize()
+    }
+
+    /** A Credential Response whose `credential_metadata` is the raw JSON [metadata], with a notification_id. */
+    private fun withMetadata(metadata: String) =
+        """{"credentials":[{"credential":"c"}],"notification_id":"n-m","credential_metadata":$metadata}"""
+
+    private fun accepted(metadata: String): Boolean {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        return try {
+            b.open("f", issuerRaw(jwk, withMetadata(metadata)), deferred = false)
+            true
+        } catch (e: BlindIssuanceException) {
+            false
+        }
+    }
+
+    private fun refusedKeepingNotificationId(metadata: String) {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        val e = assertThrows(metadata.take(60), BlindIssuanceException::class.java) { b.open("f", issuerRaw(jwk, withMetadata(metadata)), deferred = false) }
+        assertEquals("the decrypted notification_id is kept so the issuer can be told", "n-m", e.notificationId)
+        assertNull("nothing of a refused response is retained", b.take("f"))
+        assertFalse("the message names no value", e.message!!.contains("ppp"))
+    }
+
+    private fun nestedObjects(depth: Int) = "{\"a\":".repeat(depth) + "1" + "}".repeat(depth)
+    private fun nestedArrays(containers: Int) = """{"a":""" + "[".repeat(containers - 1) + "]".repeat(containers - 1) + "}"
+    private fun members(n: Int) = (0 until n).joinToString(",") { "\"k$it\":1" }
+
+    @Test
+    fun metadataExactlyAtEveryLimitIsAccepted() {
+        // Depth counts the metadata object as 1: 16 nested objects, and an object holding 15 nested arrays, are the deepest.
+        assertTrue(accepted(nestedObjects(16)))
+        assertTrue(accepted(nestedArrays(16)))
+        assertTrue(accepted("{" + members(256) + "}"))
+        assertTrue(accepted("""{"x":{""" + members(256) + "}}"))
+        assertTrue(accepted("""{"${"k".repeat(256)}":1}"""))
+        // 128 two-byte characters are 256 bytes.
+        assertTrue(accepted("""{"${"\u00e9".repeat(128)}":1}"""))
+        assertTrue(accepted("""{"${"é".repeat(128)}":1}"""))
+        // Exactly 1 MiB encoded: {"x":"<n>"} is 8 bytes of structure.
+        assertTrue(accepted("""{"x":"${"p".repeat(CredentialMetadataShape.MAX_BYTES - 8)}"}"""))
+        // Duplicate names are only refused at the top level and inside the seed object.
+        assertTrue(accepted("""{"display":[{"name":"a","name":"b"}],"x":{"y":1,"y":2}}"""))
+        assertTrue(accepted("{}"))
+    }
+
+    @Test
+    fun metadataOverAnyLimitIsRefusedKeepsNothingAndKeepsTheNotificationId() {
+        refusedKeepingNotificationId(nestedObjects(17))
+        refusedKeepingNotificationId(nestedArrays(17))
+        refusedKeepingNotificationId("{" + members(257) + "}")
+        refusedKeepingNotificationId("""{"x":{""" + members(257) + "}}")
+        refusedKeepingNotificationId("""{"${"k".repeat(257)}":1}""")
+        refusedKeepingNotificationId("""{"x":{"${"k".repeat(257)}":1}}""")
+        refusedKeepingNotificationId("""{"${"\u00e9".repeat(129)}":1}""")
+        refusedKeepingNotificationId("""{"${"é".repeat(129)}":1}""")
+        refusedKeepingNotificationId("""{"x":"${"p".repeat(CredentialMetadataShape.MAX_BYTES - 7)}"}""")
+        refusedKeepingNotificationId("""{"x":1,"x":2}""")
+        refusedKeepingNotificationId("""{"org.siros.secret_seed":{"n":"00","n":"11"}}""")
+        refusedKeepingNotificationId("""{"org.siros.secret_seed":{"n":"00"},"org.siros.secret_seed":{"n":"11"}}""")
+        // A duplicate hidden behind an escape is still the same name.
+        refusedKeepingNotificationId("""{"a":1,"\u0061":2}""")
+    }
+
+    @Test
+    fun theLimitsApplyToAnyMetadataValueNotOnlyObjects() {
+        // A deeply nested array as the whole value, and a 1 MiB string, are refused as well.
+        refusedKeepingNotificationId("[".repeat(17) + "]".repeat(17))
+        refusedKeepingNotificationId("\"" + "p".repeat(CredentialMetadataShape.MAX_BYTES) + "\"")
+    }
+
+    @Test
+    fun aBodyWithoutMetadataOrWithOtherMembersIsUnaffected() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        b.open("f", issuerRaw(jwk, """{"credentials":[{"credential":"c"}],"x":${nestedObjects(40)}}"""), deferred = false)
+        assertEquals(listOf("c"), b.take("f")!!.credentials)
+    }
 }
+

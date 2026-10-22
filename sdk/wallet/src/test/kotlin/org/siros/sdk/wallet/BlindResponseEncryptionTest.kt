@@ -199,8 +199,11 @@ class BlindResponseEncryptionTest {
 
     @Test
     fun theJarmJweCarriesNoPlaintextToken() {
-        val jwe = AuthorizationResponseEncryption.encrypt(JsonPrimitive("very-secret-vp-token"), "aud", null, publicJwk(verifier), "ECDH-ES", "A128GCM")
-        assertFalse(jwe.contains("very-secret-vp-token"))
+        // Characters outside the base64url alphabet, so the check cannot collide with valid JWE output by chance.
+        val sentinel = "very secret vp token! \u2713"
+        val jwe = AuthorizationResponseEncryption.encrypt(JsonPrimitive(sentinel), "aud", null, publicJwk(verifier), "ECDH-ES", "A128GCM")
+        assertFalse(jwe.contains(sentinel))
+        assertEquals(sentinel, decryptJarm(jwe).second["vp_token"]!!.jsonPrimitive.content)
     }
 
     @Test

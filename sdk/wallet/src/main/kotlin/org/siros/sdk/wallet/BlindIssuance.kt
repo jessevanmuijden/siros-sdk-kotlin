@@ -109,6 +109,10 @@ internal class BlindIssuance {
         } catch (e: Exception) {
             null
         } ?: throw BlindIssuanceException("The decrypted credential response is not a JSON object")
+        val notificationIdEarly = (body["notification_id"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotEmpty() }
+        // The shape limits the engine used to enforce: checked before anything is retained or handed on, with the decrypted
+        // notification_id kept so the issuer can still be told.
+        CredentialMetadataShape.violation(plaintext)?.let { throw BlindIssuanceException(it, notificationIdEarly) }
         val credentials = buildList {
             // OpenID4VCI 1.0 returns `credentials`; an earlier draft returned one `credential`. Same order as before.
             body["credential"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { add(credentialString(it)) }

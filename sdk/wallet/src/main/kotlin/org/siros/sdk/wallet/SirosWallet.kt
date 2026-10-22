@@ -1889,6 +1889,9 @@ class SirosWallet private constructor(
         scope.launch { wmpPeer?.close() }
         wmpPeer = null
         credentialNotifier = null
+        // The response keys and everything opened with them are session material: gone with the session, synchronously,
+        // not at the next connection (a wallet that stays logged out never makes one).
+        blindIssuance.clear()
         keystore.lock()
         sessionStore.clear()  // clears active account's session only
         accountRegistry.activeAccountId = null
@@ -2153,6 +2156,7 @@ class SirosWallet private constructor(
         scope.launch { wmpPeer?.close() }
         wmpPeer = null
         credentialNotifier = null
+        blindIssuance.clear()
         keystore.lock()
         apiClient = null
         supervisorJob.cancel()
@@ -5841,6 +5845,7 @@ class SirosWallet private constructor(
      * [EncryptedCompletion.Unavailable]. The wallet's `notification_id` fills entries the engine left without one.
      */
     private fun fillEncryptedCompletion(msg: FlowCompleteMessage): EncryptedCompletion {
+        // (A plain completion leaves an optional offer's key to the completion's own resetIssuanceGuards(), which clears it.)
         if (!msg.credentialResponseEncrypted) return EncryptedCompletion.Filled(msg, null)
         val opened = blindIssuance.take(msg.flowId) ?: return EncryptedCompletion.Unavailable(emptyList())
         val entries = msg.credentials.orEmpty()
@@ -6524,35 +6529,8 @@ class SirosWallet private constructor(
                 onSignRequest = { flowId, params -> handleWmpSignRequest(flowId, params) },
                 onMatchRequest = { flowId, payload -> handleWmpMatchRequest(flowId, payload) },
                 onTrustEvaluation = { flowId, payload -> handleWmpTrustEvaluation(flowId, payload) },
-                onComplete = { flowId, result ->
-                    // This transport stores nothing from the result, but a malformed or refused
-                    // delivered credential_metadata still ends the flow as a refusal, not a success.
-                    val refusal = wmpDeliveredMetadataRefusal(flowId, result)
-                    if (refusal != null) {
-                        rejectDeliveredMetadata(
-                            flowId,
-                            refusal.second,
-                            refusal.first,
-                            sendFailure = { fid, nid ->
-                                peer.sendCredentialNotification(
-                                    flowId = fid,
-                                    notificationId = nid,
-                                    event = CredentialNotificationEvent.FAILURE,
-                                    eventDescription = "credential_metadata_rejected",
-                                )
-                            },
-                        )
-                    } else {
-                        Timber.i("WMP flow $flowId complete")
-                        eventListener?.onFlowComplete(flowId)
-                    }
-                },
-                onError = { flowId, code, message ->
-                    Timber.e("WMP flow $flowId error: $code — $message")
-                    if (!reportPseudonymCommitmentConflict(flowId, code, message)) {
-                        eventListener?.onFlowError(flowId, "$code: $message")
-                    }
-                },
+                onComplete = { flowId, result -> onWmpFlowComplete(peer, flowId, result) },
+                onError = { flowId, code, message -> onWmpFlowError(flowId, code, message) },
             )
         )
         peer.use(profile)
@@ -7017,7 +6995,69 @@ class SirosWallet private constructor(
         )
     }
 
+    /**
+     * A WMP flow completed. This transport stores nothing from the result, but a malformed or refused delivered
+     * credential_metadata still ends the flow as a refusal, not a success. Whatever the outcome, the flow's response key and
+     * anything opened with it are released AFTER the completion has been processed (a plain response never reads them).
+     */
+    private suspend fun onWmpFlowComplete(
+        peer: org.siros.sdk.transport.wmp.WmpPeer?,
+        flowId: String,
+        result: kotlinx.serialization.json.JsonObject?,
+    ) {
+        try {
+            val refusal = wmpDeliveredMetadataRefusal(flowId, result)
+            if (refusal != null) {
+                rejectDeliveredMetadata(
+                    flowId,
+                    refusal.second,
+                    refusal.first,
+                    sendFailure = { fid, nid ->
+                        peer?.sendCredentialNotification(
+                            flowId = fid,
+                            notificationId = nid,
+                            event = CredentialNotificationEvent.FAILURE,
+                            eventDescription = "credential_metadata_rejected",
+                        )
+                    },
+                )
+            } else {
+                Timber.i("WMP flow $flowId complete")
+                eventListener?.onFlowComplete(flowId)
+            }
+        } finally {
+            blindIssuance.drop(flowId)
+        }
+    }
+
+    /** A WMP flow failed: the listener is told, and the flow's response key and opened response are released. */
+    private suspend fun onWmpFlowError(flowId: String, code: String?, message: String?) {
+        Timber.e("WMP flow $flowId error: $code — $message")
+        blindIssuance.drop(flowId)
+        if (!reportPseudonymCommitmentConflict(flowId, code, message)) {
+            eventListener?.onFlowError(flowId, "$code: $message")
+        }
+    }
+
+    /**
+     * A sign request that fails after it allocated per-flow state (a response key, an opened response) releases that state:
+     * the profile only turns the failure into a flow error and never reaches the wallet's own failure path.
+     */
     private suspend fun handleWmpSignRequest(
+        flowId: String,
+        params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
+    ): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult {
+        try {
+            return handleWmpSignRequestUnguarded(flowId, params)
+        } catch (e: Exception) {
+            if (params.action == "generate_proof" || params.action == org.siros.sdk.transport.BlindEncryptionWire.ACTION_DECRYPT_CREDENTIAL_RESPONSE) {
+                blindIssuance.drop(flowId)
+            }
+            throw e
+        }
+    }
+
+    private suspend fun handleWmpSignRequestUnguarded(
         flowId: String,
         params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
     ): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult {
@@ -7536,7 +7576,14 @@ class SirosWallet private constructor(
                             val count = params?.count ?: 1
                             // Before any proof is made (which can prompt the user): an issuer that requires an
                             // encrypted response this wallet cannot open fails the issuance here.
-                            val responseKeyJwk = blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption)
+                            val responseKeyJwk = try {
+                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption)
+                            } catch (e: BlindIssuanceException) {
+                                // Answer the request (its message_id echoed) so the engine does not wait out its signing
+                                // timeout; the failure is also reported locally below.
+                                engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId, error = e.message)
+                                throw e
+                            }
                             // A key-only request (encryption wanted, a configuration with no proof types): the key and NO proofs.
                             if (params?.credentialResponseEncryption != null && params.proofTypesSupported.isNullOrEmpty()) {
                                 engine.sendSignResponse(

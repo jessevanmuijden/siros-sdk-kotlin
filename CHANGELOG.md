@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     JWK has none) and is never sent with a `vp_token`; it is built only when `response_encryption` is present and only for
     `direct_post.jwt` (plain `direct_post`/`query`/`fragment` keep returning `vp_token`). `CredentialResponseKey` and
     `AuthorizationResponseEncryption` are `internal` to sdk:wallet (no new public API for them).
+  - **Review follow-ups.** The response keys and opened responses are cleared synchronously by `logout()`/`endSessionLocally()` and
+    `destroy()` (not only when a later connection replaces the old one). On WMP, a `generate_proof`/`decrypt_credential_response`
+    that fails, an engine flow error and every completion release the flow's key and opened response (after a completion has
+    been processed against the response it needs). A required encryption the wallet cannot provide now answers the engine's
+    request with an error `sign_response` carrying the ORIGINAL `message_id` instead of leaving it to wait out its signing
+    timeout. The decrypted response-level `credential_metadata` is checked wallet-side with the limits the engine used to enforce
+    (1 MiB encoded, depth 16, 256 members per object, member names of at most 256 bytes, no duplicate names at the top level or
+    inside `org.siros.secret_seed`) before anything is retained or passed to the receipt check; a response that fails them is
+    refused and, when it decrypted and carried a `notification_id`, reported as `credential_failure`.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

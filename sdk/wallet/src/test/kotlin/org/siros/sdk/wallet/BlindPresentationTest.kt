@@ -53,15 +53,19 @@ class BlindPresentationTest {
 
     @Test
     fun theResponseJweDecryptsAtTheVerifierWithTheClaimsOfTheRequest() {
-        val jwe = BlindPresentation.responseJwe(request, "client-id", "st-1", listOf("pid" to "tok"))
+        // A sentinel with characters outside the base64url alphabet (a space, '!' and a non-ASCII one) cannot occur by
+        // chance in a valid compact JWE, so its absence from the JWE says something and the same value must come back out.
+        val sentinel = "secret vp token! \u2713"
+        val jwe = BlindPresentation.responseJwe(request, "client-id", "st-1", listOf("pid" to sentinel))
         val obj = JWEObject.parse(jwe)
         obj.decrypt(ECDHDecrypter(verifier))
         val claims = Json.parseToJsonElement(obj.payload.toString()).jsonObject
         assertEquals("client-id", claims["aud"]!!.jsonPrimitive.content)
         assertEquals("st-1", claims["state"]!!.jsonPrimitive.content)
-        assertEquals(JsonObject(mapOf("pid" to JsonArray(listOf(JsonPrimitive("tok"))))), claims["vp_token"])
+        assertEquals(JsonObject(mapOf("pid" to JsonArray(listOf(JsonPrimitive(sentinel))))), claims["vp_token"])
         assertEquals("v-1", obj.header.keyID)
-        assertFalse("the token must not be readable in the JWE", jwe.contains("tok"))
+        assertFalse("the token must not be readable in the JWE", jwe.contains(sentinel))
+        assertFalse("nor in its decoded protected header", String(java.util.Base64.getUrlDecoder().decode(jwe.substringBefore('.'))).contains(sentinel))
     }
 
     @Test
