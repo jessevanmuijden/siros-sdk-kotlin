@@ -82,11 +82,11 @@ fun PresentationConsentScreen(
     // SDK itself refuses to sign with an exhausted/keyless instance
     // regardless (defense in depth), but the user shouldn't be let all the
     // way to "Share" only to have it silently fail.
-    val exhaustedQueryIds = remember(request, presentationHistory, consumptionPolicy, availableKeyIds) {
-        request.matchResults.filter { mr ->
-            mr.candidates.isNotEmpty() &&
-                CredentialUtils.eligibleInstances(mr, consumptionPolicy, presentationHistory, availableKeyIds).isEmpty()
-        }.map { it.queryId }.toSet()
+    val eligibleByQuery = remember(request, presentationHistory, consumptionPolicy, availableKeyIds) {
+        CredentialUtils.eligibleInstancesByQuery(request.matchResults, consumptionPolicy, presentationHistory, availableKeyIds)
+    }
+    val exhaustedQueryIds = remember(eligibleByQuery) {
+        eligibleByQuery.filter { (mr, eligible) -> mr.candidates.isNotEmpty() && eligible.isEmpty() }.map { it.first.queryId }.toSet()
     }
     val totalSteps = request.matchResults.size + 2 // preview + per-credential + summary
     var currentStep by remember { mutableStateOf(0) }
@@ -194,7 +194,7 @@ fun PresentationConsentScreen(
                 } else {
                     Button(
                         onClick = {
-                            onAccept(request.matchResults.flatMap { CredentialUtils.eligibleInstances(it, consumptionPolicy, presentationHistory, availableKeyIds) }.map { it.id }.distinct())
+                            onAccept(eligibleByQuery.flatMap { it.second }.map { it.id }.distinct())
                         },
                         enabled = exhaustedQueryIds.isEmpty(),
                         modifier = Modifier.weight(1f),

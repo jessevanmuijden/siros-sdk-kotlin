@@ -229,28 +229,39 @@ class CredentialUtilsEligibleInstancesTest {
         assertEquals(listOf(zkUsed), result)
     }
 
-    private fun matchResult(format: String?, vararg candidates: StoredCredential) = CredentialMatcher.MatchResult(
-        queryId = "q", format = format, candidates = candidates.toList(), requestedClaims = emptyList(),
+    private fun matchResult(queryId: String, format: String?, vararg candidates: StoredCredential) = CredentialMatcher.MatchResult(
+        queryId = queryId, format = format, candidates = candidates.toList(), requestedClaims = emptyList(),
     )
+
+    private fun eligible(policy: CredentialConsumptionPolicy, history: List<PresentationRecord>, vararg results: CredentialMatcher.MatchResult) =
+        CredentialUtils.eligibleInstancesByQuery(results.toList(), policy, history, setOf("k")).map { (r, e) -> r.queryId to e.map { it.id } }
 
     @Test
     fun perQuery_aZkpReqQueryDoesNotConsumeItsMdocCandidatesUnderConsumeNonZkp() {
         val mdoc = credential(id = 1L, format = "mso_mdoc")
         val history = listOf(presentation(1L))
-        // The stored format is a raw mdoc: by it alone the second presentation would look like a consuming one.
+        // By the stored format alone the second presentation would look like a consuming one.
         assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(listOf(mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")))
-        // The query is a zkp_req: it is answered with a proof, so the credential is still eligible.
-        assertEquals(
-            listOf(mdoc),
-            CredentialUtils.eligibleInstances(matchResult("zkp_req", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")),
-        )
+        // Under a zkp_req (or legacy mso_mdoc_zk) query it is a proof, so the credential is still eligible.
+        assertEquals(listOf("q" to listOf(1L)), eligible(CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, matchResult("q", "zkp_req", mdoc)))
+        assertEquals(listOf("q" to listOf(1L)), eligible(CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, matchResult("q", "mso_mdoc_zk", mdoc)))
         // A raw mdoc query still consumes, and CONSUME_ALL consumes everything.
-        assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(matchResult("mso_mdoc", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")))
-        assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(matchResult("zkp_req", mdoc), CredentialConsumptionPolicy.CONSUME_ALL, history, setOf("k")))
-        // A legacy mso_mdoc_zk query is a proof too, though its candidates are stored as plain mso_mdoc.
-        assertEquals(
-            listOf(mdoc),
-            CredentialUtils.eligibleInstances(matchResult("mso_mdoc_zk", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")),
-        )
+        assertEquals(listOf("q" to emptyList<Long>()), eligible(CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, matchResult("q", "mso_mdoc", mdoc)))
+        assertEquals(listOf("q" to emptyList<Long>()), eligible(CredentialConsumptionPolicy.CONSUME_ALL, history, matchResult("q", "zkp_req", mdoc)))
+    }
+
+    @Test
+    fun perQuery_aCredentialMatchedByOverlappingQueriesIsClassifiedByTheFirstOne() {
+        val used = credential(id = 1L, format = "mso_mdoc")
+        val unused = credential(id = 2L, format = "mso_mdoc")
+        val history = listOf(presentation(1L))
+        val policy = CredentialConsumptionPolicy.CONSUME_NON_ZKP
+        // A raw mdoc query first, then a legacy mso_mdoc_zk one: the engine answers credential 1 under the raw query (consumed), so it is
+        // ineligible under BOTH, and the ids to submit are [2] only (never [2, 1], which the wallet would reject as a whole).
+        val rawFirst = eligible(policy, history, matchResult("raw", "mso_mdoc", used, unused), matchResult("zk", "mso_mdoc_zk", used, unused))
+        assertEquals(listOf("raw" to listOf(2L), "zk" to listOf(2L)), rawFirst)
+        // The other way round credential 1 is answered by the proof query, so it stays eligible everywhere.
+        val zkFirst = eligible(policy, history, matchResult("zk", "mso_mdoc_zk", used, unused), matchResult("raw", "mso_mdoc", used, unused))
+        assertEquals(listOf("zk" to listOf(1L, 2L), "raw" to listOf(1L, 2L)), zkFirst)
     }
 }
