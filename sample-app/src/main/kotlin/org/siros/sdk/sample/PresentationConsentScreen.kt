@@ -59,6 +59,9 @@ import org.siros.sdk.wallet.PresentationRequest
  * 1. Preview: verifier info and overview of what's requested
  * 2. Per-credential: select which claims to disclose (for each matched credential)
  * 3. Summary: confirm final selection before sharing
+ *
+ * A request that discloses no claims ([PresentationRequest.disclosesNoClaims], e.g. a `zkp_req` pseudonym or age proof) has only
+ * step 1: nothing to select or confirm, so the user picks the credential and shares or declines.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,7 +91,8 @@ fun PresentationConsentScreen(
     val exhaustedQueryIds = remember(eligibleByQuery) {
         eligibleByQuery.filter { (mr, eligible) -> mr.candidates.isNotEmpty() && eligible.isEmpty() }.map { it.first.queryId }.toSet()
     }
-    val totalSteps = request.matchResults.size + 2 // preview + per-credential + summary
+    // preview + per-credential + summary; a request that discloses nothing (zkp_req: a proof, no claims) is the preview alone
+    val totalSteps = request.consentStepCount
     var currentStep by remember { mutableStateOf(0) }
 
     // Track per-credential claim disclosure selections
@@ -332,7 +336,7 @@ private fun PreviewStep(
                 )
                 val claimCount = matchResult.requestedClaims.flatten().distinct().size
                 Text(
-                    text = "$claimCount data fields requested",
+                    text = if (request.disclosesNoClaims) "No data fields are shared (zero-knowledge proof)" else "$claimCount data fields requested",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
