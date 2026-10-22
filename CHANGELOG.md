@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The sample consent screen judged a `zkp_req` query's candidates by their stored (mdoc) format, so under `CONSUME_NON_ZKP`
+  a second presentation of the same credential disabled Share or dropped the credential although the SDK permits reuse for
+  a proof. New `CredentialUtils.eligibleInstancesByQuery(...)` takes the ZK status from the query that answers each credential (`zkp_req` and legacy `mso_mdoc_zk`; the first matching query, as the engine's sign handlers classify it); the screen uses it
+  for both the exhausted-query check and the accepted ids (so overlapping raw/ZK queries never submit a consumed credential). A pending `zkp_req` signing is also cancelled when `forceReconnect()`
+  moves the engine to `CONNECTING`, so a stale consent dialog no longer holds the presentation lock for DC API requests. `signMdocPresentationForProximity` now takes the same lock, so a proximity presentation cannot use the single copy a pending redirect presentation is about to consume.
+
 ### Changed
 - **BREAKING (unreleased): engine-blind encryption: the wallet, not the engine, holds the response-encryption keys.**
   The engine now relays ciphertext and never sees an issued credential, a delivered `secret_seed` or a `vp_token`
@@ -113,6 +120,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
 
 ### Added
+- **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`).** The engine
+  session now matches, proves and answers `zkp_req` requests: the verifier's `client_metadata`
+  (new optional field of `match_request` and `sign_request` params) reaches the matcher, and the
+  proof is bound to the redirect OpenID4VPHandover over `[client id, nonce, JWK thumbprint,
+  response_uri]`. A missing thumbprint, response_uri, trust result or consent handler, an
+  untrusted verifier, a mismatched audience or `transaction_data` is refused and the flow
+  cancelled. The answering core is shared with the DC API path (`answerCircuitZkQueries`).
+  A refusal at the sign step is answered with `sign_response` `error_code` SIGN_REFUSED
+  (`WalletEngineSession.sendSignRefusal`, wmp spec 3.2.6): the engine ends signing at once and
+  tells the verifier `access_denied` with no description.
+  zkp_req presentations run one at a time (a consumed copy is never presented twice), and a flow, connection or session that ends while the user is asked proves nothing.
+  The PDP's verifier ids are mapped in ONE place (`AuthZENSource`) for every trust path: `semantic` (must carry `semantic_id:`)
+  verbatim, `x509_san_dns` (go-trust returns the bare A-label) as `x509_san_dns:<dns>`; any other type is never used.
+  A `zkp_req` request the wallet cannot answer is refused with its own stable, content-free code (logged) and a reason the user may
+  be shown: `disabled`, `no-circuit`, `no-credential`, `predicate-unsatisfied`, `no-verifier-id` (checked at match time from the
+  flow's trust result), and the generic ones for an unreadable, mixed or unsupported request.
+  The engine's own trust decision (`verifier_trust_evaluated` progress) is ingested; a request is
+  answered only for the signed client-id schemes (x509_san_dns, x509_san_uri, x509_hash); what is
+  proved is the store's current credential, and a cancelled or ended flow stops a pending signing.
+  The circuit catalog's `proofSystem` field is the identity offered to verifiers
+  (`ZkCircuitDescriptor.proofSystem`); entries without it are not offered for `zkp_req`.
 - **Holder-generated pseudonym commitment (`org.siros.psc`) in the OpenID4VCI
   proof JWT** (tracking issue https://github.com/SUNET/vc/issues/823). When the
   engine's `generate_proof` sign request (legacy engine and WMP sign sub-flow)
@@ -370,9 +398,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (unreleased): the response is the rulebook's base64url CBOR `ZkpPresentation`.** `vp_token[queryId]` is an array of
   strings, each the unpadded base64url of `{system_id, proof, issuer_key_set, ? proof_time, results}`
   (`CircuitZkResponsePresentation`; `CircuitZkPresenter.Result.presentation` / `.json`; `base64Url` is gone, and the earlier
-  CBOR/JSON presentation classes with `circuit_id`/`x5chain` are removed). `issuer_key_set` is the credential's own
-  `issuerAuth` `x5chain` (DER, leaf first, at most 8 certificates of at most 4096 bytes each, checked before any proof is
-  made; the verifier validates them through go-trust and takes the issuer key from the leaf). `proof_time` (tag 0) is the
+  CBOR/JSON presentation classes with `circuit_id`/`x5chain` are removed). `issuer_key_set` holds exactly ONE element, the
+  Document Signer leaf certificate (first of the credential's `issuerAuth` `x5chain`, DER, at most 4096 bytes; never an
+  intermediate or the root, which made the vc verifier refuse the nym_auth system); a credential with no usable leaf is refused
+  before any proof is made (`CircuitZkStep.ISSUER_KEY` / `ISSUER_KEY_UNUSABLE`). The response validator still accepts up to 8
+  elements of 4096 bytes. The verifier validates the certificate through go-trust and takes the issuer key from it. `proof_time` (tag 0) is the
   EXACT 20-byte form `YYYY-MM-DDThh:mm:ssZ` and required for `mso_mdoc`: the prover's own time input when it has one, else the
   device clock, rendered by the one function `ProofTime.render`. A pseudonym is 32 bytes for `sha-256`, a predicate result is
   `true`; no item type is skipped. `CircuitZkResponseValidator` (strict CBOR: definite lengths, no duplicate keys, no trailing

@@ -588,6 +588,9 @@ data class SignRequestParams(
     val state: String? = null,
     /** The request as the engine validated it; its `client_id` is the `aud` of an encrypted response. */
     @SerialName("verified_request") val verifiedRequest: org.siros.sdk.transport.VerifiedRequest? = null,
+    // Appended last: a data class's property order is part of its binary API (componentN, copy, constructor).
+    /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
+    @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
 )
 
 @Serializable
@@ -603,6 +606,12 @@ data class MatchRequestMessage(
     @SerialName("flow_id") val flowId: String,
     @SerialName("dcql_query") val dcqlQuery: JsonElement? = null,
     val timestamp: String? = null,
+    /**
+     * The verifier's `client_metadata` exactly as the request object carried it (verbatim, never narrowed), when the engine
+     * sends it. A `zkp_req` request needs its `vp_formats_supported.zkp_req` (`system_id_values`, `proof_system_values`):
+     * a request that offered nothing cannot be answered.
+     */
+    @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
 )
 
 @Serializable

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -410,6 +411,41 @@ class SirosWalletTest {
             })
         }
         verify(exactly = 1) { engine.sendTrustResult("flow-2", true, null) }
+    }
+
+    @Test
+    fun handleTrustEvaluation_resourceIdEqualsSubjectId_forEveryVerifierIdentityShape() = runTest(dispatcher) {
+        // go-trust refuses a full evaluation whose resource.id differs from subject.id (a 502 from the backend proxy), so the
+        // verifier-trust request the zkp_req redirect route depends on must carry the SAME id in both, prefixed or not.
+        for (subject in listOf("x509_san_dns:rp.example", "decentralized_identifier:did:web:rp.example", "https://rp.example/verifier", "verifier-123")) {
+            val engine = mockk<WalletEngineSession>(relaxed = true)
+            val apiClient = mockk<BackendApiClient>()
+            val request = slot<JsonObject>()
+            coEvery { apiClient.evaluateTrust(capture(request)) } returns buildJsonObject { put("decision", true) }
+            val wallet = newWallet(
+                "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+                "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+                "apiClient" to apiClient,
+                "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            )
+            invokeHandleTrustEvaluation(
+                wallet, engine, "flow-id",
+                buildJsonObject {
+                    putJsonObject("request") {
+                        put("subject_id", subject)
+                        put("subject_type", "credential_verifier")
+                        putJsonObject("key_material") {
+                            put("type", "x5c")
+                            putJsonArray("x5c") { add(JsonPrimitive("cert-1")) }
+                        }
+                    }
+                },
+            )
+            advanceUntilIdle()
+            val sid = request.captured["subject"]!!.jsonObject["id"]?.jsonPrimitive?.content
+            assertEquals(subject, sid)
+            assertEquals(subject, sid?.let { request.captured["resource"]!!.jsonObject["id"]?.jsonPrimitive?.content })
+        }
     }
 
     @Test
@@ -6368,9 +6404,14 @@ class SirosWalletTest {
         var events: MutableList<String>? = null
         /** When set, the prover asks the signer for a signature first, like a real one. */
         var signs = false
+        /** The last input the prover was given (its session transcript, for one). */
+        var lastInput: org.siros.sdk.keystore.CircuitZkProveInput? = null
+        val inputs = mutableListOf<org.siros.sdk.keystore.CircuitZkProveInput>()
         override val isFake get() = inner.isFake
         override suspend fun prove(input: org.siros.sdk.keystore.CircuitZkProveInput): org.siros.sdk.keystore.CircuitZkProveOutput {
             calls++
+            lastInput = input
+            inputs += input
             events?.add("prove")
             if (signs) input.signer.sign(-7, byteArrayOf(1, 2, 3))
             return inner.prove(input)
@@ -6385,7 +6426,7 @@ class SirosWalletTest {
             ),
         ),
         /** Default: the PDP supplies the x509_san_dns identifier (the bare DNS name, as go-trust derives it). */
-        trust: suspend () -> JsonObject = czkIds("x509_san_dns" to "x509_san_dns:rp.example"),
+        trust: suspend () -> JsonObject = czkIds("x509_san_dns" to "rp.example"),
         /** The wallet's ORDERED supported verifier-id types. */
         types: List<String> = VerifierIdTypeOrder.DEFAULT,
         /** Optional host-registered sources; the PDP's AuthZEN source is always tried first per type. */
@@ -6421,6 +6462,8 @@ class SirosWalletTest {
         predicates: org.siros.sdk.credentials.PredicateFunctions? = null,
         /** Functions (id) the circuit and the validator accept besides the rulebook ones: their rules are empty. */
         extraFunctions: Set<String> = emptySet(),
+        /** Called with the client_metadata the planner is given for each query. */
+        onPlan: (JsonObject?) -> Unit = {},
     ): CzkSetup {
         var plannedQueries = 0
         val consents = mutableListOf<org.siros.sdk.credentials.PresentationConsentRequest>()
@@ -6447,7 +6490,8 @@ class SirosWalletTest {
         val support = org.siros.sdk.credentials.CircuitZkSupport(
             // The plan's raw query is the query itself (its doctype_value is what the presenter checks the credential against).
             // The request offers the test circuit (a response states an offered circuit_id and proof_system).
-            planner = { query, _ ->
+            planner = { query, cm ->
+                onPlan(cm)
                 val fs = functionsPerQuery?.invoke(plannedQueries++) ?: functions
                 org.siros.sdk.credentials.CircuitZkPlanResult.Plan(
                     org.siros.sdk.credentials.CircuitZkPlan(
@@ -6599,6 +6643,731 @@ class SirosWalletTest {
         czkRefused(s, czkRequest(), reason = org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.PROOF_FAILED)
         // The proof was made (the request got as far as the prover) and the response was still not sent.
         assertEquals(1, s.prover.calls)
+    }
+
+    // ── zkp_req over the engine (QR / same-device redirect, direct_post.jwt) ──
+
+    private val redirectThumbprint = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { (it + 1).toByte() })
+    private val redirectClientId = "x509_san_dns:rp.example"
+
+    private class EngineCzk(
+        val s: CzkSetup,
+        val engine: WalletEngineSession,
+        val match: MutableSharedFlow<MatchRequestMessage>,
+        val sign: MutableSharedFlow<SignRequestMessage>,
+        val progress: MutableSharedFlow<FlowProgressMessage>,
+        val complete: MutableSharedFlow<FlowCompleteMessage>,
+        val errors: MutableSharedFlow<FlowErrorMessage>,
+        val state: MutableStateFlow<WalletEngineSession.State>,
+        val metadataSeen: MutableList<JsonObject?>,
+    )
+
+    private fun TestScope.engineCzk(
+        trusted: Boolean = true,
+        consent: suspend (org.siros.sdk.credentials.PresentationConsentRequest) -> Boolean = { true },
+        flagOn: Boolean = true,
+        offersCircuit: Boolean = true,
+        credentials: List<StoredCredential>? = null,
+        /** False: nothing is put into the wallet's private state; the engine's own trust progress has to do it. */
+        seedTrust: Boolean = true,
+        clientId: String = redirectClientId,
+        flows: List<String> = listOf("f1"),
+    ): EngineCzk {
+        val match = MutableSharedFlow<MatchRequestMessage>()
+        val sign = MutableSharedFlow<SignRequestMessage>()
+        val progress = MutableSharedFlow<FlowProgressMessage>()
+        val complete = MutableSharedFlow<FlowCompleteMessage>()
+        val errors = MutableSharedFlow<FlowErrorMessage>()
+        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete, flowErrors = errors)
+        val engineState = MutableStateFlow(WalletEngineSession.State.CONNECTED)
+        every { engine.state } returns engineState
+        every { engine.cancelFlow(any()) } just runs
+        every { engine.sendSignRefusal(any(), any(), any()) } just runs
+        every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
+        every { engine.sendMatchResponse(any(), any(), any()) } just runs
+        val seen = mutableListOf<JsonObject?>()
+        val s = czkSetup(trust = czkIds("x509_san_dns" to redirectClientId.removePrefix("x509_san_dns:")), consent = consent, flagOn = flagOn, offersCircuit = offersCircuit, credentials = credentials, onPlan = { seen += it })
+        invokeConnectEngine(s.wallet, "app-token")
+        advanceUntilIdle()
+        // What the engine's trust step left for this flow.
+        if (seedTrust) {
+            @Suppress("UNCHECKED_CAST")
+            for (flow in flows) (getField(s.wallet, "lastTrustResults") as MutableMap<String, TrustResult>)[flow] = TrustResult(
+                trusted = trusted, identifier = clientId, entityName = "Example RP",
+                context = buildJsonObject { putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId.removePrefix("x509_san_dns:")) }) } },
+            )
+        }
+        return EngineCzk(s, engine, match, sign, progress, complete, errors, engineState, seen)
+    }
+
+    private val redirectQuery = Json.parseToJsonElement(
+        """{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
+    )
+    private val redirectMetadata = Json.parseToJsonElement(
+        """{"vp_formats_supported":{"zkp_req":{"system_id_values":["c1"],"proof_system_values":["sys"]}},"authorization_encrypted_response_alg":"ECDH-ES"}""",
+    )
+
+    /** What the legacy redirect flow really sends: a flow_progress step with the request, the verifier and its client_metadata. */
+    private suspend fun EngineCzk.matchOnce(query: kotlinx.serialization.json.JsonElement = redirectQuery, flow: String = "f1") {
+        progress.emit(FlowProgressMessage(
+            flowId = flow, step = "credential_selection",
+            payload = buildJsonObject {
+                put("dcql_query", query)
+                putJsonObject("verifier") { put("client_id", redirectClientId); put("name", "Example RP") }
+                put("client_metadata", redirectMetadata)
+            },
+        ))
+    }
+
+    private fun redirectSign(thumbprint: String? = redirectThumbprint, audience: String = redirectClientId, responseUri: String? = "https://rp.example/response", creds: List<String> = listOf("1"), flow: String = "f1", messageId: String = "m1") =
+        SignRequestMessage(
+            flowId = flow, messageId = messageId, action = "sign_presentation",
+            params = SignRequestParams(
+                audience = audience, nonce = "n-redirect", responseUri = responseUri, verifierJwkThumbprint = thumbprint,
+                credentialsToInclude = creds.map { org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "q", credentialId = it) },
+            ),
+        )
+
+    @Test
+    fun circuitZkRedirect_aZkpReqRequestRelayedByTheEngine_isMatchedProvedAndAnsweredWithTheCborPresentation() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // The verifier's client_metadata reached the planner, and the credential was offered.
+        assertEquals(listOf<kotlinx.serialization.json.JsonElement?>(redirectMetadata), e.metadataSeen)
+        val consent = slot<JsonObject>()
+        verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", capture(consent)) }
+        val selected = consent.captured["selected_credentials"]!!.jsonArray.single().jsonObject
+        assertEquals("q", selected["credential_query_id"]?.jsonPrimitive?.content)
+        assertEquals("1", selected["credential_id"]?.jsonPrimitive?.content)
+        // A zkp_req query discloses no claims: the engine's consent check would refuse any.
+        assertEquals(0, selected["disclosed_claims"]!!.jsonArray.size)
+        // Nothing is recorded as presented before anything is proved.
+        assertTrue(e.s.history.isEmpty())
+
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+
+        val vp = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
+        val token = Json.parseToJsonElement(vp.captured).jsonObject
+        assertEquals(setOf("q"), token.keys)
+        val decoded = CzkDecoded(token["q"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals(
+            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym(redirectClientId)),
+            decoded.results["n"],
+        )
+        // The proof is bound to the redirect OpenID4VPHandover over [client id, nonce, thumbprint, response_uri].
+        org.junit.Assert.assertArrayEquals(
+            org.siros.sdk.keystore.MdocDeviceResponseBuilder.buildCircuitZkRedirectSessionTranscript(redirectClientId, "n-redirect", "https://rp.example/response", redirectThumbprint),
+            e.s.prover.lastInput!!.sessionTranscript,
+        )
+        // One consent, naming the verifier; the history records a ZK proof; the flow is not cancelled.
+        assertEquals(1, e.s.consents.size)
+        assertEquals("Example RP", e.s.consents.single().verifier.label)
+        assertTrue(e.s.history.single().zkProof) // written once, when answered
+        verify(exactly = 0) { e.engine.cancelFlow(any()) }
+        verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+    }
+
+    private fun czkTwoCredentials() = listOf(
+        StoredCredential(id = 1L, format = "mso_mdoc", raw = CzkFixtures.mdoc(CzkFixtures.psc, "2000-06-15"), credentialIssuerIdentifier = CzkFixtures.ISSUER,
+            metadata = CredentialMetadata(name = "Nym A"), batchId = 1L, instanceId = 0),
+        StoredCredential(id = 2L, format = "mso_mdoc", raw = CzkFixtures.mdoc(CzkFixtures.psc, "1990-01-01"), credentialIssuerIdentifier = CzkFixtures.ISSUER,
+            metadata = CredentialMetadata(name = "Nym B"), batchId = 2L, instanceId = 0),
+    )
+
+    private fun TestScope.engineCzkWith(credentials: List<StoredCredential>?, policy: CredentialConsumptionPolicy? = null): EngineCzk {
+        val e = engineCzk(credentials = credentials)
+        policy?.let { e.s.wallet.credentialConsumptionPolicy = it }
+        return e
+    }
+
+    @Test
+    fun circuitZkRedirect_eachQueryIsAnsweredWithTheCredentialItsReferenceNames_whateverTheOrder() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        val query = Json.parseToJsonElement(
+            """{"credentials":[
+              {"id":"q1","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n1","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]},
+              {"id":"q2","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n2","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
+        )
+        e.matchOnce(query)
+        advanceUntilIdle()
+        // The references come in the reverse order of the queries: q2 is answered by credential 1, q1 by credential 2.
+        e.sign.emit(redirectSign().let { r ->
+            r.copy(params = r.params.copy(credentialsToInclude = listOf(
+                org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "q2", credentialId = "1"),
+                org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "q1", credentialId = "2"),
+            )))
+        })
+        advanceUntilIdle()
+        val vp = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
+        assertEquals(setOf("q1", "q2"), Json.parseToJsonElement(vp.captured).jsonObject.keys)
+        // The prover got credential 2 for q1 and credential 1 for q2: tell them apart by the birth dates they hold.
+        fun holds(input: org.siros.sdk.keystore.CircuitZkProveInput, birth: String) = String(input.credentialBytes, Charsets.ISO_8859_1).contains(birth)
+        assertEquals(2, e.s.prover.inputs.size)
+        // Proved in query order: q1 with credential 2, q2 with credential 1.
+        assertTrue(holds(e.s.prover.inputs[0], "1990-01-01") && !holds(e.s.prover.inputs[0], "2000-06-15"))
+        assertTrue(holds(e.s.prover.inputs[1], "2000-06-15") && !holds(e.s.prover.inputs[1], "1990-01-01"))
+    }
+
+    private fun redirectQueries(n: Int) = Json.parseToJsonElement(
+        """{"credentials":[""" + (1..n).joinToString(",") { i ->
+            """{"id":"q$i","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"},"_req":[{"fn_id":"pseudonym","return":"n$i","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}"""
+        } + "]}",
+    )
+
+    private fun refs(vararg pairs: Pair<String, String>) = pairs.map { (q, id) -> org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = q, credentialId = id) }
+
+    private fun SignRequestMessage.withRefs(r: List<org.siros.sdk.transport.engine.CredentialRef>) = copy(params = params.copy(credentialsToInclude = r))
+
+    private fun holds(input: org.siros.sdk.keystore.CircuitZkProveInput, birth: String) = String(input.credentialBytes, Charsets.ISO_8859_1).contains(birth)
+
+    @Test
+    fun circuitZkRedirect_aCredentialReusedAcrossQueries_keepsEveryQueriesOwnChoice() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.matchOnce(redirectQueries(3))
+        advanceUntilIdle()
+        // q1 and q2 are answered by credential 1, q3 by credential 2: three queries, two distinct credentials.
+        e.sign.emit(redirectSign().withRefs(refs("q1" to "1", "q2" to "1", "q3" to "2")))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        assertEquals(3, e.s.prover.inputs.size)
+        assertTrue(holds(e.s.prover.inputs[0], "2000-06-15"))
+        assertTrue(holds(e.s.prover.inputs[1], "2000-06-15"))
+        assertTrue(holds(e.s.prover.inputs[2], "1990-01-01") && !holds(e.s.prover.inputs[2], "2000-06-15"))
+    }
+
+    @Test
+    fun circuitZkRedirect_aQueryWithoutItsOwnReference_isRefused_evenIfAnotherQueryChoseTheSameCredential() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.matchOnce(redirectQueries(2))
+        advanceUntilIdle()
+        e.sign.emit(redirectSign().withRefs(refs("q1" to "1")))
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+        // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        verify(exactly = 0) { e.engine.cancelFlow(any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_theConsentSelectsOneCredentialPerQuery_andItsOwnReferencesAreAnswered() = runTest(dispatcher) {
+        for ((name, creds, expected) in listOf(
+            Triple("two credentials, both match both queries", czkTwoCredentials(), listOf("q1" to "1", "q2" to "2")),
+            Triple("one credential answers both queries", null, listOf("q1" to "1", "q2" to "1")),
+        )) {
+            val e = engineCzkWith(creds)
+            e.matchOnce(redirectQueries(2))
+            advanceUntilIdle()
+            val consent = slot<JsonObject>()
+            verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", capture(consent)) }
+            val entries = consent.captured["selected_credentials"]!!.jsonArray.map { it.jsonObject }
+            assertEquals(name, expected, entries.map { it["credential_query_id"]!!.jsonPrimitive.content to it["credential_id"]!!.jsonPrimitive.content })
+            assertTrue(name, entries.all { it["disclosed_claims"]!!.jsonArray.isEmpty() })
+            // The sign references are the ones the consent emitted, not fabricated ones.
+            e.sign.emit(redirectSign().withRefs(refs(*expected.toTypedArray())))
+            advanceUntilIdle()
+            verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+            assertEquals(name, 2, e.s.prover.calls)
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_theMatchRequestAnswerHasOneEntryPerQuery() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQueries(2), clientMetadata = redirectMetadata))
+        advanceUntilIdle()
+        val matches = slot<List<CredentialMatch>>()
+        verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
+        assertEquals(listOf("q1" to "1", "q2" to "2"), matches.captured.map { it.credentialQueryId to it.credentialId })
+    }
+
+    private fun serverTrust(trusted: Boolean, withContext: Boolean = true) = FlowProgressMessage(
+        flowId = "f1", step = "trust_evaluated",
+        payload = buildJsonObject {
+            put("verifier_trust_evaluated", true)
+            put("verifier", redirectClientId)
+            put("trusted", trusted)
+            put("framework", "etsi-tl")
+            if (withContext) putJsonObject("context") {
+                putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId.removePrefix("x509_san_dns:")) }) }
+            }
+        },
+    )
+
+    @Test
+    fun circuitZkRedirect_aTrustDecisionTheEngineMadeItself_isIngestedAndAnswered_withoutSeedingPrivateState() = runTest(dispatcher) {
+        val e = engineCzk(seedTrust = false)
+        e.progress.emit(serverTrust(trusted = true))
+        advanceUntilIdle()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        assertEquals(1, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_theSameVerifierIdEntryGivesTheSamePseudonym_onTheEnginePathAndTheDcApiPath() = runTest(dispatcher) {
+        // One mapping for every trust path (the PDP's bare A-label becomes x509_san_dns:<dns>), whichever path delivered it.
+        val e = engineCzk(seedTrust = false)
+        e.progress.emit(serverTrust(trusted = true))
+        advanceUntilIdle()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        val vp = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
+        val viaEngine = CzkDecoded(Json.parseToJsonElement(vp.captured).jsonObject["q"]!!.jsonArray.single().jsonPrimitive.content).results["n"]
+        val viaDcApi = czkDecoded(czkRun(czkSetup(trust = czkIds("x509_san_dns" to "rp.example")), czkRequest()).responseJson).results["n"]
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:rp.example")), viaDcApi)
+        assertEquals(viaDcApi, viaEngine)
+    }
+
+    @Test
+    fun circuitZkRedirect_aReconnectWhileConsentIsPending_provesAndSendsNothing() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent()
+        assertEquals(1, e.s.consents.size)
+        engineGeneration.incrementAndGet() // the socket was replaced
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+        assertTrue(e.s.history.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aConsentApprovedWhileTheEngineIsReconnecting_provesNothing_evenWithoutANewGeneration() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent()
+        assertEquals(1, e.s.consents.size)
+        e.state.value = WalletEngineSession.State.RECONNECTING // the backoff: the generation has not changed yet
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+        assertTrue(e.s.history.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aConnectionLostWhileTheHistoryIsBeingRecorded_sendsNothing() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // Recording the presentation reads the store (the renew check) AFTER the proof: the socket drops exactly there.
+        val inner = getField(e.s.wallet, "credentialStore") as CredentialStore
+        setField(e.s.wallet, "credentialStore", object : CredentialStore by inner {
+            override suspend fun getAll(): List<StoredCredential> {
+                if (e.s.prover.calls > 0) e.state.value = WalletEngineSession.State.RECONNECTING
+                return inner.getAll()
+            }
+        })
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        assertEquals(1, e.s.prover.calls)
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_aConnectionThatEndsDuringConsent_doesNotHoldUpAnUnrelatedDcApiRequest() = runTest(dispatcher) {
+        var asked = 0
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>() // the old dialog is never answered
+        val e = engineCzk(consent = { if (asked++ == 0) gate.await() else true })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent()
+        assertEquals(1, e.s.consents.size)
+        e.state.value = WalletEngineSession.State.RECONNECTING
+        runCurrent()
+        val dcApi = async(dispatcher) { e.s.wallet.handleDCAPIRequest(czkRequest(), CzkFixtures.ORIGIN, listOf(1L)) }
+        runCurrent()
+        assertTrue("the DC API request must not wait for the stale dialog", dcApi.isCompleted)
+        assertEquals(1, e.s.prover.calls)
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_anOverlappingDcApiRequestNeverPresentsTheSameSingleCopyCredentialTwice_underConsumeAll() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.s.wallet.credentialConsumptionPolicy = CredentialConsumptionPolicy.CONSUME_ALL
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // the redirect holds the credential and waits on the user
+        val dcApi = async(dispatcher) {
+            runCatching { e.s.wallet.handleDCAPIRequest(czkRequest(), CzkFixtures.ORIGIN, listOf(1L)) }
+        }
+        runCurrent()
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        // The DC API request found the single copy spent.
+        assertTrue(dcApi.await().exceptionOrNull() is org.siros.sdk.wallet.dcapi.DCAPIRequestRefused)
+        assertEquals(1, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_twoOverlappingRequestsNeverPresentTheSameSingleCopyCredentialTwice_underConsumeAll() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() }, flows = listOf("f1", "f2"))
+        e.s.wallet.credentialConsumptionPolicy = CredentialConsumptionPolicy.CONSUME_ALL
+        e.matchOnce(flow = "f1")
+        e.matchOnce(flow = "f2")
+        advanceUntilIdle()
+        e.sign.emit(redirectSign(flow = "f1", messageId = "m1"))
+        e.sign.emit(redirectSign(flow = "f2", messageId = "m2"))
+        runCurrent()
+        gate.complete(true)
+        runCurrent()
+        // Exactly one of them presented the credential; the other found it spent.
+        assertEquals(1, e.s.prover.calls)
+        verify(exactly = 1) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 1) { e.engine.sendSignRefusal(any(), any(), any()) }
+        assertEquals(1, e.s.history.size)
+    }
+
+    @Test
+    fun circuitZkRedirect_anEngineDecisionThatDistrustsTheVerifier_orCarriesNoVerifierIds_isNeverProved() = runTest(dispatcher) {
+        for ((name, msg) in listOf("untrusted" to serverTrust(trusted = false), "no verifier ids" to serverTrust(trusted = true, withContext = false))) {
+            val e = engineCzk(seedTrust = false)
+            e.progress.emit(msg)
+            advanceUntilIdle()
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(redirectSign())
+            advanceUntilIdle()
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+            assertEquals(name, 0, e.s.prover.calls)
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_aTrustedIdentityOfAnUnsignedScheme_isRefused() = runTest(dispatcher) {
+        val client = "redirect_uri:https://rp.example/"
+        val e = engineCzk(clientId = client)
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign(audience = client))
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        assertEquals(0, e.s.prover.calls)
+        assertTrue(e.s.consents.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aCredentialDeletedBetweenMatchAndSign_isNeverProved() = runTest(dispatcher) {
+        val e = engineCzkWith(czkTwoCredentials())
+        e.matchOnce()
+        advanceUntilIdle()
+        val store = getField(e.s.wallet, "credentialStore") as CredentialStore
+        store.delete(1L)
+        store.delete(2L)
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aFlowThatEndsWhileConsentIsPending_provesNothingAndSendsNothing() = runTest(dispatcher) {
+        for (ending in listOf("error", "complete")) {
+            val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            val e = engineCzk(consent = { gate.await() })
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(redirectSign())
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            assertEquals(1, e.s.consents.size)   // the user is being asked
+            if (ending == "error") e.errors.emit(FlowErrorMessage(flowId = "f1", error = FlowError(code = "FLOW_TIMEOUT", message = "timeout")))
+            else e.complete.emit(FlowCompleteMessage(flowId = "f1"))
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            gate.complete(true)   // a late approval
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            assertEquals(ending, 0, e.s.prover.calls)
+            assertTrue(ending, e.s.history.isEmpty())
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_cancellingTheFlowWhileConsentIsPending_refusesTheSignRequestOnceAndProvesNothing() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        @Suppress("UNCHECKED_CAST")
+        (getField(e.s.wallet, "_state") as MutableStateFlow<WalletState>).value = WalletState.FlowActive(
+            userId = "u", displayName = null, flowId = "f1", flowType = "presentation", status = "sign", credentials = emptyList(),
+        )
+        e.s.wallet.cancelCurrentFlow()
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        gate.complete(true)
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        // The pending sign request is refused (not left to the engine's timeout), and the late approval does nothing.
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aSessionThatEndsWhileConsentIsPending_orIsReplaced_provesAndSendsNothing() = runTest(dispatcher) {
+        for (how in listOf("teardown", "replaced")) {
+            val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+            val e = engineCzk(consent = { gate.await() })
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(redirectSign())
+            runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+            assertEquals(1, e.s.consents.size)
+            val m = e.s.wallet::class.java.declaredMethods.first { it.name == if (how == "teardown") "stopAllZkSigning" else "bumpSessionGeneration" }
+            m.isAccessible = true
+            m.invoke(e.s.wallet)
+            runCurrent()
+            gate.complete(true)
+            runCurrent()
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+            assertEquals(how, 0, e.s.prover.calls)
+            assertTrue(how, e.s.history.isEmpty())
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_aForcedReconnectWhileConsentIsPending_releasesThePresentationLockAndSendsNothing() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        assertEquals(1, e.s.consents.size)
+        val mutex = getField(e.s.wallet, "zkSigningMutex") as kotlinx.coroutines.sync.Mutex
+        assertTrue("the pending signing holds the presentation lock", mutex.isLocked)
+        // forceReconnect(): the old socket is dropped and the state goes to CONNECTING (not RECONNECTING).
+        e.state.value = WalletEngineSession.State.CONNECTING
+        runCurrent()
+        assertFalse("an unrelated (DC API) presentation is not held up by the stale dialog", mutex.isLocked)
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aProximityPresentationCannotUseTheSingleCopyAPendingRedirectWillConsume() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.s.wallet.credentialConsumptionPolicy = CredentialConsumptionPolicy.CONSUME_ALL
+        var proximitySigned = 0
+        coEvery { (getField(e.s.wallet, "keystore") as KeystoreManager).signMdocPresentationForProximity(any(), any(), any(), any()) } coAnswers {
+            proximitySigned++
+            ByteArray(1)
+        }
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // the redirect now waits on its consent dialog, holding the presentation lock
+        assertEquals(1, e.s.consents.size)
+        val proximity = backgroundScope.async { runCatching { e.s.wallet.signMdocPresentationForProximity(1L, null, ByteArray(1)) } }
+        runCurrent()
+        assertTrue("the proximity presentation waits for the redirect's lock", proximity.isActive)
+        assertEquals(0, proximitySigned)
+        gate.complete(true)
+        advanceUntilIdle()
+        // The redirect consumed the only copy; the proximity presentation then finds nothing eligible and signs nothing.
+        val result = proximity.await()
+        assertTrue("proximity refused: $result", result.isFailure && result.exceptionOrNull() is WalletException)
+        assertEquals(0, proximitySigned)
+        assertEquals(1, e.s.history.size)
+    }
+
+    private fun queryForDoctype(doctype: String) = Json.parseToJsonElement(
+        """{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"$doctype"},"_req":[{"fn_id":"pseudonym","return":"n","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
+    )
+
+    @Test
+    fun circuitZkRedirect_eachWayARequestCannotBeAnswered_hasItsOwnCodeAndUserMeaningfulReason() = runTest(dispatcher) {
+        timber.log.Timber.plant(czkTree)
+        try {
+            val cases = listOf<Triple<String, String, suspend () -> Pair<EngineCzk, kotlinx.serialization.json.JsonElement>>>(
+                Triple("disabled", "not enabled") { engineCzk(flagOn = false) to redirectQuery },
+                Triple("no-circuit", "no proof circuit") { engineCzk() to queryForDoctype("org.example.other") },
+                Triple("no-credential", "holds no credential") { engineCzk(credentials = emptyList()) to redirectQuery },
+                Triple("no-verifier-id", "did not identify itself") { engineCzk(seedTrust = false).also { it.progress.emit(serverTrust(trusted = true, withContext = false)) } to redirectQuery },
+            )
+            for ((code, text, make) in cases) {
+                czkLogs.clear()
+                val (e, query) = make()
+                advanceUntilIdle()
+                e.matchOnce(query)
+                advanceUntilIdle()
+                val reason = slot<String>()
+                verify(exactly = 1) { e.engine.sendCredentialsMatched("f1", emptyList(), capture(reason)) }
+                assertTrue("$code: ${reason.captured}", reason.captured.contains(text))
+                // The code is logged (and only the code: nothing of the request).
+                assertTrue(code, czkLogs.any { it.contains("code=$code") })
+                verify(exactly = 0) { e.engine.sendFlowAction("f1", "consent", any()) }
+            }
+        } finally {
+            timber.log.Timber.uproot(czkTree)
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_aReferenceToAnUnknownQuery_isRefused() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign().let { r ->
+            r.copy(params = r.params.copy(credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "other", credentialId = "1"))))
+        })
+        advanceUntilIdle()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_aFreshSingleCopyCredential_isNotCountedConsumedBeforeItIsProved_underConsumeAll() = runTest(dispatcher) {
+        val e = engineCzkWith(null, CredentialConsumptionPolicy.CONSUME_ALL)
+        e.matchOnce()
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", any()) }
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        assertEquals(1, e.s.prover.calls)
+        // Recorded once, from what was really used.
+        assertEquals(listOf(listOf(1L)), e.s.history.map { it.credentialIds })
+    }
+
+    @Test
+    fun circuitZkRedirect_theVerifierMetadataDoesNotOutliveTheFlow() = runTest(dispatcher) {
+        fun cached(e: EngineCzk) = (getField(e.s.wallet, "circuitZkClientMetadataByFlow") as Map<*, *>).size
+        // A request that is refused at match time caches nothing.
+        val refused = engineCzk(flagOn = false)
+        refused.matchOnce()
+        advanceUntilIdle()
+        assertEquals(0, cached(refused))
+        // An accepted one holds it for the sign step only, whether the sign step answers or refuses.
+        val answered = engineCzk()
+        answered.matchOnce()
+        advanceUntilIdle()
+        assertEquals(1, cached(answered))
+        answered.sign.emit(redirectSign())
+        advanceUntilIdle()
+        assertEquals(0, cached(answered))
+        val failed = engineCzk()
+        failed.matchOnce()
+        advanceUntilIdle()
+        failed.sign.emit(redirectSign(thumbprint = null))
+        advanceUntilIdle()
+        assertEquals(0, cached(failed))
+        // And one that never reaches the sign step is dropped when the flow ends.
+        val completed = engineCzk()
+        completed.matchOnce()
+        advanceUntilIdle()
+        assertEquals(1, cached(completed))
+        completed.complete.emit(FlowCompleteMessage(flowId = "f1"))
+        advanceUntilIdle()
+        assertEquals(0, cached(completed))
+    }
+
+    @Test
+    fun circuitZkRedirect_theMatchRequestMessageIsAnsweredToo() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+        advanceUntilIdle()
+        val matches = slot<List<CredentialMatch>>()
+        verify(exactly = 1) { e.engine.sendMatchResponse("f1", capture(matches), any()) }
+        assertEquals(listOf("1"), matches.captured.map { it.credentialId })
+        assertEquals(listOf<List<String>?>(null), matches.captured.map { it.availableClaims })
+        assertTrue(e.s.history.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aMissingOrMalformedThumbprintAndOtherHandoverInputs_areRefused_nothingIsAskedOrProved() = runTest(dispatcher) {
+        for ((name, req) in listOf(
+            "no thumbprint" to redirectSign(thumbprint = null),
+            "empty thumbprint" to redirectSign(thumbprint = ""),
+            "short thumbprint" to redirectSign(thumbprint = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(31))),
+            "no response_uri" to redirectSign(responseUri = null),
+        )) {
+            val e = engineCzk()
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(req)
+            advanceUntilIdle()
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
+            verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+            verify(exactly = 0) { e.engine.cancelFlow(any()) }
+            assertEquals(name, 0, e.s.prover.calls)
+            assertTrue(name, e.s.consents.isEmpty())
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_anUntrustedVerifier_aWrongAudience_aDeclinedConsent_andARequestThatOfferedNoSystem_areNeverProved() = runTest(dispatcher) {
+        for ((name, make) in listOf<Pair<String, () -> Pair<EngineCzk, SignRequestMessage>>>(
+            "untrusted" to { engineCzk(trusted = false) to redirectSign() },
+            "audience" to { engineCzk() to redirectSign(audience = "x509_san_dns:evil.example") },
+            "declined" to { engineCzk(consent = { false }) to redirectSign() },
+            "no system offered" to { engineCzk(offersCircuit = false) to redirectSign() },
+            "a pick that is not a candidate" to { engineCzk() to redirectSign(creds = listOf("999")) },
+        )) {
+            val (e, req) = make()
+            e.matchOnce()
+            advanceUntilIdle()
+            e.sign.emit(req)
+            advanceUntilIdle()
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
+            verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+            verify(exactly = 0) { e.engine.cancelFlow(any()) }
+            if (name != "declined") assertEquals(name, 0, e.s.prover.calls)
+        }
+    }
+
+    @Test
+    fun circuitZkRedirect_withTheFeatureOff_orAMixedRequest_orATransactionData_nothingIsOffered() = runTest(dispatcher) {
+        val off = engineCzk(flagOn = false)
+        off.matchOnce()
+        advanceUntilIdle()
+        verify(exactly = 1) { off.engine.sendCredentialsMatched("f1", emptyList(), any()) }
+
+        val mixed = engineCzk()
+        mixed.matchOnce(Json.parseToJsonElement("""{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"${CzkFixtures.DOCTYPE}"}},{"id":"p","format":"mso_mdoc","meta":{"doctype_value":"x"},"claims":[{"path":["x","y"]}]}]}"""))
+        advanceUntilIdle()
+        verify(exactly = 1) { mixed.engine.sendCredentialsMatched("f1", emptyList(), any()) }
+
+        val tx = engineCzk()
+        tx.matchOnce()
+        advanceUntilIdle()
+        tx.sign.emit(redirectSign().let { it.copy(params = it.params.copy(transactionData = listOf(org.siros.sdk.transport.wmp.openid4x.TransactionData(type = "t", credentialIds = listOf("c"), payload = JsonObject(emptyMap()))))) })
+        advanceUntilIdle()
+        verify(exactly = 0) { tx.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, tx.s.prover.calls)
     }
 
     @Test
@@ -6762,19 +7531,19 @@ class SirosWalletTest {
         // The only id comes from the PDP list; the client id (an x509_hash one here) is not parsed for it.
         val s = czkSetup(trust = czkIds("x509_san_dns" to "pdp.example"))
         assertEquals(
-            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("pdp.example")),
+            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:pdp.example")),
             czkPseudonymOf(czkRun(s, czkRequest(clientId = "x509_hash:abcdef"))),
         )
     }
 
     @Test
-    fun circuitZkDcApi_theVerifierIdFromThePdpIsHashedByteForByte_notNormalisedByTheWallet() = runTest(dispatcher) {
-        // Canonicalisation (lower case, no trailing dot, no prefix) is the PDP's job; the wallet must not redo it.
+    fun circuitZkDcApi_theBareDnsFromThePdpIsPrefixed_andNotOtherwiseNormalisedByTheWallet() = runTest(dispatcher) {
+        // The PDP returns the bare A-label; the wallet adds the rulebook prefix and nothing else (lower case, no trailing dot: the PDP's job).
         val mixed = "Rp.Example.COM"
         val s = czkSetup(trust = czkIds("x509_san_dns" to mixed))
         val got = czkPseudonymOf(czkRun(s, czkRequest()))
-        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym(mixed)), got)
-        assertTrue(got != org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym(mixed.lowercase())))
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:$mixed")), got)
+        assertTrue(got != org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:" + mixed.lowercase())))
     }
 
     @Test
@@ -6785,7 +7554,7 @@ class SirosWalletTest {
         ))
         val s = czkSetup(functions = bare, trust = czkIds("x509_san_dns" to "pdp.example"))
         assertEquals(
-            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("pdp.example")),
+            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:pdp.example")),
             czkPseudonymOf(czkRun(s, czkRequest())),
         )
         czkRefused(
@@ -6855,11 +7624,11 @@ class SirosWalletTest {
         )
         // The request naming "semantic" does not make the wallet use semantic when its list says otherwise.
         val other = czkSetup(
-            functions = listOf(czkFnOfType("semantic")), types = listOf("uri"),
-            trust = czkIds("semantic" to "semantic_id:A", "uri" to "uri:B"),
+            functions = listOf(czkFnOfType("semantic")), types = listOf("x509_san_dns"),
+            trust = czkIds("semantic" to "semantic_id:A", "x509_san_dns" to "b.example"),
         )
         assertEquals(
-            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("uri:B")),
+            org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:b.example")),
             czkPseudonymOf(czkRun(other, czkRequest())),
         )
     }
@@ -6877,29 +7646,59 @@ class SirosWalletTest {
 
     @Test
     fun circuitZkDcApi_theWalletsOrderIsRespected_firstTypeWinsWhenBothArePresent_theSecondWhenTheFirstIsAbsent() = runTest(dispatcher) {
-        val both = czkSetup(trust = czkIds("x509_san_dns" to "dns:second", "semantic" to "semantic_id:first"))
+        val both = czkSetup(trust = czkIds("x509_san_dns" to "second.example", "semantic" to "semantic_id:first"))
         assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("semantic_id:first")), czkPseudonymOf(czkRun(both, czkRequest())))
-        val onlySecond = czkSetup(trust = czkIds("x509_san_dns" to "dns:second"))
-        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("dns:second")), czkPseudonymOf(czkRun(onlySecond, czkRequest())))
+        val onlySecond = czkSetup(trust = czkIds("x509_san_dns" to "second.example"))
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:second.example")), czkPseudonymOf(czkRun(onlySecond, czkRequest())))
         // Reordering the wallet's list flips the winner for the same PDP answer.
         val reordered = czkSetup(
             types = listOf("x509_san_dns", "semantic"),
-            trust = czkIds("x509_san_dns" to "dns:second", "semantic" to "semantic_id:first"),
+            trust = czkIds("x509_san_dns" to "second.example", "semantic" to "semantic_id:first"),
         )
-        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("dns:second")), czkPseudonymOf(czkRun(reordered, czkRequest())))
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:second.example")), czkPseudonymOf(czkRun(reordered, czkRequest())))
     }
 
     @Test
     fun circuitZkDcApi_aTypeWithConflictingDistinctValuesIsDeclined_andTheNextTypeIsTried() = runTest(dispatcher) {
         val s = czkSetup(
-            trust = czkIds("semantic" to "semantic_id:1", "semantic" to "semantic_id:2", "x509_san_dns" to "dns:ok"),
+            trust = czkIds("semantic" to "semantic_id:1", "semantic" to "semantic_id:2", "x509_san_dns" to "ok.example"),
         )
-        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("dns:ok")), czkPseudonymOf(czkRun(s, czkRequest())))
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:ok.example")), czkPseudonymOf(czkRun(s, czkRequest())))
         // Conflict on the only available type: nothing resolves, refused.
         czkRefused(
             czkSetup(trust = czkIds("semantic" to "semantic_id:1", "semantic" to "semantic_id:2")),
             czkRequest(), reason = org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.VERIFIER_ID_UNAVAILABLE,
         )
+    }
+
+    @Test
+    fun circuitZkDcApi_onlyTheRulebookVerifierIdFormsAreTakenFromThePdp() = runTest(dispatcher) {
+        // A semantic value without its prefix, and the types that are no v0.4 verifier id form, are never used.
+        for ((name, ids) in listOf(
+            "semantic without prefix" to arrayOf("semantic" to "A"),
+            "x509_san_uri" to arrayOf("x509_san_uri" to "https://rp.example/x"),
+            "decentralized_identifier" to arrayOf("decentralized_identifier" to "did:web:rp.example"),
+            "openid_federation" to arrayOf("openid_federation" to "https://rp.example"),
+        )) {
+            czkRefused(
+                czkSetup(types = listOf("semantic", "x509_san_dns", "x509_san_uri", "decentralized_identifier", "openid_federation"), trust = czkIds(*ids)),
+                czkRequest(), reason = org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.VERIFIER_ID_UNAVAILABLE,
+            )
+        }
+    }
+
+    @Test
+    fun authZenSource_aGoTrustShapedBareDns_resolvesToThePrefixedVerifierId_withTheArchiveHash() = runTest(dispatcher) {
+        val trust = TrustResult(trusted = true, context = buildJsonObject {
+            putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", "verifier.example"); put("basis", "client-id-binding") }) }
+        })
+        val ctx = VerifierIdContext(
+            org.siros.sdk.wallet.dcapi.DCAPIRequest(clientId = "x509_san_dns:verifier.example", responseMode = "direct_post.jwt", nonce = "n", dcqlQuery = null, clientMetadata = null, protocol = "openid4vp-redirect", state = null),
+            trust, "https://verifier.example",
+        )
+        val id = AuthZENSource("x509_san_dns").resolve(ctx)
+        assertEquals("x509_san_dns:verifier.example", id)
+        assertTrue(sha256HexOf(id!!.toByteArray()).startsWith("6eae85a0"))
     }
 
     @Test
@@ -6929,7 +7728,7 @@ class SirosWalletTest {
         // The PDP wins over a registered source for the same type, which is then not consulted.
         calls.clear()
         val both = czkSetup(trust = czkIds("x509_san_dns" to "from-pdp"), sources = listOf(FixedSource("x509_san_dns", "host-id", calls)))
-        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("from-pdp")), czkPseudonymOf(czkRun(both, czkRequest())))
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:from-pdp")), czkPseudonymOf(czkRun(both, czkRequest())))
         assertTrue(calls.isEmpty())
     }
 
@@ -7488,14 +8287,14 @@ class SirosWalletTest {
             TrustResult(trusted = true, context = buildJsonObject { put("verifier_ids", ids) }), "https://rp.example",
         )
         val ids = Json.parseToJsonElement(
-            """[{"verifier_id_type":"semantic","verifier_id":""},{"verifier_id_type":"dns","verifier_id":"d"},
-               {"verifier_id_type":"uri","verifier_id":"u1"},{"verifier_id_type":"uri","verifier_id":"u2"},
-               {"verifier_id_type":"semantic","verifier_id":"one","basis":"x5c-chain"},{"verifier_id_type":"semantic","verifier_id":"one"}]""",
+            """[{"verifier_id_type":"semantic","verifier_id":""},{"verifier_id_type":"x509_san_dns","verifier_id":"d1"},
+               {"verifier_id_type":"x509_san_dns","verifier_id":"d2"},{"verifier_id_type":"uri","verifier_id":"u"},
+               {"verifier_id_type":"semantic","verifier_id":"semantic_id:one","basis":"x5c-chain"},{"verifier_id_type":"semantic","verifier_id":"semantic_id:one"}]""",
         )
-        assertEquals("one", AuthZENSource("semantic").resolve(ctx(ids)))
+        assertEquals("semantic_id:one", AuthZENSource("semantic").resolve(ctx(ids)))
         // Distinct values of one type: declined, not guessed.
-        assertNull(AuthZENSource("uri").resolve(ctx(ids)))
-        assertEquals("d", AuthZENSource("dns").resolve(ctx(ids)))
+        assertNull(AuthZENSource("x509_san_dns").resolve(ctx(ids)))
+        // A type that is no rulebook verifier id form is never taken.
         assertNull(AuthZENSource("uri").resolve(ctx(ids)))
     }
 
@@ -7553,6 +8352,23 @@ class SirosWalletTest {
             org.junit.Assert.assertThrows(bad.toString(), IllegalArgumentException::class.java) { VerifierIdRegistry(bad) }
             org.junit.Assert.assertThrows(bad.toString(), IllegalArgumentException::class.java) { WalletConfig(backendUrl = "https://b.example", circuitZkVerifierIdTypes = bad) }
         }
+    }
+
+    @Test
+    fun verifierIdRegistry_earlyCheck_neverAsksAHostSourceWithTheEmptyMatchTimeContext() = runTest(dispatcher) {
+        val ctx = VerifierIdContext(
+            org.siros.sdk.wallet.dcapi.DCAPIRequest(
+                clientId = "c", responseMode = "direct_post.jwt", nonce = "", dcqlQuery = null, clientMetadata = null,
+                keyMaterial = null, protocol = "openid4vp-redirect", state = null,
+            ),
+            TrustResult(trusted = true), "",
+        )
+        val calls = mutableListOf<String>()
+        val custom = VerifierIdRegistry(listOf("a"), listOf(FixedSource("a", "a-id", calls)))
+        assertEquals(VerifierIdRegistry.EarlyCheck.Skipped, custom.earlyCheck(ctx))
+        assertEquals("a host source is not called at match time", emptyList<String>(), calls)
+        // Without a host source the PDP answer alone decides, now.
+        assertEquals(VerifierIdRegistry.EarlyCheck.Unresolvable, VerifierIdRegistry(listOf("a")).earlyCheck(ctx))
     }
 
     @Test
@@ -10252,6 +11068,18 @@ class SirosWalletTest {
         // now discards this flow's ZK issuance preparation, so a null map
         // NPEs there.
         // Disabled by default so cache behaviour never leaks into other tests.
+        if ("zkSigningMutex" !in values) {
+            values["zkSigningMutex"] = kotlinx.coroutines.sync.Mutex()
+        }
+        if ("zkSignJobsByFlow" !in values) {
+            values["zkSignJobsByFlow"] = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        }
+        if ("lastTrustResults" !in values) {
+            values["lastTrustResults"] = mutableMapOf<String, TrustResult>()
+        }
+        if ("circuitZkClientMetadataByFlow" !in values) {
+            values["circuitZkClientMetadataByFlow"] = mutableMapOf<String, JsonObject>()
+        }
         if ("trustDecisionCache" !in values) {
             values["trustDecisionCache"] = TrustDecisionCache(java.time.Duration.ZERO)
         }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -835,6 +836,8 @@ class SirosWallet private constructor(
     private fun bumpSessionGeneration() {
         sessionGeneration += 1
         reloginDoneForGeneration = false
+        // A zkp_req signing waiting on the user belongs to the session that just ended or was replaced.
+        stopAllZkSigning()
     }
 
     @Synchronized
@@ -1882,6 +1885,8 @@ class SirosWallet private constructor(
      * refused this installation.
      */
     private fun endSessionLocally() {
+        // A zkp_req signing still waiting on the user belongs to the session that ends here: nothing of it may act on a later one.
+        stopAllZkSigning()
         engineStateJob?.cancel()
         engineStateJob = null
         engineSession?.disconnect()
@@ -2593,7 +2598,10 @@ class SirosWallet private constructor(
         credentialId: Long,
         disclosedClaims: List<String>?,
         sessionTranscriptBytes: ByteArray,
-    ): ByteArray {
+    ): ByteArray = zkSigningMutex.withLock {
+        // The same lock as every other path that consumes a credential instance (DC API, the engine's zkp_req redirect route): the
+        // eligibility check, the signing and the use record are one step, so a redirect waiting on its consent dialog cannot present
+        // the single copy that this proximity presentation also uses.
         val credential = credentialStore.getById(credentialId)
             ?: throw WalletException("Credential not found: $credentialId")
         val allInstances = credentialStore.getAll().filter { it.batchId == credential.batchId }
@@ -2614,7 +2622,7 @@ class SirosWallet private constructor(
             requestedClaims = disclosedClaims ?: emptyList(),
             timestamp = System.currentTimeMillis(),
         ))
-        return response
+        response
     }
 
     /**
@@ -3881,6 +3889,15 @@ class SirosWallet private constructor(
         rawRequestJson: String,
         origin: String,
         selectedCredentialIds: List<Long>? = null,
+    ): DCAPIPresentationResult =
+        // One presentation at a time across EVERY path that consumes a credential instance (this one, in all its formats, and the
+        // engine's zkp_req redirect route): eligibility and the use record happen under the same lock.
+        zkSigningMutex.withLock { handleDCAPIRequestSerialized(rawRequestJson, origin, selectedCredentialIds) }
+
+    private suspend fun handleDCAPIRequestSerialized(
+        rawRequestJson: String,
+        origin: String,
+        selectedCredentialIds: List<Long>?,
     ): DCAPIPresentationResult {
         val request = try {
             DCAPIRequestParser.parse(
@@ -4357,6 +4374,87 @@ class SirosWallet private constructor(
         if (results.isEmpty() || results.any { !CredentialUtils.isCircuitZkFormat(it.format) }) refuse("query-shape", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
         if (results.any { it.circuitZkPlan == null || it.candidates.isEmpty() }) refuse("no-match", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NO_MATCHING_CREDENTIAL)
 
+        var encryptionJwk: com.nimbusds.jose.jwk.JWK? = null
+        val answer = answerCircuitZkQueries(
+            results = results,
+            allCreds = allCreds,
+            selectedCredentialIds = selectedCredentialIds,
+            buildTranscript = {
+                encryptionJwk = if (request.responseMode == "dc_api.jwt") {
+                    findEncryptionJwk(request.clientMetadata) ?: refuse("no-encryption-key", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+                } else {
+                    null
+                }
+                MdocDeviceResponseBuilder.buildDCAPISessionTranscript(
+                    origin = origin,
+                    nonce = request.nonce,
+                    encryptionPublicJwkThumbprint = encryptionJwk?.computeThumbprint()?.toString(),
+                )
+            },
+            trust = trust,
+            verifierContext = VerifierIdContext(request, trust, origin),
+            verifiedClientIdDisplayName = request.clientId?.takeIf { request.keyMaterial != null }?.let { ClientIdScheme.parse(it).displayName },
+            attestedOrigin = origin,
+            requestSigned = request.keyMaterial != null,
+            support = support,
+            prover = prover,
+            registry = registry,
+            consentHandler = consentHandler,
+            refuse = ::refuse,
+        )
+        val tokensByQueryId = answer.tokensByQueryId
+        val usedIds = answer.usedIds
+
+        val finalResponseJson = buildDcApiResponseJson(request, tokensByQueryId, encryptionJwk)
+        recordPresentation(PresentationRecord(
+            id = randomUint32Id(),
+            flowId = "dc-api-${java.util.UUID.randomUUID()}",
+            verifierName = trust.entityName,
+            credentialIds = usedIds,
+            credentialNames = usedIds.mapNotNull { id -> allCreds.find { it.id == id }?.metadata?.name },
+            // No claim names and no pseudonym: nothing is disclosed but a proof.
+            requestedClaims = emptyList(),
+            zkProof = true,
+            timestamp = System.currentTimeMillis(),
+        ))
+        return DCAPIPresentationResult(responseJson = finalResponseJson, credentialIds = usedIds)
+    }
+
+    /** What [answerCircuitZkQueries] produced: the `vp_token` entries per query id (one presentation each) and the credentials used. */
+    private class CircuitZkAnswer(val tokensByQueryId: Map<String, List<kotlinx.serialization.json.JsonElement>>, val usedIds: List<Long>)
+
+    /**
+     * The transport-neutral core of answering `circuit_zk` / `zkp_req` queries, shared by the DC API path
+     * ([handleCircuitZkDcApi]) and the redirect / QR path through the engine ([handleCircuitZkEngineSignPresentation]): the
+     * user's pick, the local pre-check, the verifier identity (resolved ONCE), the merge rule, ONE consent for all queries and only
+     * then the secret seed, the signature and the proof, and the check of every response against its request. Every refusal goes through
+     * [refuse], which each transport turns into its own decline. [buildTranscript] is called after the pick has been checked, so the
+     * order of refusals does not depend on the transport.
+     */
+    private suspend fun answerCircuitZkQueries(
+        results: List<CredentialMatcher.MatchResult>,
+        allCreds: List<StoredCredential>,
+        selectedCredentialIds: List<Long>,
+        buildTranscript: () -> ByteArray,
+        trust: TrustResult,
+        verifierContext: VerifierIdContext,
+        verifiedClientIdDisplayName: String?,
+        attestedOrigin: String,
+        requestSigned: Boolean,
+        support: org.siros.sdk.credentials.CircuitZkSupport,
+        prover: org.siros.sdk.keystore.CircuitZkProver,
+        registry: VerifierIdRegistry,
+        consentHandler: PresentationConsentHandler,
+        refuse: (String, org.siros.sdk.wallet.dcapi.DCAPIRefusalReason) -> Nothing,
+        /**
+         * The credential chosen for each query (query id to credential id), when the transport states it (the engine's
+         * `credentials_to_include`): every query then needs its own entry, answered with that credential (or a copy of its batch) and no
+         * other, so a credential may answer several queries. Null for the DC API, whose picker reports plain ids (positional preference).
+         */
+        selectionByQuery: Map<String, Long>? = null,
+        /** Asked right after the user answered: false (the flow, connection or session ended meanwhile) refuses before anything is proved. */
+        stillValid: () -> Boolean = { true },
+    ): CircuitZkAnswer {
         // No silent first-eligible: the credential that is proved is the one the user picked, and the consent
         // screen names it. A call that names none is refused, never read as "any".
         if (selectedCredentialIds.isEmpty()) refuse("no-pick", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
@@ -4373,23 +4471,12 @@ class SirosWallet private constructor(
             refuse("selection-not-candidate", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
         }
 
-        val encryptionJwk = if (request.responseMode == "dc_api.jwt") {
-            findEncryptionJwk(request.clientMetadata) ?: refuse("no-encryption-key", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
-        } else {
-            null
-        }
-        val encryptionThumbprint = encryptionJwk?.computeThumbprint()?.toString()
-        val transcript = MdocDeviceResponseBuilder.buildDCAPISessionTranscript(
-            origin = origin,
-            nonce = request.nonce,
-            encryptionPublicJwkThumbprint = encryptionThumbprint,
-        )
+        val transcript = buildTranscript()
         // Every function the wallet declared (and so described to the user) can also be presented.
         val presenterHandlers = org.siros.sdk.keystore.PredicateFunctionHandler.handlersFor(config.circuitZkPredicateFunctions)
         val presenter = (keystore as? org.siros.sdk.keystore.HolderWitnessSource)
             ?.circuitZkPresenter(prover, support.circuits, support.validator, handlers = presenterHandlers, serving = support.serving)
             ?: org.siros.sdk.keystore.CircuitZkPresenter(prover, support.circuits, support.validator, NoWitnessProvider, handlers = presenterHandlers, serving = support.serving)
-        val verifierContext = VerifierIdContext(request, trust, origin)
         val today = java.time.LocalDate.now(java.time.ZoneOffset.UTC)
 
         // ── Phase 1: decide what would be presented. No secret is touched here: no seed, no signature, no proof. ──
@@ -4407,7 +4494,12 @@ class SirosWallet private constructor(
             val plan = result.circuitZkPlan ?: refuse("no-plan", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
             // Best effort for a multi-credential selection: when the picker reported one credential per
             // query, the one at this query's position goes first; otherwise picks keep their reported order.
-            val pickedHere = result.candidates.filter(::picked).sortedBy { c ->
+            val pickedHere = if (selectionByQuery != null) {
+                // An explicit choice per query: none stated is refused, and the choice must be a candidate of THAT query.
+                val want = selectionByQuery[result.queryId] ?: refuse("query-without-pick", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+                val wantBatch = allCreds.firstOrNull { it.id == want }?.batchId
+                result.candidates.filter { c -> c.id == want || (wantBatch != null && c.batchId == wantBatch) }
+            } else result.candidates.filter(::picked).sortedBy { c ->
                 val position = selectedCredentialIds.indexOf(c.id).let { if (it < 0) selectedCredentialIds.size else it }
                 if (selectedCredentialIds.size == results.size && position == queryIndex) -1 else position
             }
@@ -4468,15 +4560,16 @@ class SirosWallet private constructor(
                 identifier = trust.identifier,
                 intermediaryRisk = (trust.context?.get("intermediary_risk") as? kotlinx.serialization.json.JsonPrimitive)?.booleanOrNull == true,
             ),
-            verifiedClientIdDisplayName = request.clientId?.takeIf { request.keyMaterial != null }?.let { ClientIdScheme.parse(it).displayName },
-            attestedOrigin = origin,
+            verifiedClientIdDisplayName = verifiedClientIdDisplayName,
+            attestedOrigin = attestedOrigin,
             verifierIdType = resolvedVerifier?.type,
-            requestSigned = request.keyMaterial != null,
+            requestSigned = requestSigned,
             today = today,
             locale = java.util.Locale.getDefault().toLanguageTag(),
             predicates = config.circuitZkPredicateFunctions,
         ) ?: refuse("consent-items", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
         if (!askPresentationConsent(consentHandler, consentRequest)) refuse("consent-declined", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
+        if (!stillValid()) refuse("ended", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
 
         // ── Phase 2: the user agreed. Only now is the secret seed fetched and anything signed or proved. ──
         val tokensByQueryId = linkedMapOf<String, List<kotlinx.serialization.json.JsonElement>>()
@@ -4525,20 +4618,7 @@ class SirosWallet private constructor(
             tokensByQueryId[p.queryId] = entry
             usedIds += cred.id
         }
-
-        val finalResponseJson = buildDcApiResponseJson(request, tokensByQueryId, encryptionJwk)
-        recordPresentation(PresentationRecord(
-            id = randomUint32Id(),
-            flowId = "dc-api-${java.util.UUID.randomUUID()}",
-            verifierName = trust.entityName,
-            credentialIds = usedIds,
-            credentialNames = usedIds.mapNotNull { id -> allCreds.find { it.id == id }?.metadata?.name },
-            // No claim names and no pseudonym: nothing is disclosed but a proof.
-            requestedClaims = emptyList(),
-            zkProof = true,
-            timestamp = System.currentTimeMillis(),
-        ))
-        return DCAPIPresentationResult(responseJson = finalResponseJson, credentialIds = usedIds)
+        return CircuitZkAnswer(tokensByQueryId, usedIds)
     }
 
     /**
@@ -4798,6 +4878,7 @@ class SirosWallet private constructor(
                 // Whatever this flow still sends (typically its cancellation error)
                 // must not act on a retry that starts before the socket is replaced.
                 abandonedFlowIds.add(current.flowId)
+                stopZkSigning(current.flowId, refuse = true)
                 try {
                     engineSession?.cancelFlow(current.flowId)
                 } catch (e: Exception) {
@@ -5360,6 +5441,9 @@ class SirosWallet private constructor(
      */
     private val pendingMatchResultsByFlow = mutableMapOf<String, List<CredentialMatcher.MatchResult>>()
 
+    /** The verifier's `client_metadata` of a `zkp_req` request, per flow, from its match request (the plans were made with it). */
+    private val circuitZkClientMetadataByFlow = mutableMapOf<String, JsonObject>()
+
     /**
      * Fires [ZkMdocPresentation.prewarmVega] for every ZK-eligible match as
      * soon as a verifier's request names its claims - well before the user
@@ -5477,7 +5561,7 @@ class SirosWallet private constructor(
      */
     private suspend fun reportSignFailure(flowId: String, message: String, notifyError: Boolean = true) {
         terminatedFlowIds.add(flowId)
-        pendingMatchResultsByFlow.remove(flowId)
+        clearFlowMatchState(flowId)
         if (notifyError) eventListener?.onFlowError(flowId, message)
         // A sign-request failure during issuance (e.g. the FIDO2 PIN_INVALID
         // this was written for) is a client-side termination of that
@@ -6190,6 +6274,35 @@ class SirosWallet private constructor(
         val session: WalletEngineSession,
         val generation: Int,
     )
+    /** The zkp_req signing of a flow that waits on the user (consent), so a cancelled or ended flow can stop it. */
+    private class ZkSignJob(val job: kotlinx.coroutines.Job, val messageId: String?, val connection: Int)
+    private val zkSignJobsByFlow = java.util.concurrent.ConcurrentHashMap<String, ZkSignJob>()
+    private val zkSigningMutex = kotlinx.coroutines.sync.Mutex()
+
+    /** Ends every pending zkp_req signing without refusing (the engine session is gone): used when the session ends. */
+    private fun stopAllZkSigning() {
+        val all = zkSignJobsByFlow.values.toList()
+        zkSignJobsByFlow.clear()
+        all.forEach { it.job.cancel() }
+    }
+
+    /**
+     * Ends a flow's pending zkp_req signing: nothing is proved or sent for it afterwards, and (when [refuse]) the sign request it
+     * was answering is refused, which ends the engine's signing wait instead of leaving it to its timeout.
+     */
+    private fun stopZkSigning(flowId: String, refuse: Boolean) {
+        val pending = zkSignJobsByFlow.remove(flowId) ?: return
+        if (!pending.job.isActive) return
+        pending.job.cancel()
+        if (refuse) {
+            try {
+                engineSession?.sendSignRefusal(flowId, pending.messageId, "cancelled")
+            } catch (e: Exception) {
+                Timber.w("Failed to send the sign refusal for a cancelled flow (${e.javaClass.simpleName})")
+            }
+        }
+    }
+
     private val abandonedFlowIds: MutableSet<String> =
         java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
 
@@ -7379,6 +7492,160 @@ class SirosWallet private constructor(
         engine.sendSignResponse(msg.flowId, responseJwe = jwe, messageId = msg.messageId)
     }
 
+    /** A `zkp_req` request the wallet declines on the engine transport: the coarse category is shown to the USER only. */
+    private class CircuitZkEngineRefusal(val step: String, val reason: org.siros.sdk.wallet.dcapi.DCAPIRefusalReason) : Exception(step)
+
+    /**
+     * The `zkp_req` presentation of a redirect (QR / same-device link, `direct_post.jwt`) request relayed by the engine: the engine has
+     * fetched and verified the request object and evaluated trust; this answers its `sign_presentation` request with the
+     * `vp_token` object `{queryId: [base64url(CBOR ZkpPresentation)]}`, which the engine encrypts for the verifier (JARM) and posts.
+     * Everything else is [answerCircuitZkQueries], shared with the DC API path. The session transcript is the OpenID4VPHandover over
+     * `[client id, nonce, JWK thumbprint, response_uri]`: the thumbprint of the verifier's response-encryption key is REQUIRED (the
+     * response is always encrypted over redirects), so a request without one is refused, never answered with a null.
+     * A refusal or a decline answers the sign_request with SIGN_REFUSED, which the engine answers to the verifier with
+     * `access_denied` and no description.
+     */
+    private suspend fun handleCircuitZkEngineSignPresentation(engine: WalletEngineSession, msg: SignRequestMessage) {
+        val flowId = msg.flowId
+        // The session this request belongs to: a result that comes back after it ended (a logout, a new login) acts on nothing.
+        val generation = sessionGeneration
+        val connection = msg.connectionGeneration
+        fun ended() = flowId in terminatedFlowIds || flowId in abandonedFlowIds || sessionGeneration != generation || engine.connectionGeneration != connection ||
+            engine.state.value != WalletEngineSession.State.CONNECTED
+        try {
+            // One zkp_req presentation at a time: eligibility (a consumed copy) is checked and its use recorded under this lock, so two
+            // overlapping requests can never present the same credential instance. A request waiting here that ended is dropped.
+            zkSigningMutex.withLock {
+            if (ended()) return
+            fun refuse(step: String, reason: org.siros.sdk.wallet.dcapi.DCAPIRefusalReason): Nothing = throw CircuitZkEngineRefusal(step, reason)
+            val params = msg.params
+            val audience = params.audience.orEmpty()
+            val nonce = params.nonce.orEmpty()
+            val responseUri = params.responseUri.orEmpty()
+            val thumbprint = params.verifierJwkThumbprint.orEmpty()
+            if (audience.isEmpty() || nonce.isEmpty() || responseUri.isEmpty() || thumbprint.isEmpty()) {
+                refuse("handover-inputs", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            }
+            // Fail closed: no transaction_data pipeline here either.
+            if (!params.transactionData.isNullOrEmpty()) refuse("transaction-data", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            val support = circuitZkSupport ?: refuse("disabled", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            val prover = circuitZkProver ?: defaultCircuitZkProverHolder.value
+            val registry = verifierIdRegistry ?: refuse("no-sources", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            val consentHandler = presentationConsentHandler ?: refuse("no-consent-handler", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.CONSENT_UNAVAILABLE)
+            // The trust the engine had evaluated (read before validateAudience consumes it); the audience must be the trusted verifier.
+            val trust = lastTrustResults[flowId] ?: refuse("no-trust", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.TRUST_UNAVAILABLE)
+            if (!trust.trusted) refuse("trust", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NOT_TRUSTED)
+            // A trusted identity is not proof that the request was SIGNED: only the schemes whose request object is signed with the
+            // identified certificate (and which the engine verifies) are answered; redirect_uri, pre-registered and the like are not.
+            when (ClientIdScheme.parse(audience)) {
+                is ClientIdScheme.X509SanDns, is ClientIdScheme.X509SanUri, is ClientIdScheme.X509Hash -> Unit
+                else -> refuse("unsigned-scheme", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NOT_TRUSTED)
+            }
+            try {
+                validateAudience(flowId, audience)
+            } catch (e: WalletException) {
+                refuse("audience", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NOT_TRUSTED)
+            }
+            val results = pendingMatchResultsByFlow.remove(flowId).orEmpty()
+            if (results.isEmpty() || results.any { !CredentialUtils.isCircuitZkFormat(it.format) || it.circuitZkPlan == null }) {
+                refuse("query-shape", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            }
+            val clientMetadata = circuitZkClientMetadataByFlow.remove(flowId) ?: params.clientMetadata as? JsonObject
+            // The wallet's pick for this flow, in the engine's order; an id that is not a number is refused, never skipped.
+            // Each reference names its query, and the choice is kept per query (a credential may answer several): a reference to an
+            // unknown query, one without a number, or two different choices for one query is refused; a query without a reference is
+            // refused by the shared core.
+            val refs = params.credentialsToInclude.orEmpty()
+            if (refs.any { ref -> results.none { it.queryId == ref.credentialQueryId } }) refuse("selection-query", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+            val selectionByQuery = HashMap<String, Long>()
+            for (ref in refs) {
+                val id = ref.credentialId.toLongOrNull() ?: refuse("selection", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+                val queryId = ref.credentialQueryId ?: refuse("selection-query", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+                if (selectionByQuery.put(queryId, id).let { it != null && it != id }) refuse("selection-ambiguous", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
+            }
+            val picked = selectionByQuery.values.distinct()
+            val origin = try {
+                java.net.URI(responseUri).let { u -> "${u.scheme}://${u.authority}" }
+            } catch (e: Exception) {
+                refuse("response-uri", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            }
+            // What the engine authenticated, in the shape the verifier-id sources and the consent read (never the engine's raw message).
+            val request = org.siros.sdk.wallet.dcapi.DCAPIRequest(
+                clientId = audience,
+                responseMode = "direct_post.jwt",
+                nonce = nonce,
+                dcqlQuery = null,
+                clientMetadata = clientMetadata,
+                protocol = "openid4vp-redirect",
+                state = null,
+            )
+            val allCreds = credentialStore.getAll()
+            // The match step cached its candidates; what is proved is what the store holds NOW: a credential deleted (or replaced) since
+            // is dropped / re-read, and a query left without a candidate is refused by the shared core.
+            val currentResults = results.map { r -> r.copy(candidates = r.candidates.mapNotNull { c -> allCreds.firstOrNull { it.id == c.id } }) }
+            val answer = answerCircuitZkQueries(
+                results = currentResults,
+                allCreds = allCreds,
+                selectedCredentialIds = picked,
+                buildTranscript = {
+                    try {
+                        MdocDeviceResponseBuilder.buildCircuitZkRedirectSessionTranscript(audience, nonce, responseUri, thumbprint)
+                    } catch (e: IllegalArgumentException) {
+                        refuse("handover-thumbprint", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+                    }
+                },
+                trust = trust,
+                verifierContext = VerifierIdContext(request, trust, origin),
+                verifiedClientIdDisplayName = ClientIdScheme.parse(audience).displayName,
+                attestedOrigin = origin,
+                // The engine verified the signed request object and the trust decision is positive for its key.
+                requestSigned = true,
+                support = support,
+                prover = prover,
+                registry = registry,
+                consentHandler = consentHandler,
+                refuse = ::refuse,
+                selectionByQuery = selectionByQuery,
+                stillValid = { !ended() },
+            )
+            // The flow may have ended while the user was asked: nothing is recorded or sent for it then.
+            if (ended()) return
+            val vpToken = JsonObject(answer.tokensByQueryId.mapValues { (_, tokens) -> kotlinx.serialization.json.JsonArray(tokens) }).toString()
+            recordPresentation(PresentationRecord(
+                id = randomUint32Id(),
+                flowId = flowId,
+                verifierName = trust.entityName,
+                credentialIds = answer.usedIds,
+                credentialNames = answer.usedIds.mapNotNull { id -> allCreds.find { it.id == id }?.metadata?.name },
+                requestedClaims = emptyList(),
+                zkProof = true,
+                timestamp = System.currentTimeMillis(),
+            ))
+            // Recording the history can suspend (keystore sync): check again, as late as possible, that this connection and flow are
+            // still the ones being answered.
+            if (!currentCoroutineContext().isActive || ended()) return
+            engine.sendSignResponse(flowId, vpToken = vpToken, messageId = msg.messageId)
+            }
+        } catch (e: CircuitZkEngineRefusal) {
+            if (ended()) return
+            // Only the step and the coarse reason are logged: never a request content, an id or a value.
+            Timber.w("zkp_req request refused on the engine transport (step=${e.step}, reason=${e.reason}) for flow $flowId")
+            circuitZkClientMetadataByFlow.remove(flowId)
+            reportSignFailure(flowId, "Request not completed", notifyError = e.reason != org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.USER_DECLINED)
+            // The sign-stage refusal ends the engine's signing wait and answers the verifier access_denied (no description); the text is
+            // only the coarse step, never a request content.
+            engine.sendSignRefusal(flowId, msg.messageId, e.step)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (ended()) return
+            Timber.e("zkp_req presentation failed on the engine transport (${e.javaClass.simpleName}) for flow $flowId")
+            circuitZkClientMetadataByFlow.remove(flowId)
+            reportSignFailure(flowId, "Request not completed")
+            engine.sendSignRefusal(flowId, msg.messageId, "error")
+        }
+    }
+
     /** The legacy-transport `sign_presentation` for a request carrying `transaction_data` (see [signScaPresentation]). */
     private suspend fun handleScaEngineSignPresentation(engine: WalletEngineSession, msg: SignRequestMessage) {
         try {
@@ -7668,6 +7935,15 @@ class SirosWallet private constructor(
                 if (s == WalletEngineSession.State.REAUTH_REQUIRED) {
                     handleReauthenticationRequired()
                 }
+                // A zkp_req signing waits on the user for a flow of THIS connection: when the connection is gone, the signing (and the
+                // presentation lock it holds) goes with it, so an unrelated presentation is not held up by a stale dialog.
+                // CONNECTING too: forceReconnect() drops the old socket and goes straight to CONNECTING (never RECONNECTING), and a
+                // signing of the dropped connection must not keep the presentation lock until its dialog is answered.
+                if (s == WalletEngineSession.State.CONNECTING || s == WalletEngineSession.State.RECONNECTING || s == WalletEngineSession.State.FAILED ||
+                    s == WalletEngineSession.State.DISCONNECTED || s == WalletEngineSession.State.REAUTH_REQUIRED
+                ) {
+                    stopAllZkSigning()
+                }
             }
         }
         engine.connect(
@@ -7707,6 +7983,19 @@ class SirosWallet private constructor(
                 // An SCA request waits on the user (up to the consent limit); doing that inside this
                 // sequential collector would stall every other sign request (issuance proofs, client
                 // auth, attestation), so it is handled in its own coroutine.
+                // A zkp_req presentation (QR / same-device redirect) is answered by its own handler: the stored match results say so.
+                if (msg.action == "sign_presentation" && pendingMatchResultsByFlow[msg.flowId]?.any { CredentialUtils.isCircuitZkFormat(it.format) } == true) {
+                    // A signing still waiting on the user from an EARLIER connection (the socket was replaced) is stale: its flow is
+                    // gone with that connection, and it must neither act on this one nor hold up the new request.
+                    zkSignJobsByFlow.entries.filter { it.value.connection != msg.connectionGeneration }.forEach { (flow, old) ->
+                        if (zkSignJobsByFlow.remove(flow, old)) old.job.cancel()
+                    }
+                    val job = scope.launch { handleCircuitZkEngineSignPresentation(engine, msg) }
+                    val entry = ZkSignJob(job, msg.messageId, msg.connectionGeneration)
+                    zkSignJobsByFlow[msg.flowId] = entry
+                    job.invokeOnCompletion { zkSignJobsByFlow.remove(msg.flowId, entry) }
+                    return@collect
+                }
                 if (msg.action == "sign_presentation" && !msg.params?.transactionData.isNullOrEmpty()) {
                     scope.launch { handleScaEngineSignPresentation(engine, msg) }
                     return@collect
@@ -8000,8 +8289,11 @@ class SirosWallet private constructor(
 
                     // Filter credentials using DCQL query from the verifier
                     val dcqlQuery = msg.dcqlQuery?.jsonObject
+                    val clientMetadata = msg.clientMetadata as? JsonObject
                     val dcqlOutput = if (dcqlQuery != null) {
-                        CredentialMatcher.matchDcql(dcqlQuery, allCreds, zkSystemIds)
+                        // zkp_req queries are planned with the verifier's client_metadata (system_id_values / proof_system_values):
+                        // the same matcher, support and rules as the DC API path.
+                        CredentialMatcher.matchDcql(dcqlQuery, allCreds, zkSystemIds, circuitZkSupport, clientMetadata)
                     } else {
                         // No DCQL query — fall back to all credentials
                         CredentialMatcher.DcqlMatchOutput(
@@ -8025,16 +8317,14 @@ class SirosWallet private constructor(
                     // did, when this transport could not prove - would
                     // silently turn every engine-relayed ZK request into "no
                     // matching credential".
-                    // circuit_zk is not answered on this transport: a request with such a query (even one the
-                    // matcher could not read into a result) is refused whole, never answered by its ordinary queries.
-                    if (dcqlOutput.hasCircuitZkQuery) {
-                        val reason = "This transport does not answer circuit_zk requests"
-                        Timber.w("Match request for flow ${msg.flowId} carries a circuit_zk query; not answered")
-                        engine.sendMatchResponse(msg.flowId, emptyList(), reason)
-                        engine.sendCredentialsMatched(msg.flowId, emptyList(), reason)
+                    val zkPlan = planCircuitZkMatches(msg.flowId, dcqlOutput, clientMetadata, lastTrustResults[msg.flowId]?.identifier)
+                    if (zkPlan?.refusal != null) {
+                        Timber.i("Match request for flow ${msg.flowId}: a zkp_req request that cannot be answered; not answered (code=${zkPlan.code})")
+                        engine.sendMatchResponse(msg.flowId, emptyList(), zkPlan.refusal)
+                        engine.sendCredentialsMatched(msg.flowId, emptyList(), zkPlan.refusal)
                         return@collect
                     }
-                    val matchResults = dcqlOutput.queryResults
+                    val matchResults = zkPlan?.matchResults ?: dcqlOutput.queryResults
                     val candidates = matchResults.flatMap { it.candidates }.distinctBy { it.id }
                     // The query each candidate is answered under - first match
                     // wins, the same rule the sign handler applies. Built once
@@ -8048,7 +8338,7 @@ class SirosWallet private constructor(
                     // (CONSUME_NON_ZKP) and the history flag agree with what
                     // is actually sent.
                     val zkRequestedIds = matchResultByCredentialId
-                        .filterValues { it.format?.equals("mso_mdoc_zk", ignoreCase = true) == true }
+                        .filterValues { it.format?.equals("mso_mdoc_zk", ignoreCase = true) == true || CredentialUtils.isCircuitZkFormat(it.format) }
                         .keys
                     val isZk: (StoredCredential) -> Boolean = { it.id in zkRequestedIds }
 
@@ -8095,8 +8385,9 @@ class SirosWallet private constructor(
                         throw WalletException("Selected credential has no eligible copies remaining - renew it to get more")
                     }
 
-                    // Track this presentation
-                    recordPresentation(PresentationRecord(
+                    // Track this presentation. A zkp_req presentation is recorded once, when it is answered, from what was really
+                    // used: recording the pick here would also count it as consumed before anything was proved.
+                    if (zkPlan == null) recordPresentation(PresentationRecord(
                         id = randomUint32Id(),
                         flowId = msg.flowId,
                         credentialIds = selectedIds,
@@ -8113,6 +8404,23 @@ class SirosWallet private constructor(
                     pendingMatchResultsByFlow[msg.flowId] = matchResults
                     prewarmZkMatches(matchResults)
 
+                    // zkp_req: one entry per query (a credential may answer several), never the first-match-only view.
+                    val zkSelection = if (zkPlan != null) {
+                        circuitZkSelectionByQuery(matchResults, selectedIds) ?: run {
+                            val reason = "No credential was selected for every query"
+                            engine.sendMatchResponse(msg.flowId, emptyList(), reason)
+                            engine.sendCredentialsMatched(msg.flowId, emptyList(), reason)
+                            return@collect
+                        }
+                    } else null
+                    if (zkSelection != null) {
+                        engine.sendMatchResponse(msg.flowId, zkSelection.mapNotNull { (r, id) ->
+                            allCreds.find { it.id == id }?.let { cred ->
+                                CredentialMatch(credentialQueryId = r.queryId, credentialId = cred.id.toString(), format = cred.format, vct = CredentialUtils.vctOf(cred), availableClaims = null)
+                            }
+                        })
+                        return@collect
+                    }
                     val matches = selectedIds.mapNotNull { id ->
                         allCreds.find { it.id == id }?.let { cred ->
                             val queryId = matchResultByCredentialId[id]?.queryId
@@ -8125,7 +8433,8 @@ class SirosWallet private constructor(
                                 credentialId = cred.id.toString(),
                                 format = cred.format,
                                 vct = CredentialUtils.vctOf(cred),
-                                availableClaims = extractAvailableClaims(cred),
+                                // A zkp_req query discloses no claims (the engine's consent check would refuse any): offer none.
+                                availableClaims = if (matchResultByCredentialId[id]?.format?.let { CredentialUtils.isCircuitZkFormat(it) } == true) null else extractAvailableClaims(cred),
                             )
                         }
                     }
@@ -8150,6 +8459,12 @@ class SirosWallet private constructor(
                     msg.payload?.jsonObject?.get("trust_evaluation_required")?.jsonPrimitive?.boolean == true
                 ) {
                     handleTrustEvaluation(engine, msg.flowId, msg.payload!!.jsonObject)
+                }
+
+                // A trust decision the ENGINE made itself (a verifier PDP is configured, or a cached verdict): there is no handshake, so
+                // it is ingested here for the sign step. A decision the SDK evaluated for this flow (the handshake) is never replaced.
+                if (msg.payload?.jsonObject?.get("verifier_trust_evaluated")?.jsonPrimitive?.booleanOrNull == true) {
+                    ingestServerTrustDecision(msg.flowId, msg.payload!!.jsonObject)
                 }
 
                 // The server-side issuer trust report is NOT handled here: this
@@ -8266,7 +8581,8 @@ class SirosWallet private constructor(
                 noteFlowId(msg.flowId)
                 Timber.i("Flow ${msg.flowId} complete" + (flowContinuations?.get(msg.flowId)?.let { " (the resumption of flow $it)" } ?: ""))
                 terminatedFlowIds.add(msg.flowId)
-                pendingMatchResultsByFlow.remove(msg.flowId)
+                stopZkSigning(msg.flowId, refuse = false)
+                clearFlowMatchState(msg.flowId)
 
                 // The issuer's response-level credential_metadata (a secret_seed, say) is checked once for the
                 // whole response, and against EVERY credential's ssc, before anything is stored or replaced: one
@@ -8723,7 +9039,8 @@ class SirosWallet private constructor(
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
                 terminatedFlowIds.add(fid)
-                pendingMatchResultsByFlow.remove(fid)
+                stopZkSigning(fid, refuse = false)
+                clearFlowMatchState(fid)
                 pscIssuerByFlow.remove(fid)
                 blindIssuance.drop(fid)
                 val redirectUri = msg.error.details?.get("redirect_uri")?.jsonPrimitive?.contentOrNull
@@ -9765,6 +10082,108 @@ class SirosWallet private constructor(
         java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /**
+     * The outcome of planning a request's `zkp_req` queries: the pre-checked results, or why the whole request is refused: a stable,
+     * content-free [code] (logged; never a request content) and the [refusal] text the user may be shown.
+     */
+    private class CircuitZkMatchPlan(val matchResults: List<CredentialMatcher.MatchResult>?, val code: String?, val refusal: String?)
+
+    private fun zkRefused(code: String): CircuitZkMatchPlan = CircuitZkMatchPlan(null, code, when (code) {
+        "disabled" -> "Zero-knowledge presentations are not enabled in this wallet"
+        "no-circuit" -> "This wallet has no proof circuit this verifier accepts"
+        "no-credential" -> "This wallet holds no credential for this request"
+        "predicate-unsatisfied" -> "No credential satisfies this request"
+        "no-verifier-id" -> "The verifier did not identify itself in a form this wallet can use"
+        else -> "This request cannot be answered by this wallet"
+    })
+
+    /**
+     * Shared by both engine collectors that match a request (`credential_selection` progress and `match_request`): null for a request
+     * with no `zkp_req` query. A `zkp_req` request is answered whole or refused whole, never partly by its ordinary queries: it must
+     * be only `zkp_req` queries, every one readable and planned, with the circuit_zk support turned on, every one answerable by a
+     * credential whose predicates definitely hold (the local pre-check), and, when the plan needs a verifier id, with one the wallet
+     * can resolve from the flow's trust result. Each refusal has its own stable code (`disabled`, `unreadable-query`,
+     * `mixed-request`, `invalid-request`, `request-rejected`, `source-format`, `no-circuit`, `no-credential`,
+     * `predicate-unsatisfied`, `no-verifier-id`). The verifier's `client_metadata` is cached for the sign step only when the request
+     * is accepted, and dropped with the flow's other match state ([clearFlowMatchState]).
+     */
+    private suspend fun planCircuitZkMatches(
+        flowId: String,
+        output: CredentialMatcher.DcqlMatchOutput,
+        clientMetadata: JsonObject?,
+        verifierClientId: String? = null,
+    ): CircuitZkMatchPlan? {
+        if (!output.hasCircuitZkQuery) return null
+        if (circuitZkSupport == null) return zkRefused("disabled")
+        if (output.unparsedQueryCount != 0 || output.queryResults.isEmpty()) return zkRefused("unreadable-query")
+        if (output.queryResults.any { !CredentialUtils.isCircuitZkFormat(it.format) }) return zkRefused("mixed-request")
+        output.queryResults.firstOrNull { it.circuitZkPlan == null }?.let { return zkRefused(it.circuitZkRefusal ?: "invalid-request") }
+        output.queryResults.firstOrNull { it.candidates.isEmpty() }?.let { return zkRefused(it.circuitZkRefusal ?: "no-credential") }
+        val results = output.queryResults.map { r ->
+            val plan = r.circuitZkPlan
+            if (plan == null) r else r.copy(candidates = r.candidates.filter { circuitZkPredicatesHold(plan, it) })
+        }
+        if (results.any { it.candidates.isEmpty() }) return zkRefused("predicate-unsatisfied")
+        // A plan that needs a verifier id (asked of its function handlers, as at the sign step) must have one the wallet can resolve
+        // from what the engine's trust step reported; unknown trust (none yet) is left to the sign step.
+        val trust = lastTrustResults[flowId]
+        val registry = verifierIdRegistry
+        if (trust != null && registry != null && verifierClientId != null) {
+            val needsId = results.any { r -> r.circuitZkPlan?.functions.orEmpty().any { f -> circuitZkHandlers[f.id]?.needsVerifierId(f) == true } }
+            if (needsId) {
+                val request = org.siros.sdk.wallet.dcapi.DCAPIRequest(
+                    clientId = verifierClientId, responseMode = "direct_post.jwt", nonce = "", dcqlQuery = null,
+                    clientMetadata = clientMetadata, protocol = "openid4vp-redirect", state = null,
+                )
+                val early = try { registry.earlyCheck(VerifierIdContext(request, trust, "")) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { VerifierIdRegistry.EarlyCheck.Unresolvable }
+                if (early == VerifierIdRegistry.EarlyCheck.Unresolvable) return zkRefused("no-verifier-id")
+            }
+        }
+        clientMetadata?.let { circuitZkClientMetadataByFlow[flowId] = it }
+        return CircuitZkMatchPlan(results, null, null)
+    }
+
+    /**
+     * Records the engine's own verifier-trust decision (`verifier_trust_evaluated` progress) as the flow's trust result: the verdict,
+     * the identity it is about (the client id the sign step's audience must equal) and the PDP's `context` when the engine relays it
+     * (the verifier ids a pseudonym needs; without it the verifier id stays unresolved and a request needing one is refused). The
+     * context is kept VERBATIM, like the DC API path's: one contract for every trust path, the PDP's value is the verifier id.
+     */
+    private fun ingestServerTrustDecision(flowId: String, payload: JsonObject) {
+        if (lastTrustResults.containsKey(flowId)) return
+        val trusted = payload["trusted"]?.jsonPrimitive?.booleanOrNull ?: return
+        val verifier = payload["verifier"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return
+        lastTrustResults[flowId] = TrustResult(
+            trusted = trusted,
+            framework = payload["framework"]?.jsonPrimitive?.contentOrNull,
+            reason = payload["reason"]?.jsonPrimitive?.contentOrNull,
+            entityName = payload["entity_name"]?.jsonPrimitive?.contentOrNull,
+            identifier = verifier,
+            context = payload["context"] as? JsonObject,
+        )
+    }
+
+    /**
+     * The credential for EACH query of a zkp_req request, from the credentials the user picked (the picker reports plain ids): a pick that
+     * is a candidate of the query answers it, preferring the pick at the query's own position, and one credential may answer several
+     * queries. Null when some query has no pick: the request is then not answerable and no selection is sent.
+     */
+    private fun circuitZkSelectionByQuery(results: List<CredentialMatcher.MatchResult>, selectedIds: List<Long>): List<Pair<CredentialMatcher.MatchResult, Long>>? {
+        val out = ArrayList<Pair<CredentialMatcher.MatchResult, Long>>()
+        for ((i, r) in results.withIndex()) {
+            val own = selectedIds.filter { id -> r.candidates.any { it.id == id } }
+            val id = (if (selectedIds.size == results.size && selectedIds[i] in own) selectedIds[i] else own.firstOrNull()) ?: return null
+            out += r to id
+        }
+        return out
+    }
+
+    /** Drops what a flow's match step left for its sign step; called wherever a flow ends. */
+    private fun clearFlowMatchState(flowId: String) {
+        pendingMatchResultsByFlow.remove(flowId)
+        circuitZkClientMetadataByFlow.remove(flowId)
+    }
+
+    /**
      * Handle credential_selection step from the engine.
      *
      * The backend sends DCQL query + verifier info in a flow_progress message.
@@ -9808,9 +10227,15 @@ class SirosWallet private constructor(
                 // note in the matchRequests() collector: sign_presentation's
                 // ZK branch serves this transport, and reads these results
                 // back from pendingMatchResultsByFlow below.
+                // The verifier's client_metadata (verbatim, when the engine relays it) plans zkp_req queries.
+                val clientMetadata = payload?.get("client_metadata") as? JsonObject
+                val zkPlan: CircuitZkMatchPlan?
                 val matchResults = if (dcqlQuery != null) {
-                    CredentialMatcher.match(dcqlQuery, allCreds, zkSystemIds)
+                    val output = CredentialMatcher.matchDcql(dcqlQuery, allCreds, zkSystemIds, circuitZkSupport, clientMetadata)
+                    zkPlan = planCircuitZkMatches(flowId, output, clientMetadata, verifierInfo?.get("client_id")?.jsonPrimitive?.contentOrNull)
+                    zkPlan?.matchResults ?: output.queryResults
                 } else {
+                    zkPlan = null
                     listOf(CredentialMatcher.MatchResult(
                         queryId = "_default",
                         format = null,
@@ -9826,7 +10251,7 @@ class SirosWallet private constructor(
                     for (r in matchResults) for (c in r.candidates) putIfAbsent(c.id, r)
                 }
                 val zkRequestedIds = matchResultByCredentialId
-                    .filterValues { it.format?.equals("mso_mdoc_zk", ignoreCase = true) == true }
+                    .filterValues { it.format?.equals("mso_mdoc_zk", ignoreCase = true) == true || CredentialUtils.isCircuitZkFormat(it.format) }
                     .keys
                 val isZk: (StoredCredential) -> Boolean = { it.id in zkRequestedIds }
                 // This (not the matchRequests() collector) is the code path
@@ -9847,7 +10272,13 @@ class SirosWallet private constructor(
                 // Only where nobody is asked anything: with a listener and
                 // something to show, an empty answer really is the user
                 // declining, and is reported as one below.
-                if (candidates.isEmpty() || (listener == null && eligible.isEmpty())) {
+                if (zkPlan?.refusal != null) {
+                    // A zkp_req request is answered whole or not at all; the verifier gets the engine's no-match answer.
+                    Timber.i("Credential selection for flow $flowId: a zkp_req request that cannot be answered; not answered (code=${zkPlan.code})")
+                    engine.sendCredentialsMatched(flowId, emptyList(), zkPlan.refusal)
+                    return@launch
+                }
+                                if (candidates.isEmpty() || (listener == null && eligible.isEmpty())) {
                     // The honest answer, and the one that ends the flow now:
                     // a decline would tell the verifier the user refused, but
                     // the user was never asked, and saying nothing leaves the
@@ -9904,8 +10335,8 @@ class SirosWallet private constructor(
                     throw WalletException("Selected credential has no eligible copies remaining - renew it to get more")
                 }
 
-                // Record presentation history
-                recordPresentation(PresentationRecord(
+                // Record presentation history (a zkp_req presentation is recorded when it is answered, from what was really used)
+                if (zkPlan == null) recordPresentation(PresentationRecord(
                     id = randomUint32Id(),
                     flowId = flowId,
                     verifierName = verifierName,
@@ -9920,10 +10351,31 @@ class SirosWallet private constructor(
                     timestamp = System.currentTimeMillis(),
                 ))
 
+                // zkp_req: the credential for EACH query, or the request is declined (a query without a pick cannot be answered).
+                val zkSelection = if (zkPlan != null) {
+                    circuitZkSelectionByQuery(matchResults, selectedIds) ?: run {
+                        engine.sendFlowAction(flowId, "decline", kotlinx.serialization.json.buildJsonObject {
+                            put("reason", kotlinx.serialization.json.JsonPrimitive("user_declined"))
+                        })
+                        return@launch
+                    }
+                } else null
+
                 // Build consent payload with selected credentials
                 // Must match backend ConsentSelection: credential_query_id, credential_id, disclosed_claims
                 val consentPayload = kotlinx.serialization.json.buildJsonObject {
                     put("selected_credentials", kotlinx.serialization.json.buildJsonArray {
+                        if (zkSelection != null) {
+                            // zkp_req: one selection per query, a credential reusable across queries, no disclosed claims.
+                            for ((r, id) in zkSelection) {
+                                add(kotlinx.serialization.json.buildJsonObject {
+                                    put("credential_query_id", kotlinx.serialization.json.JsonPrimitive(r.queryId))
+                                    put("credential_id", kotlinx.serialization.json.JsonPrimitive(id.toString()))
+                                    put("disclosed_claims", kotlinx.serialization.json.buildJsonArray {})
+                                })
+                            }
+                            return@buildJsonArray
+                        }
                         for (id in selectedIds) {
                             allCreds.find { it.id == id } ?: continue
                             val matchResult = matchResults.firstOrNull { r ->
@@ -9953,7 +10405,8 @@ class SirosWallet private constructor(
                                 // eu.europa.ec.eudi.pid.1") - confirmed live. Mirrors
                                 // handleDCAPIRequest's identical, already-correct
                                 // `mapNotNull { it.lastOrNull() }`.
-                                val requestedClaims = matchResult?.requestedClaims
+                                // A zkp_req query discloses no claims: report none (the engine's consent check would refuse any).
+                                val requestedClaims = if (zkPlan != null) emptyList() else matchResult?.requestedClaims
                                     ?.mapNotNull { it.lastOrNull() }
                                     ?.distinct()
                                     ?: emptyList()

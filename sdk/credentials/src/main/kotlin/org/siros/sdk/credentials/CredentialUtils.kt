@@ -871,6 +871,29 @@ object CredentialUtils {
     }
 
     /**
+     * [eligibleInstances] for every matched query of one request, with the ZK status taken from the QUERY that answers each credential:
+     * a `zkp_req` or legacy `mso_mdoc_zk` query is answered with a proof whatever the stored format of its candidates is (a plain mdoc),
+     * so under [CredentialConsumptionPolicy.CONSUME_NON_ZKP] it does not consume them. As in the engine's sign handlers, a credential
+     * that several queries match is answered under the FIRST of them (`results` order), so its status is that query's for all of them.
+     *
+     * @return one entry per query, in order: the query and its eligible candidates (empty: the query cannot be answered).
+     */
+    fun eligibleInstancesByQuery(
+        results: List<CredentialMatcher.MatchResult>,
+        policy: CredentialConsumptionPolicy,
+        presentationHistory: List<PresentationRecord>,
+        availableKeyIds: Set<String>,
+    ): List<Pair<CredentialMatcher.MatchResult, List<StoredCredential>>> {
+        val firstQueryOf = HashMap<Long, CredentialMatcher.MatchResult>()
+        for (r in results) for (c in r.candidates) firstQueryOf.putIfAbsent(c.id, r)
+        val isZk: (StoredCredential) -> Boolean = { c ->
+            val format = firstQueryOf[c.id]?.format
+            isZkpFormat(c.format) || isZkpFormat(format.orEmpty()) || isCircuitZkFormat(format)
+        }
+        return results.map { r -> r to eligibleInstances(r.candidates, policy, presentationHistory, availableKeyIds, isZk) }
+    }
+
+    /**
      * Whether [kid] (a [StoredCredential.kid]) can actually be used to sign,
      * given the signer's current [availableKeyIds] - shared by
      * [eligibleInstances] (gates presentation) and [groupForDisplay] (gates
