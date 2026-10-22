@@ -3,14 +3,13 @@ package org.siros.sdk.transport.engine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
 /** The encrypted-presentation answer on the wire: `{response_jwe}` and nothing that could shadow it. */
 class SignResponseJweWireShapeTest {
-    private val json = Json { encodeDefaults = false }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true } // as WalletEngineSession encodes
 
     @Test
     fun aResponseJweIsTheOnlyResultMember() {
@@ -18,7 +17,10 @@ class SignResponseJweWireShapeTest {
             Json.parseToJsonElement(it).jsonObject
         }
         assertEquals("a.b.c.d.e", out["response_jwe"]!!.toString().trim('"'))
-        for (member in listOf("vp_token", "error", "error_code", "proof_jwt")) assertFalse(member, member in out)
+        // Unused nullable members are sent as JSON null: none of them carries a value.
+        for (member in listOf("vp_token", "error", "error_code", "proof_jwt")) {
+            assertEquals(member, kotlinx.serialization.json.JsonNull, out[member] ?: kotlinx.serialization.json.JsonNull)
+        }
     }
 
     @Test

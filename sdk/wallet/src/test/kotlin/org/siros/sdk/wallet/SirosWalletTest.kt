@@ -121,6 +121,11 @@ class SirosWalletTest {
     fun tearDown() {
         Dispatchers.resetMain()
         SirosWallet.createEngineSession = { baseUrl, tenantId -> WalletEngineSession(baseUrl, tenantId) }
+        // Every czkSetup wallet's scope records what escapes a launch (its scope has no other handler, like the real one): an
+        // unexpected failure of a signing coroutine fails the test that caused it, not only the two that inspect the recorder.
+        val escaped = czkUncaught.toList()
+        czkUncaught.clear()
+        assertTrue("an exception escaped a wallet coroutine: $escaped", escaped.isEmpty())
     }
 
     @Test
