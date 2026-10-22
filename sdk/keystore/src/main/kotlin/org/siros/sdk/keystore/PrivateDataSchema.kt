@@ -77,6 +77,19 @@ internal object PrivateDataSchema {
         return null
     }
 
+    /**
+     * A JSON number whose VALUE is an integer that fits a Long (`4`, `4.0`, `4e9`), else null: a string or a fractional number is
+     * not one. The one decoder for every integer the SDK reads from an event (version, id, timestamp), so ordering, collision and
+     * live-entry detection agree with the version check on what a number is.
+     */
+    fun longOrNull(e: kotlinx.serialization.json.JsonElement?): Long? {
+        val p = e as? JsonPrimitive ?: return null
+        if (p.isString) return null
+        val n = p.content.toBigDecimalOrNull() ?: return null
+        val i = try { n.toBigIntegerExact() } catch (_: ArithmeticException) { return null }
+        return if (i.bitLength() <= 63) i.toLong() else null
+    }
+
     /** A JSON number whose VALUE is an integer in the Int range (4, 4.0, 4e0), else null: a string "4" or 4.5 is not a version. */
     private fun intOrNull(e: kotlinx.serialization.json.JsonElement?): Int? {
         val p = e as? JsonPrimitive ?: return null

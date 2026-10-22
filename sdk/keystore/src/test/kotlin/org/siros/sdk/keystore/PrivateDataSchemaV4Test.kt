@@ -439,6 +439,37 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun aCollisionRetryCannotUndoTheOrderingCheck() {
+        // Previous event for the key at (100, 100); another event already uses id 200; ids generated: 200 (taken), then 5.
+        fun ev(id: Long, key: String) = event("set_extension").let { JsonObject(it + mapOf("eventId" to JsonPrimitive(id), "timestampSeconds" to JsonPrimitive(100), "namespace" to JsonPrimitive("n"), "key" to JsonPrimitive(key), "value" to JsonPrimitive("v"))) }
+        val ids = ArrayDeque(listOf(200L, 5L))
+        val r = ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), emptyMap(), "p", listOf(ev(100, "k"), ev(200, "other")), 100L) { ids.removeFirst() }.single()
+        val at = r["timestampSeconds"]!!.jsonPrimitive.content.toLong() to r["eventId"]!!.jsonPrimitive.content.toLong()
+        assertEquals(5L, at.second)
+        assertTrue("the new event sorts after (100, 100): $at", at.first > 100 || at.second > 100)
+    }
+
+    @Test
+    fun eventIdsAndTimestampsAreReadByValueWhateverTheirSpelling() = runTest {
+        fun ev(id: JsonElement, ts: JsonElement, value: JsonElement) = JsonObject(mapOf(
+            "type" to JsonPrimitive("set_extension"), "schemaVersion" to JsonPrimitive(4), "eventId" to id, "parentHash" to JsonPrimitive(""),
+            "timestampSeconds" to ts, "namespace" to JsonPrimitive("n"), "key" to JsonPrimitive("k"), "value" to value,
+        ))
+        val lit = kotlinx.serialization.json.JsonUnquotedLiteral("4e9")
+        // Ordering: an existing event at (100, 4e9) is later than a same-second event with id 5, so the new one advances the timestamp.
+        val old = ev(lit, kotlinx.serialization.json.JsonUnquotedLiteral("1e2"), JsonPrimitive("v"))
+        val r = ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), emptyMap(), "p", listOf(old), 100L) { 5L }.single()
+        assertTrue("advanced past the 4e9 event", r["timestampSeconds"]!!.jsonPrimitive.content.toLong() > 100)
+        // Live-entry detection: a tombstone (id 1) followed, by value, by a live write with id 2e0 in the same second is LIVE.
+        val tomb = ev(JsonPrimitive(1), JsonPrimitive(100), kotlinx.serialization.json.JsonNull)
+        val live = ev(kotlinx.serialization.json.JsonUnquotedLiteral("2e0"), JsonPrimitive(100), JsonPrimitive("v"))
+        val k = unlocked(plaintext(events = listOf(tomb, live)))
+        k.removeExtensionEntry("n", "k")
+        val events = decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray
+        assertEquals("a tombstone is emitted for the live entry", 3, events.size)
+    }
+
+    @Test
     fun hashKeyOrderAndNumbersFollowJavaScript() {
         fun h(js: String, e: JsonObject) = assertEquals(
             java.security.MessageDigest.getInstance("SHA-256").digest(js.toByteArray()).joinToString("") { "%02x".format(it) },

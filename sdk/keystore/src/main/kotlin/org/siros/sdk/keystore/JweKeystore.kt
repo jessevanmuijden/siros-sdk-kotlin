@@ -1085,7 +1085,7 @@ class JweKeystore(
         for (e in events) {
             val o = e as? kotlinx.serialization.json.JsonObject ?: continue
             fun str(n: String) = (o[n] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
-            fun num(n: String) = (o[n] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+            fun num(n: String) = PrivateDataSchema.longOrNull(o[n]) ?: 0L
             if (str("type") != "set_extension" || str("namespace") != namespace || str("key") != key) continue
             val at = num("timestampSeconds") to num("eventId")
             val cur = best

@@ -146,30 +146,30 @@ internal object ExtensionEvents {
         for ((ns, entries) in before) for (k in entries.keys) if (after[ns]?.containsKey(k) != true) changes[ns to k] = null
         for (nk in extraTombstones) if (after[nk.first]?.containsKey(nk.second) != true) changes.putIfAbsent(nk, null)
         val out = ArrayList<JsonObject>()
-        val taken = existing.mapNotNull { (it["eventId"] as? JsonPrimitive)?.content?.toLongOrNull() }.toHashSet()
+        val taken = existing.mapNotNull { PrivateDataSchema.longOrNull(it["eventId"]) }.toHashSet()
         // Merge is last-write-wins by (timestampSeconds, eventId), so a new event for a key must sort
         // after every event already written for it, even within the same second.
         val best = HashMap<Pair<String, String>, Pair<Long, Long>>()
         for (ev in existing) {
             if ((ev["type"] as? JsonPrimitive)?.content != "set_extension") continue
             val key = (ev["namespace"] as? JsonPrimitive)?.content.orEmpty() to (ev["key"] as? JsonPrimitive)?.content.orEmpty()
-            val at = ((ev["timestampSeconds"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L) to
-                ((ev["eventId"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L)
+            val at = (PrivateDataSchema.longOrNull(ev["timestampSeconds"]) ?: 0L) to (PrivateDataSchema.longOrNull(ev["eventId"]) ?: 0L)
             val cur = best[key]
             if (cur == null || at.first > cur.first || (at.first == cur.first && at.second > cur.second)) best[key] = at
         }
         var parent = parentHash
         for ((nk, value) in changes) {
             var ts = nowSeconds
+            // The final, unique id first: a retry after a collision must not be able to undo the ordering check below.
             var id = nextEventId()
+            var attempts = 0
+            while (id in taken) { id = if (attempts++ < 8) nextEventId() else if (id < MAX_EVENT_ID) id + 1 else 1L }
+            taken.add(id)
             val (bTs, bId) = best[nk] ?: (Long.MIN_VALUE to 0L)
             // Merge is last-write-wins by (timestampSeconds, eventId), so a new event for a key must sort after the one it follows.
             // The timestamp is advanced past it when needed, and the RANDOM id is kept: two writers updating the same key from the
             // same history then still get different ordering keys (an id clamped to previous + 1 would make them equal).
             if (ts < bTs || (ts == bTs && id <= bId)) ts = bTs + 1
-            var attempts = 0
-            while (id in taken) { id = if (attempts++ < 8) nextEventId() else if (id < MAX_EVENT_ID) id + 1 else 1L }
-            taken.add(id)
             best[nk] = ts to id
             val event = JsonObject(
                 linkedMapOf(
