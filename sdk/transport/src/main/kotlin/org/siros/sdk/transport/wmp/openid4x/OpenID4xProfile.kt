@@ -336,6 +336,9 @@ data class OpenID4xConfig(
     val onComplete: (suspend (String, JsonObject?) -> Unit)? = null,
     val onError: (suspend (String, String?, String?) -> Unit)? = null,
     val attestationProvider: ClientAttestationProvider? = null,
+    // Appended last: a data class's property order is part of its binary API.
+    /** Called with the flow id when the orchestrator cancels a flow (`wmp.flow.cancel`). */
+    val onCancel: (suspend (String) -> Unit)? = null,
 )
 
 /** Result of a sign sub-flow request. */
@@ -495,6 +498,7 @@ class OpenID4xProfile(
 
     override suspend fun handleCancel(params: FlowCancelParams) {
         Timber.d("OpenID4x flow cancelled: ${params.flowId} reason=${params.reason}")
+        config.onCancel?.invoke(params.flowId)
     }
 
     // ---- Sub-flow handlers ----

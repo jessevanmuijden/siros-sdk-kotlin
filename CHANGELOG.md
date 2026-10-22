@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (1 MiB encoded, depth 16, 256 members per object, member names of at most 256 bytes, no duplicate names at the top level or
     inside `org.siros.secret_seed`) before anything is retained or passed to the receipt check; a response that fails them is
     refused and, when it decrypted and carried a `notification_id`, reported as `credential_failure`.
+  - **Review follow-ups, round 2.** An ENCRYPTED completion's `notification_id` is the one in the response the wallet decrypted
+    (none when it had none), never the engine frame's, on both transports; a plain completion keeps the engine's. The response
+    key and opened response are released per FLOW (a presentation or an unrelated failure no longer clears another flow's), on
+    sign failure, refusal, engine flow error, local cancel, completion and, new, an incoming `wmp.flow.cancel`
+    (`OpenID4xConfig.onCancel`); session-wide teardown and connection replacement still clear everything. An empty query id is
+    treated as no query id when shaping the `vp_token`. A `direct_post.jwt` presentation is built only from one token per
+    selected credential (a credential that left the store is an error, never a partial response), and any failure building the
+    encrypted response (no verified `client_id`, unsupported pair, oversized, missing token) is answered with a sanitized
+    error-only `sign_response` for the original `message_id` before local cleanup, on the ordinary and the `transaction_data`
+    handlers, with no plaintext fallback.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

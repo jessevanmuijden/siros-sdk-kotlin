@@ -42,6 +42,17 @@ class BlindPresentationTest {
     }
 
     @Test
+    fun anEmptyQueryIdIsNoQueryId_soTokensWithOnlyNullOrEmptyIdsStayTheBareString() {
+        assertEquals(JsonPrimitive("token"), BlindPresentation.vpToken(listOf("" to "token")))
+        assertEquals(JsonPrimitive("a\nb"), BlindPresentation.vpToken(listOf(null to "a", "" to "b")))
+        // Mixed with a real id, the real one is the object and the others are left out as before.
+        assertEquals(
+            JsonObject(mapOf("pid" to JsonArray(listOf(JsonPrimitive("t1"))))),
+            BlindPresentation.vpToken(listOf("pid" to "t1", "" to "e", null to "n")),
+        )
+    }
+
+    @Test
     fun aDcqlEntryWithoutAQueryIdIsLeftOutAsTheEngineDidAndNoQueryIdsMeansTheTokensAsOneString() {
         assertEquals(
             JsonObject(mapOf("pid" to JsonArray(listOf(JsonPrimitive("t1"))))),
