@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a second presentation of the same credential disabled Share or dropped the credential although the SDK permits reuse for
   a proof. New `CredentialUtils.eligibleInstancesByQuery(...)` takes the ZK status from the query that answers each credential (`zkp_req` and legacy `mso_mdoc_zk`; the first matching query, as the engine's sign handlers classify it); the screen uses it
   for both the exhausted-query check and the accepted ids (so overlapping raw/ZK queries never submit a consumed credential). A pending `zkp_req` signing is also cancelled when `forceReconnect()`
-  moves the engine to `CONNECTING`, so a stale consent dialog no longer holds the presentation lock for DC API requests.
+  moves the engine to `CONNECTING`, so a stale consent dialog no longer holds the presentation lock for DC API requests. `signMdocPresentationForProximity` now takes the same lock, so a proximity presentation cannot use the single copy a pending redirect presentation is about to consume.
 
 ### Added
 - **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`).** The engine
