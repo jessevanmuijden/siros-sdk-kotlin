@@ -863,6 +863,7 @@ class SirosWallet private constructor(
         // would keep a socket authenticated by a token the backend has already
         // stopped accepting, and the next connect would overwrite the
         // reference without ever closing it.
+        wmpLifetime++
         wmpPeer?.close()
         wmpPeer = null
         credentialNotifier = null
@@ -1307,10 +1308,8 @@ class SirosWallet private constructor(
         syncPrivateDataToBackend()
 
         // Connect engine with anonymous token (new AS) or app token (legacy AS)
-        connectEngineWithToken()
-
         // A new session: see [sessionGeneration].
-        bumpSessionGeneration()
+        connectEngineForNewSession()
         _state.value = WalletState.Ready(
             userId = userId,
             displayName = displayName ?: givenDisplayName,
@@ -1660,12 +1659,10 @@ class SirosWallet private constructor(
         }
 
         // Connect engine with anonymous token (new AS) or app token (legacy AS)
-        connectEngineWithToken()
-
         // A new session: a cut-off met on THIS one deserves its own
         // self-driven re-login, and the 401s of the session it replaced no
         // longer do. See [sessionGeneration].
-        bumpSessionGeneration()
+        connectEngineForNewSession()
         _state.value = WalletState.Ready(
             userId = userId,
             displayName = displayName,
@@ -6505,6 +6502,16 @@ class SirosWallet private constructor(
      * `insert` scope a hard server-side rejection for `oid4vci` flow_start,
      * not just a documentation note).
      */
+    /**
+     * What a registration or a login does once it has a token: connect the engine, THEN end the previous session generation. The
+     * callbacks of the connections made here must therefore never be bound to [sessionGeneration] (it changes right after): the
+     * WMP profile is bound to [wmpLifetime] instead.
+     */
+    private suspend fun connectEngineForNewSession() {
+        connectEngineWithToken()
+        bumpSessionGeneration()
+    }
+
     private suspend fun connectEngineWithToken() {
         val token = legacyAppToken ?: authTokens.ensureBackendToken().raw
         if (config.useWmpProtocol) {
@@ -6518,9 +6525,14 @@ class SirosWallet private constructor(
 
     private var wmpPeer: org.siros.sdk.transport.wmp.WmpPeer? = null
 
+    /** Counts the ends of WMP peers: a callback built for one lifetime is refused once it has moved on (see [wmpProfile]). */
+    @Volatile
+    private var wmpLifetime: Int = 0
+
     private suspend fun connectViaWmp(appToken: String) {
         // Same leaked-connection hazard as connectEngine's engineSession -
-        // tear down any prior live peer before replacing the reference.
+        // tear down any prior live peer before replacing the reference (its callbacks end with it).
+        wmpLifetime++
         wmpPeer?.close()
         blindIssuance.clear()
 
@@ -6531,9 +6543,7 @@ class SirosWallet private constructor(
         val wsUrl = engineBaseUrl.replace("http://", "ws://").replace("https://", "wss://") +
             "/api/v2/wallet?tenant_id=${config.tenantId}"
 
-        val transport = org.siros.sdk.transport.wmp.WmpWebSocketTransport(wsUrl)
-        val session = org.siros.sdk.transport.wmp.WmpSession(transport)
-        val peer = org.siros.sdk.transport.wmp.WmpPeer(session)
+        val peer = createWmpPeer(wsUrl)
 
         val profile = wmpProfile(peer)
         peer.use(profile)
@@ -7051,6 +7061,7 @@ class SirosWallet private constructor(
      * closed it) on a scope of its own: a `destroy()` cancels the wallet's scope and must not cancel the close.
      */
     private fun closeWmpPeer(peer: org.siros.sdk.transport.wmp.WmpPeer?) {
+        wmpLifetime++
         if (peer == null) return
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
             kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
@@ -7069,9 +7080,12 @@ class SirosWallet private constructor(
      * a request) is refused BEFORE it allocates anything.
      */
     private fun wmpProfile(peer: org.siros.sdk.transport.wmp.WmpPeer?): org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile {
-        val generation = sessionGeneration
+        // Bound to the lifetime of THIS peer (ended by logout, destroy, the re-login teardown and the replacement of the peer),
+        // not to [sessionGeneration]: a registration or login bumps that right AFTER connecting, which would end every
+        // callback of the connection it has just made.
+        val lifetime = wmpLifetime
         fun requireLive() {
-            if (isDestroyed || sessionGeneration != generation) throw WalletException("This wallet session has ended")
+            if (isDestroyed || wmpLifetime != lifetime) throw WalletException("This wallet session has ended")
         }
         return org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile(
             org.siros.sdk.transport.wmp.openid4x.OpenID4xConfig(
@@ -7621,15 +7635,19 @@ class SirosWallet private constructor(
         credentialNotifier = engine
         engineStateJob?.cancel()
         engineStateJob = scope.launch {
-            var seenGeneration = engine.connectionGeneration
-            engine.state.collect { s ->
-                // A new socket on the SAME session (an automatic or forced reconnect) abandons the flows of the old one.
-                engine.connectionGeneration.let { g ->
+            // A new socket on the SAME session (an automatic or forced reconnect) abandons the flows of the old one. It is
+            // observed on its own flow, not on [state]: an automatic reconnect publishes RECONNECTING BEFORE its backoff and
+            // increments the generation only when the new socket opens, with no state change of its own.
+            launch {
+                var seenGeneration = engine.connectionGeneration
+                engine.connectionGenerations.collect { g ->
                     if (g != seenGeneration) {
                         seenGeneration = g
                         onEngineSocketReplaced(g)
                     }
                 }
+            }
+            engine.state.collect { s ->
                 if (s == WalletEngineSession.State.REAUTH_REQUIRED) {
                     handleReauthenticationRequired()
                 }
@@ -10071,6 +10089,11 @@ class SirosWallet private constructor(
          * (usually) one or two issuers is plenty.
          */
         private const val HYDRATION_PARALLELISM = 4
+        /** Builds the WMP peer for an engine URL; replaceable so a test can run the production connect path without a socket. */
+        internal var createWmpPeer: (String) -> org.siros.sdk.transport.wmp.WmpPeer = { wsUrl ->
+            org.siros.sdk.transport.wmp.WmpPeer(org.siros.sdk.transport.wmp.WmpSession(org.siros.sdk.transport.wmp.WmpWebSocketTransport(wsUrl)))
+        }
+
         internal var createEngineSession: (String, String) -> WalletEngineSession =
             { baseUrl, tenantId -> WalletEngineSession(baseUrl, tenantId) }
 

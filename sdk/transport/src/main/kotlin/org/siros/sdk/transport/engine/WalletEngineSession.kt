@@ -145,8 +145,17 @@ class WalletEngineSession(
      */
     private val generationCounter = java.util.concurrent.atomic.AtomicInteger(0)
 
+    private val _connectionGenerations = kotlinx.coroutines.flow.MutableStateFlow(0)
+
     /** Generation of the most recently opened socket. */
     val connectionGeneration: Int get() = generationCounter.get()
+
+    /**
+     * [connectionGeneration] as a flow, so a consumer can react to a socket REPLACEMENT independently of [state]: an automatic
+     * reconnect publishes RECONNECTING before its backoff and only increments the generation when the new socket is opened,
+     * with no further state change.
+     */
+    val connectionGenerations: kotlinx.coroutines.flow.StateFlow<Int> get() = _connectionGenerations
 
     /** Orders overlapping [forceReconnect] calls; only the latest may replace the socket. */
     private val reconnectRequests = java.util.concurrent.atomic.AtomicInteger(0)
@@ -267,6 +276,7 @@ class WalletEngineSession(
             .build()
 
         val generation = generationCounter.incrementAndGet()
+        _connectionGenerations.value = generation
         webSocket = connectionClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Timber.d("Engine WebSocket connected, sending handshake")

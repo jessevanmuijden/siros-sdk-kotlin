@@ -81,6 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     sign-request collector ignores requests of a session that was ended or replaced. A `generate_proof`/
     `decrypt_credential_response` stamped with an older socket of the session is dropped (no key, no answer), and an accepted
     offer is tied to the generation stamped on its frame, not the one current when it happens to be processed.
+  - **Review follow-ups, round 5.** FIXES A REGRESSION OF ROUND 4: the WMP callbacks were bound to the session generation captured when
+    the profile was built, but a registration or login ends that generation right after connecting, so every WMP sign request of a
+    freshly logged-in wallet was refused as belonging to an ended session. They are now bound to the lifetime of their own WMP peer
+    (ended by logout, destroy, the re-login teardown and the replacement of the peer); registration and login share
+    `connectEngineForNewSession()`. `WalletEngineSession.connectionGenerations` (new, a `StateFlow<Int>` beside
+    `connectionGeneration`) publishes every new socket, and the wallet observes it instead of inferring a replacement from
+    `state`: an automatic reconnect publishes RECONNECTING before its backoff and increments the generation later with no
+    state change of its own.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

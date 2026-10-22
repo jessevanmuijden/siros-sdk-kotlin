@@ -1006,6 +1006,18 @@ class WalletEngineSessionTest {
     }
 
     @Test
+    fun connectionGenerations_publishesEachNewSocketOnItsOwn_independentlyOfTheState() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        assertEquals(0, session.connectionGenerations.value)
+        session.connect("app-token")
+        assertEquals(1, session.connectionGenerations.value)
+        assertEquals(session.connectionGeneration, session.connectionGenerations.value)
+        session.forceReconnect()
+        assertEquals("the replacement socket is published", 2, session.connectionGenerations.value)
+        assertEquals(session.connectionGeneration, session.connectionGenerations.value)
+    }
+
+    @Test
     fun forceReconnect_discardsFlowRepliesBufferedFromTheReplacedConnection() = runTest {
         val session = WalletEngineSession(
             baseUrl = "https://wallet.example.com",

@@ -1613,6 +1613,7 @@ public final class org/siros/sdk/transport/engine/WalletEngineSession : org/siro
 	public final fun flowProgress ()Lkotlinx/coroutines/flow/Flow;
 	public final fun forceReconnect (Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 	public final fun getConnectionGeneration ()I
+	public final fun getConnectionGenerations ()Lkotlinx/coroutines/flow/StateFlow;
 	public final fun getState ()Lkotlinx/coroutines/flow/StateFlow;
 	public final fun isConnected ()Z
 	public final fun matchRequests ()Lkotlinx/coroutines/flow/Flow;
