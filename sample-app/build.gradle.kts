@@ -13,8 +13,8 @@ android {
         applicationId = "org.siros.sdk.sample"
         minSdk = 28
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.20.5"
+        versionCode = 25
+        versionName = "0.21.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

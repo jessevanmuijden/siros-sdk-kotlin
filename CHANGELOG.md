@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-22
+
+BREAKING: engine-blind encryption. The wallet, not the engine, now holds the OID4VCI credential-response key and builds the OID4VP direct_post.jwt response, so the engine relays ciphertext and never sees credentials, the delivered secret seed or a vp_token. This SDK REQUIRES a backend with go-wallet-backend #469 + #471; an older backend cannot issue to it or complete direct_post.jwt presentations, and an upgraded backend cannot serve an older SDK (no compatibility shims).
+
+Issuance: generate_proof requests carrying credential_response_encryption are answered with a fresh per-request public JWK (credential_response_encryption_jwk, or key-only when the config has no proof types); the new sign action decrypt_credential_response {jwe, deferred} is answered with exactly one of credential_count, transaction_id (+ optional interval) or error; credentials, the response-level credential_metadata (so the secret_seed receipt check) and the notification_id now come from the wallet's own decryption.
+
+Presentation: for direct_post.jwt the wallet returns response_jwe (JARM JWE built from the engine's response_encryption + verified_request.client_id) instead of vp_token; other response modes are unchanged.
+
+Removed/changed API: FlowCompleteMessage.credentialMetadataEncryptedResponse and the credential_metadata* entries of redacted_members are gone (FlowCompleteMessage/FlowCompleteResult.credentialMetadata remain but carry only display and claims, and only from plain issuer responses); CredentialResult.credential defaults to empty (encrypted placeholders; non-encrypted completions without credential values are refused at decode); SignResponseMessage/SignSubFlowResult gain credential_response_encryption_jwk, credential_count, transaction_id, interval, response_jwe, error_code, error; new VerifiedRequest, OpenID4xConfig.onCancel, WalletEngineSession.connectionGenerations. Renewals no longer delete the old credential batch before a replacement is stored.
+
+Scope/known limits: legacy engine WebSocket path only; WMP path is unchanged and not conformant with go-wallet-backend #163's child-flow protocol (a conformance fix, https://github.com/sirosfoundation/siros-sdk-kotlin/pull/285, is NOT included in this release and is tracked in https://github.com/sirosfoundation/siros-sdk-kotlin/issues/288); a narrow legacy socket-replacement race is tracked in https://github.com/sirosfoundation/siros-sdk-kotlin/issues/287; nothing has been tested end to end against a real engine.
+
+In this release, besides the engine-blind encryption work (#283) and the engine socket single-flight fix (#282):
+
+- **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`)**
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/280): the engine session matches, proves and answers `zkp_req`
+  requests with the shared circuit_zk core, with one-at-a-time presentation, per-query consumption eligibility, and a pending
+  signing that ends with its connection.
+- **`response_jwe` for the redirect `zkp_req` answer**
+  (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/284): when the engine asks for client-side encryption the wallet
+  builds and encrypts the JARM response itself and answers `response_jwe` with no `vp_token`; failures are refused with the
+  message id, never answered in the clear.
+- **Private data schema version 4** (privatedata-spec 3.0,
+  https://github.com/sirosfoundation/siros-sdk-kotlin/pull/281): `S.schemaVersion` 4, a typed `UnsupportedSchemaVersionException`
+  instead of overwriting a container this SDK does not implement, `set_extension` events for extension changes, and verbatim
+  preservation of unknown keypair, presentation, credential, extension and `S` members.
+- **Not included:** the WMP child-flow conformance (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/285, issue
+  https://github.com/sirosfoundation/siros-sdk-kotlin/issues/288). The WMP path is unchanged in this release.
+
+The entries below are the detailed changes that make up this release.
+
 ### Changed
 - **Redirect `zkp_req` presentations answer `response_jwe` when the engine asks for client-side encryption**
   (go-wallet-backend#471; builds on #280 and the engine-blind helpers of #283). When the `sign_presentation` request carries
