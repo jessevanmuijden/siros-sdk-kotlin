@@ -228,4 +228,24 @@ class CredentialUtilsEligibleInstancesTest {
 
         assertEquals(listOf(zkUsed), result)
     }
+
+    private fun matchResult(format: String?, vararg candidates: StoredCredential) = CredentialMatcher.MatchResult(
+        queryId = "q", format = format, candidates = candidates.toList(), requestedClaims = emptyList(),
+    )
+
+    @Test
+    fun perQuery_aZkpReqQueryDoesNotConsumeItsMdocCandidatesUnderConsumeNonZkp() {
+        val mdoc = credential(id = 1L, format = "mso_mdoc")
+        val history = listOf(presentation(1L))
+        // The stored format is a raw mdoc: by it alone the second presentation would look like a consuming one.
+        assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(listOf(mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")))
+        // The query is a zkp_req: it is answered with a proof, so the credential is still eligible.
+        assertEquals(
+            listOf(mdoc),
+            CredentialUtils.eligibleInstances(matchResult("zkp_req", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")),
+        )
+        // A raw mdoc query still consumes, and CONSUME_ALL consumes everything.
+        assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(matchResult("mso_mdoc", mdoc), CredentialConsumptionPolicy.CONSUME_NON_ZKP, history, setOf("k")))
+        assertEquals(emptyList<StoredCredential>(), CredentialUtils.eligibleInstances(matchResult("zkp_req", mdoc), CredentialConsumptionPolicy.CONSUME_ALL, history, setOf("k")))
+    }
 }

@@ -871,6 +871,22 @@ object CredentialUtils {
     }
 
     /**
+     * [eligibleInstances] for the candidates of one matched query, with the ZK status taken from the QUERY: a `zkp_req` query is
+     * answered with a proof whatever the stored format of its candidates is (an mdoc), so under
+     * [CredentialConsumptionPolicy.CONSUME_NON_ZKP] it does not consume them. Callers that only have the stored format
+     * (the overload above) would wrongly treat such a candidate as a raw presentation and refuse its reuse.
+     */
+    fun eligibleInstances(
+        result: CredentialMatcher.MatchResult,
+        policy: CredentialConsumptionPolicy,
+        presentationHistory: List<PresentationRecord>,
+        availableKeyIds: Set<String>,
+    ): List<StoredCredential> = eligibleInstances(
+        result.candidates, policy, presentationHistory, availableKeyIds,
+        isZkPresentation = { isZkpFormat(it.format) || isCircuitZkFormat(result.format) },
+    )
+
+    /**
      * Whether [kid] (a [StoredCredential.kid]) can actually be used to sign,
      * given the signer's current [availableKeyIds] - shared by
      * [eligibleInstances] (gates presentation) and [groupForDisplay] (gates
