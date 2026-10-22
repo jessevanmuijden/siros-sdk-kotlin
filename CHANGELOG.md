@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     bounded (the oldest of 256 are evicted).
   - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
     `enc` and `kid` only.
+- A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no
+  data. New `PresentationRequest.disclosesNoClaims` is true ONLY when every matched query is a `zkp_req` query whose plan consists solely of
+  the `pseudonym` and `age_check` functions. Anything else keeps every step: the legacy `zk-claim-disclosure-v1` claim disclosure (including
+  `mso_mdoc_zk`-style age-over-18), unknown functions, custom predicate functions, an empty or missing plan, a request that mixes such a
+  query with another, and every query in another format (also one that lists no claims, which may ask for the whole credential). New
+  `PresentationRequest.consentStepCount` is 1 for a request that discloses no claims, otherwise preview + one step per query + summary as
+  before. The sample consent screen follows it: choose the credential, then Share or Decline, with no empty claim-selection or summary step,
+  and the overview says that no data fields are shared instead of "0 data fields requested".
 
 ## [0.21.0] - 2026-10-22
 
