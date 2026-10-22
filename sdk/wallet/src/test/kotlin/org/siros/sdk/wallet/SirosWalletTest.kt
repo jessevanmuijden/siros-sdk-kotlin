@@ -6868,6 +6868,35 @@ class SirosWalletTest {
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
     }
 
+    @Test
+    fun circuitZkRedirect_aSelectedCredentialDeletedBeforeSigning_isRefusedNotSilentlyDropped() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // The credential the user picked disappears between the match and the sign request.
+        (getField(e.s.wallet, "credentialStore") as org.siros.sdk.credentials.CredentialStore).delete(1L)
+        e.sign.emit(redirectSignEncrypted(verifierKey()))
+        advanceUntilIdle()
+        // Correlated refusal (message_id echoed), nothing proved, nothing sent in the clear or encrypted.
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_anOversizedResponse_isRefusedWithTheMessageIdNotLeftToTheEnginesTimeout() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // `state` is echoed into the encrypted claims: 5 MiB of it makes the JWE exceed the engine's 4 MiB limit.
+        e.sign.emit(redirectSignEncrypted(verifierKey(), state = "s".repeat(5 * 1024 * 1024)))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "response-encryption") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
     private fun czkTwoCredentials() = listOf(
         StoredCredential(id = 1L, format = "mso_mdoc", raw = CzkFixtures.mdoc(CzkFixtures.psc, "2000-06-15"), credentialIssuerIdentifier = CzkFixtures.ISSUER,
             metadata = CredentialMetadata(name = "Nym A"), batchId = 1L, instanceId = 0),
