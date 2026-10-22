@@ -49,6 +49,7 @@ covered by the API dump; see [docs/TWO-APIS.md](docs/TWO-APIS.md).
 - JSON-RPC 2.0 codec with request-response correlation
 - Automatic reconnection with session resumption
 - Engine session management (WalletEngineSession)
+- Engine-blind encryption wire shapes (`CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest`, `VerifiedRequest`): the wallet holds the issuance response key and builds the encrypted presentation response, the engine relays ciphertext only
 
 ### sdk:auth
 - WebAuthn/FIDO2 registration and authentication
