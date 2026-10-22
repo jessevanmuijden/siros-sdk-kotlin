@@ -108,6 +108,36 @@ class KeystoreException(
     errorCode: String = "keystore_error",
 ) : SirosException(message, cause, errorCode)
 
+/**
+ * Raised when the private-data container carries a version this SDK does not implement, so it
+ * REFUSES to rewrite it (privatedata-spec 3.0, section 6): rewriting would drop or corrupt what a
+ * newer (or older, unmigrated) client wrote. It is not a failed merge and not a corrupt container;
+ * nothing was changed, nothing was uploaded, and the remedy is to update the SDK (or, for
+ * [Kind.STATE_VERSION] below 3, to open the wallet once in a client that migrates it).
+ *
+ * Reading is unaffected: the container is still unlocked and its credentials are readable.
+ */
+class UnsupportedSchemaVersionException(
+    message: String,
+    /** What the SDK does not implement. */
+    val kind: Kind,
+    /** The `schemaVersion` found (of `S` or of the event), or null when absent or not an integer. */
+    val schemaVersion: Int?,
+    /** The unknown event type, for [Kind.EVENT_TYPE]; otherwise null. */
+    val eventType: String? = null,
+) : SirosException(message, null, "unsupported_schema_version") {
+    enum class Kind {
+        /** `S.schemaVersion` is not one this SDK rewrites. */
+        STATE_VERSION,
+
+        /** An event carries a `schemaVersion` this SDK does not implement. */
+        EVENT_VERSION,
+
+        /** An event has a `type` that the schema versions this SDK implements do not define. */
+        EVENT_TYPE,
+    }
+}
+
 /** Raised for wallet-level orchestration errors. */
 open class WalletException(
     message: String,

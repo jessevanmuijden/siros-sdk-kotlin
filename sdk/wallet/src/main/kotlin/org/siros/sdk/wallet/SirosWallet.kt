@@ -67,6 +67,7 @@ import org.siros.sdk.credentials.Integrity
 import org.siros.sdk.credentials.IssuerEntitlement
 import org.siros.sdk.credentials.BackendApiException
 import org.siros.sdk.credentials.KeystoreException
+import org.siros.sdk.credentials.UnsupportedSchemaVersionException
 import org.siros.sdk.credentials.NetworkException
 import org.siros.sdk.credentials.SirosException
 import org.siros.sdk.credentials.TransactionDataError
@@ -6595,6 +6596,16 @@ class SirosWallet private constructor(
             val container = keystore.exportEncryptedContainer()
             sessionStore.privateDataJwe = String(container, Charsets.UTF_8)
             syncPrivateDataToBackend()
+        } catch (e: UnsupportedSchemaVersionException) {
+            // The container was written by a client with a newer (or an unmigrated older)
+            // schema. Nothing was stored locally and nothing was uploaded, so the backend's
+            // copy is intact; changes made in this session are not persisted until the SDK
+            // is updated. Reported as its own error, not as a generic sync failure.
+            Timber.w(e, "Private data not persisted: unsupported schema version")
+            eventListener?.onFlowError(
+                "sync",
+                "Private data not saved, it uses a version this app does not support: ${e.message}",
+            )
         } catch (e: Exception) {
             // Unlike syncPrivateDataToBackend's own catch, this previously
             // only logged - a credential saved just before this failed would

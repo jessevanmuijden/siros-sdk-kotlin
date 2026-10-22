@@ -27,6 +27,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moves the engine to `CONNECTING`, so a stale consent dialog no longer holds the presentation lock for DC API requests. `signMdocPresentationForProximity` now takes the same lock, so a proximity presentation cannot use the single copy a pending redirect presentation is about to consume.
 
 ### Changed
+- **Private data: `S.schemaVersion` 4** (privatedata-spec 3.0,
+  https://github.com/sirosfoundation/privatedata-spec/pull/9 at main merge commit 64315a5, with the vector fixes of https://github.com/sirosfoundation/privatedata-spec/pull/10). `JweKeystore`
+  now writes `S.schemaVersion` 4 (it wrote 3). A version 3 container it rewrites is
+  migrated by that number alone; everything else is carried through unchanged, including
+  unknown members of `S`, of credential entries and of `metadata` entries. `S.credentials[].metadata`
+  and `S.extensions` are version 4 members, so they are only ever written into a version 4
+  container (the SDK always rewrites at 4); containers written earlier that already carry them
+  under version 3 are read as version 4. The SDK does not fold or merge events (its only events are
+  the `set_extension` ones below), so the ETag/`If-Match` handling is unchanged.
+- `S.keypairs[]` entries the SDK cannot read (non-objects, legacy shapes, no parseable private key) and
+  unknown members of readable entries are now written back verbatim and in place (spec 3.0 section 6);
+  they used to be dropped on rewrite. Keys generated in a session are appended after them.
+  Likewise `S.presentations[]` entries are written back verbatim (`transactionId`, `data`, unknown
+  members) unless their record changed, and entries this SDK cannot read are kept in place.
+  `S.extensions` namespaces that are not objects and entry values that are not strings are written
+  back unchanged and in place (they used to be dropped); `setExtensionEntry` into such a namespace
+  fails at export instead of overwriting the peer's value.
+- **`set_extension` events (spec 3.0 section 6.1.3).** The SDK keeps no event log, but every change to
+  `S.extensions` (set, change, removal as a tombstone with `value` null) is now also appended to `events`
+  by `exportEncryptedContainer`: type `set_extension`, `schemaVersion` 4, a random non-zero 32-bit `eventId`,
+  `timestampSeconds`, and `parentHash` chained as wallet-frontend chains events (hash of the previous event,
+  or `lastEventHash` when `events` is empty; SHA-256 hex of the key-sorted compact JSON, checked against the
+  chain in the spec's vectors, including JavaScript key order, number and string serialization). A new event for a key always sorts after earlier ones for it (`timestampSeconds`, then `eventId`, as the merge rule orders them). `lastEventHash` is left as authored. Events are derived from the difference
+  to the entries loaded or last exported (plus an explicit set that the event history contradicts), so repeated exports append nothing twice. `set_extension` events
+  stamped 3 by earlier clients are read and kept; the SDK never writes one.
+- **Older SDK releases have no such guard.** The Kotlin exporter before this change unconditionally
+  wrote version 3, so an older SDK that rewrites a version 4 container silently downgrades it
+  instead of refusing. Integrators must not rely on the refusal until every SDK that shares an
+  account is on a release with this change.
+- **Breaking for clients still on version 3 only:** wallet-frontend (and older SDKs) that do not
+  implement version 4 will refuse to rewrite a container this SDK has rewritten, until updated.
+- The vendored privatedata-spec vectors are re-copied verbatim from privatedata-spec main at 64315a5 (with the fixtures
+  they reference); `vectors.PROVENANCE.txt` records the commit and digests.
+
 - **BREAKING (unreleased): engine-blind encryption: the wallet, not the engine, holds the response-encryption keys.**
   The engine now relays ciphertext and never sees an issued credential, a delivered `secret_seed` or a `vp_token`
   (go-wallet-backend#463 had to state that the engine decrypted the seed in clear). No compatibility shim: engine and
@@ -132,6 +166,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
 
 ### Added
+- **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`
+  `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`
+  throws it, before building or storing anything, when the unlocked container has an
+  `S.schemaVersion` other than 3 or 4 (absent counts as 1; 1 and 2 are not migrated here), an event
+  whose `schemaVersion` is not an integer from 1 to 4, or an event type the implemented versions do
+  not define (the ten types are the nine of wallet-frontend plus `set_extension`, accepted stamped 3 or 4).
+  Reading is unaffected, so credentials stay usable. `SirosWallet` reports it as its own
+  `onFlowError("sync", ...)` and neither stores nor uploads the container, so the backend copy is intact.
+  Previously such a container was silently rewritten as version 3.
+
+
 - **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`).** The engine
   session now matches, proves and answers `zkp_req` requests: the verifier's `client_metadata`
   (new optional field of `match_request` and `sign_request` params) reaches the matcher, and the

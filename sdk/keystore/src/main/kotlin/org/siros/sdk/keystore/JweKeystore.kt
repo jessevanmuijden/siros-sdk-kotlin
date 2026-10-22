@@ -154,6 +154,23 @@ class JweKeystore(
     // resolution is last-write-wins per (namespace, key), so one aggregate
     // entry per subsystem loses data whenever two devices write concurrently.
     private var extensions: MutableMap<String, MutableMap<String, String>> = mutableMapOf()
+
+    // The extension entries as loaded from the container or as last written; the difference to
+    // [extensions] is what [exportEncryptedContainer] appends as set_extension events.
+    private var extensionsAtLastSync: Map<String, Map<String, String>> = emptyMap()
+
+    // set_extension events appended since unlock, written after the container's own events.
+    // (namespace, key) pairs this session set or removed: an explicit removal beats the verbatim
+    // carrying of a non-string value the container held under the same key.
+    // Opaque (non-string) entries of the container that this session removed: no string was ever read
+    // for them, so the difference to the loaded map cannot show it, yet the removal needs a tombstone.
+    private val pendingOpaqueRemovals: MutableSet<Pair<String, String>> = mutableSetOf()
+
+    private val emittedOpaqueRemovals: MutableSet<Pair<String, String>> = mutableSetOf()
+
+    private val touchedExtensionKeys: MutableSet<Pair<String, String>> = mutableSetOf()
+
+    private val appendedEvents: MutableList<kotlinx.serialization.json.JsonObject> = mutableListOf()
     // OID4VCI renewal (credential re-issuance/renewal plan, Phase 2) -
     // refresh_token + the DPoP key it's bound to, keyed by the credential
     // batch's batchId - see privatedata-spec SPEC.md §6.2
@@ -260,7 +277,11 @@ class JweKeystore(
             if (plaintextJson is kotlinx.serialization.json.JsonObject) {
                 preservedWalletState = plaintextJson
             }
+            appendedEvents.clear()
+            touchedExtensionKeys.clear()
             loadWalletState(plaintextJson)
+            extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
+            pendingOpaqueRemovals.clear(); emittedOpaqueRemovals.clear()
 
             // Preserve container metadata for re-export
             containerMetadata = container
@@ -428,6 +449,7 @@ class JweKeystore(
         // counterpart (see PresentationRecord's KDoc) and are intentionally
         // dropped on reload, not round-tripped.
         val presentationsArray = state["presentations"]
+        loadedPresentations.clear()
         if (presentationsArray is kotlinx.serialization.json.JsonArray) {
             for (entry in presentationsArray) {
                 val presObj = entry as? kotlinx.serialization.json.JsonObject ?: continue
@@ -452,6 +474,7 @@ class JweKeystore(
                     }
                 }
                 presentationRecords[presId] = recordJson.toString()
+                loadedPresentations[presId] = presObj to recordJson.toString()
             }
         }
 
@@ -529,9 +552,14 @@ class JweKeystore(
         credentials.clear()
         credentialMetadata.clear()
         presentationRecords.clear()
+        loadedPresentations.clear()
         keyDids.clear()
         wscdCredentials.clear()
         extensions.clear()
+        extensionsAtLastSync = emptyMap()
+        appendedEvents.clear()
+        touchedExtensionKeys.clear()
+        pendingOpaqueRemovals.clear(); emittedOpaqueRemovals.clear()
         credentialRefreshTokens.clear()
         mainKey = null
         containerMetadata = null
@@ -617,6 +645,10 @@ class JweKeystore(
     override suspend fun setExtensionEntry(namespace: String, key: String, value: String) = mutex.withLock {
         requireUnlocked()
         extensions.getOrPut(namespace) { mutableMapOf() }[key] = value
+        touchedExtensionKeys.add(namespace to key)
+        pendingOpaqueRemovals.remove(namespace to key)
+        emittedOpaqueRemovals.remove(namespace to key)
+        Unit
     }
 
     /**
@@ -634,6 +666,10 @@ class JweKeystore(
      */
     override suspend fun removeExtensionEntry(namespace: String, key: String) = mutex.withLock {
         requireUnlocked()
+        noteOpaqueRemoval(namespace, key)
+        // Before the namespace lookup: a namespace holding only values this build does not read has no in-memory map, and the
+        // removal must still beat the verbatim carrying of the opaque value on every export.
+        touchedExtensionKeys.add(namespace to key)
         val ns = extensions[namespace] ?: return@withLock
         ns.remove(key)
         if (ns.isEmpty()) extensions.remove(namespace)
@@ -989,18 +1025,35 @@ class JweKeystore(
         requireUnlocked()
         val currentMainKey = mainKey!!
 
-        // Build the WalletStateContainer V3 plaintext
-        val walletState = buildWalletStateV3()
-        val payload = json.encodeToString(
-            kotlinx.serialization.json.JsonObject.serializer(),
-            walletState
-        )
+        // privatedata-spec 3.0 section 6: never rewrite a version or event type this
+        // SDK does not implement. Thrown BEFORE anything is built or stored, so the
+        // caller's stored container (and the backend's) stays exactly as it was.
+        PrivateDataSchema.rewriteBlocker(preservedWalletState)?.let { throw it }
 
-        // Encrypt the JWE with A256GCMKW / A256GCM using the main key
-        val header = JWEHeader(JWEAlgorithm.A256GCMKW, EncryptionMethod.A256GCM)
-        val jweObject = JWEObject(header, Payload(payload))
-        jweObject.encrypt(AESEncrypter(currentMainKey))
-        val jweString = jweObject.serialize()
+        // Spec 3.0 section 6.1.3: every change to S.extensions is also a set_extension event
+        // appended to `events`. `lastEventHash` stays as authored (it is the parent of events[0]).
+        val newEvents = pendingExtensionEvents()
+        appendedEvents.addAll(newEvents)
+
+        val jweString = try {
+            // Build the WalletStateContainer plaintext (S.schemaVersion 4)
+            val walletState = buildWalletStateV3()
+            val payload = json.encodeToString(
+                kotlinx.serialization.json.JsonObject.serializer(),
+                walletState
+            )
+
+            // Encrypt the JWE with A256GCMKW / A256GCM using the main key
+            val header = JWEHeader(JWEAlgorithm.A256GCMKW, EncryptionMethod.A256GCM)
+            val jweObject = JWEObject(header, Payload(payload))
+            jweObject.encrypt(AESEncrypter(currentMainKey))
+            jweObject.serialize()
+        } catch (e: Exception) {
+            repeat(newEvents.size) { appendedEvents.removeAt(appendedEvents.lastIndex) }
+            throw e
+        }
+        extensionsAtLastSync = extensions.mapValues { it.value.toMap() }
+        emittedOpaqueRemovals.addAll(pendingOpaqueRemovals); pendingOpaqueRemovals.clear()
 
         // Build the full container with the updated JWE
         val meta = containerMetadata ?: throw KeystoreException("No container metadata")
@@ -1009,6 +1062,81 @@ class JweKeystore(
 
         EncryptedContainer.serialize(updatedContainer)
     }
+
+    /**
+     * Remember removing [key] if something other than the string entries this build reads still creates it: a non-string value in
+     * `S.extensions`, or a `set_extension` event whose result is a live value (an entry that exists only in the event history, as in a
+     * container whose `S.extensions` was not folded). Without a tombstone another client replaying the history would bring it back.
+     */
+    private fun noteOpaqueRemoval(namespace: String, key: String) {
+        if ((namespace to key) in emittedOpaqueRemovals) return
+        val held = ((preservedWalletState?.get("S") as? kotlinx.serialization.json.JsonObject)?.get("extensions") as? kotlinx.serialization.json.JsonObject)
+            ?.get(namespace) as? kotlinx.serialization.json.JsonObject
+        val v = held?.get(key)
+        val opaqueInS = v != null && (v as? kotlinx.serialization.json.JsonPrimitive)?.isString != true
+        if (opaqueInS || liveInEvents(namespace, key)) pendingOpaqueRemovals.add(namespace to key)
+    }
+
+    /**
+     * The value the event history (including this session's events) leaves at `(namespace, key)`: null when no event writes it,
+     * [kotlinx.serialization.json.JsonNull] when the last write (by timestamp, then event id) is a tombstone, else the value.
+     */
+    private fun eventValue(namespace: String, key: String): kotlinx.serialization.json.JsonElement? {
+        val events = (preservedWalletState?.get("events") as? kotlinx.serialization.json.JsonArray).orEmpty() + appendedEvents
+        var best: Pair<Long, Long>? = null
+        var value: kotlinx.serialization.json.JsonElement? = null
+        for (e in events) {
+            val o = e as? kotlinx.serialization.json.JsonObject ?: continue
+            fun str(n: String) = (o[n] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            fun num(n: String) = PrivateDataSchema.longOrNull(o[n]) ?: 0L
+            if (str("type") != "set_extension" || str("namespace") != namespace || str("key") != key) continue
+            val at = num("timestampSeconds") to num("eventId")
+            val cur = best
+            if (cur == null || at.first > cur.first || (at.first == cur.first && at.second > cur.second)) {
+                best = at
+                value = o["value"]
+            }
+        }
+        return value
+    }
+
+    /** Whether the last write to `(namespace, key)` in the event history is a value (not a tombstone). */
+    private fun liveInEvents(namespace: String, key: String): Boolean =
+        eventValue(namespace, key).let { it != null && it !is kotlinx.serialization.json.JsonNull }
+
+    /**
+     * Keys this session set whose value equals the loaded one but which the event history contradicts (a pending event with another
+     * value, or a tombstone): the snapshot comparison alone would write nothing, and replaying the history would then undo the set.
+     */
+    private fun contradictedExplicitSets(): Map<Pair<String, String>, String> {
+        val out = LinkedHashMap<Pair<String, String>, String>()
+        for ((namespace, key) in touchedExtensionKeys) {
+            val value = extensions[namespace]?.get(key) ?: continue
+            if (extensionsAtLastSync[namespace]?.get(key) != value) continue // a real change: the normal difference covers it
+            val effective = eventValue(namespace, key)
+            if (effective != null && (effective as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content != value) {
+                out[namespace to key] = value
+            }
+        }
+        return out
+    }
+
+    /** The events for the extension changes since the container was loaded or last exported. */
+    private fun pendingExtensionEvents(): List<kotlinx.serialization.json.JsonObject> {
+        val original = (preservedWalletState?.get("events") as? kotlinx.serialization.json.JsonArray).orEmpty() + appendedEvents
+        val last = original.lastOrNull() as? kotlinx.serialization.json.JsonObject
+        val parent = if (last != null) {
+            ExtensionEvents.hash(last)
+        } else {
+            (preservedWalletState?.get("lastEventHash") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull ?: ""
+        }
+        val random = SecureRandom()
+        return ExtensionEvents.diff(
+            extensionsAtLastSync, extensions, parent, original.filterIsInstance<kotlinx.serialization.json.JsonObject>(), System.currentTimeMillis() / 1000, pendingOpaqueRemovals.toSet(), contradictedExplicitSets(),
+        ) { random.nextInt().toLong().and(0xFFFFFFFFL).let { if (it == 0L) 1L else it } }
+    }
+
+    private fun kotlinx.serialization.json.JsonArray?.orEmpty(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()
 
     private fun buildWalletStateV3(): kotlinx.serialization.json.JsonObject {
         // Preserve existing state if available, otherwise initialize fresh.
@@ -1025,11 +1153,18 @@ class JweKeystore(
             put("lastEventHash", kotlinx.serialization.json.JsonPrimitive(lastEventHash))
             val events = existingState?.get("events") as? kotlinx.serialization.json.JsonArray
                 ?: kotlinx.serialization.json.JsonArray(emptyList())
-            put("events", events)
+            put("events", if (appendedEvents.isEmpty()) events else kotlinx.serialization.json.JsonArray(events + appendedEvents))
             put("S", kotlinx.serialization.json.buildJsonObject {
-                put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(3))
+                // Always the current version. A version 3 container this SDK rewrites is
+                // thereby migrated (the spec's migration only sets this number), which is
+                // also what makes it legal to write metadata and extensions into it.
+                put("schemaVersion", kotlinx.serialization.json.JsonPrimitive(PrivateDataSchema.CURRENT_VERSION))
+                // Entries the container already held are written back verbatim and in place
+                // (privatedata-spec 3.0 section 6: an unparseable or unknown keypair entry or
+                // member MUST be preserved); only keys new this session are built below.
+                val (carried, carriedKids) = carriedKeypairEntries(existingState)
                 put("keypairs", kotlinx.serialization.json.JsonArray(
-                    keys.map { (kid, ecKey) ->
+                    carried + keys.filterKeys { it !in carriedKids }.map { (kid, ecKey) ->
                         kotlinx.serialization.json.buildJsonObject {
                             put("kid", kotlinx.serialization.json.JsonPrimitive(kid))
                             put("keypair", kotlinx.serialization.json.buildJsonObject {
@@ -1088,7 +1223,7 @@ class JweKeystore(
                 // before the VP is actually signed) - written as "" rather than
                 // restructuring that flow, a known, deliberate gap.
                 put("presentations", kotlinx.serialization.json.JsonArray(
-                    presentationRecords.map { (id, data) ->
+                    carriedPresentationEntries(existingState) + presentationRecords.filterKeys { it !in carriedPresentationIds }.map { (id, data) ->
                         val parsed = try {
                             json.parseToJsonElement(data) as? kotlinx.serialization.json.JsonObject
                         } catch (_: Exception) { null }
@@ -1145,18 +1280,7 @@ class JweKeystore(
                 // legacy fields below so a reader sees the normative shape
                 // first. Namespaces this build does not implement are
                 // written back exactly as they were read.
-                if (extensions.isNotEmpty()) {
-                    put("extensions", kotlinx.serialization.json.buildJsonObject {
-                        for ((namespace, entries) in extensions) {
-                            if (entries.isEmpty()) continue
-                            put(namespace, kotlinx.serialization.json.buildJsonObject {
-                                for ((key, value) in entries) {
-                                    put(key, kotlinx.serialization.json.JsonPrimitive(value))
-                                }
-                            })
-                        }
-                    })
-                }
+                buildExtensions(existingState)?.let { put("extensions", it) }
 
                 // credentialRefreshTokens (privatedata-spec §6.2,
                 // native-SDK-only extension) - same "in-memory map IS the
@@ -1184,6 +1308,122 @@ class JweKeystore(
                 }
             }
         }
+    }
+
+    /**
+     * `S.extensions` for export, or null when there is none to write.
+     *
+     * The in-memory map holds only what this build reads (string values in object namespaces).
+     * Everything else the container held (a namespace that is not an object, an entry whose value
+     * is not a string, an `extensions` that is not an object) is written back unchanged and in its
+     * original position, as spec 3.0 requires of a rewriter. An entry this build removed is dropped,
+     * one it set or changed is written, new ones follow the original ones.
+     *
+     * @throws KeystoreException if an entry was set in a namespace the container holds as a
+     *   non-object (or into a non-object `extensions`): writing it would replace someone's value.
+     */
+    private fun buildExtensions(existingState: kotlinx.serialization.json.JsonObject?): kotlinx.serialization.json.JsonElement? {
+        val origElement = (existingState?.get("S") as? kotlinx.serialization.json.JsonObject)?.get("extensions")
+        if (origElement != null && origElement !is kotlinx.serialization.json.JsonObject) {
+            if (extensions.values.any { it.isNotEmpty() }) {
+                throw KeystoreException("S.extensions in the container is not an object; refusing to overwrite it")
+            }
+            return origElement
+        }
+        val orig = origElement as? kotlinx.serialization.json.JsonObject
+        val out = LinkedHashMap<String, kotlinx.serialization.json.JsonElement>()
+        for ((namespace, nsValue) in orig.orEmptyObject()) {
+            val mem = extensions[namespace]
+            if (nsValue !is kotlinx.serialization.json.JsonObject) {
+                if (!mem.isNullOrEmpty()) throw KeystoreException("Extension namespace $namespace is not an object in the container; refusing to overwrite it")
+                out[namespace] = nsValue
+                continue
+            }
+            val entries = LinkedHashMap<String, kotlinx.serialization.json.JsonElement>()
+            for ((key, value) in nsValue) {
+                val isString = (value as? kotlinx.serialization.json.JsonPrimitive)?.isString == true
+                val m = mem?.get(key)
+                when {
+                    m != null -> entries[key] = kotlinx.serialization.json.JsonPrimitive(m)
+                    !isString && (namespace to key) !in touchedExtensionKeys -> entries[key] = value // not read here: verbatim
+                    // else: a string this build removed
+                }
+            }
+            mem?.forEach { (key, value) -> if (key !in entries) entries[key] = kotlinx.serialization.json.JsonPrimitive(value) }
+            if (entries.isNotEmpty() || nsValue.isEmpty()) out[namespace] = kotlinx.serialization.json.JsonObject(entries)
+        }
+        for ((namespace, mem) in extensions) {
+            if (namespace in out || mem.isEmpty() || (orig != null && namespace in orig)) continue
+            out[namespace] = kotlinx.serialization.json.buildJsonObject {
+                for ((key, value) in mem) put(key, kotlinx.serialization.json.JsonPrimitive(value))
+            }
+        }
+        return if (out.isEmpty() && orig == null) null else kotlinx.serialization.json.JsonObject(out)
+    }
+
+    private fun kotlinx.serialization.json.JsonObject?.orEmptyObject(): Map<String, kotlinx.serialization.json.JsonElement> = this ?: emptyMap()
+
+    // presentationId -> (the original S.presentations[] entry, the record string derived from it
+    // at load). An unchanged record writes its original entry back, so `transactionId`, `data`
+    // and unknown members survive (spec 3.0 section 6: presentations MUST be preserved).
+    private val loadedPresentations: MutableMap<Long, Pair<kotlinx.serialization.json.JsonObject, String>> = mutableMapOf()
+
+    /** Ids written by the last [carriedPresentationEntries] call; the rest are built from records. */
+    private var carriedPresentationIds: Set<Long> = emptySet()
+
+    /**
+     * `S.presentations[]` entries of the unlocked container to write back as they were: entries this
+     * build cannot read (kept in place), and readable ones whose record is unchanged. A readable one
+     * whose record was changed is rebuilt from the record; one whose record is gone was deleted.
+     */
+    private fun carriedPresentationEntries(
+        existingState: kotlinx.serialization.json.JsonObject?,
+    ): List<kotlinx.serialization.json.JsonElement> {
+        val original = ((existingState?.get("S") as? kotlinx.serialization.json.JsonObject)
+            ?.get("presentations") as? kotlinx.serialization.json.JsonArray) ?: run { carriedPresentationIds = emptySet(); return emptyList() }
+        val out = ArrayList<kotlinx.serialization.json.JsonElement>()
+        val ids = HashSet<Long>()
+        for (entry in original) {
+            val id = ((entry as? kotlinx.serialization.json.JsonObject)?.get("presentationId") as? kotlinx.serialization.json.JsonPrimitive)
+                ?.content?.toLongOrNull()
+            if (id == null) { out.add(entry); continue }
+            val loaded = loadedPresentations[id]
+            if (loaded != null && presentationRecords[id] == loaded.second && ids.add(id)) out.add(loaded.first)
+        }
+        carriedPresentationIds = ids
+        return out
+    }
+
+    /**
+     * The `S.keypairs[]` entries of the container this keystore was unlocked from, to be written
+     * back as they were, in their original order, plus the kids of those that are live keys.
+     *
+     * An entry is carried verbatim when it is not a keypair this build reads (not an object, no
+     * parseable `keypair.privateKey`, legacy shape) or when it is one and the in-memory key is
+     * still the one it holds (so unknown members, at the entry and at the `keypair` level, survive).
+     * An entry whose kid now maps to a different key is dropped: the key built from memory replaces it.
+     */
+    private fun carriedKeypairEntries(
+        existingState: kotlinx.serialization.json.JsonObject?,
+    ): Pair<List<kotlinx.serialization.json.JsonElement>, Set<String>> {
+        val original = ((existingState?.get("S") as? kotlinx.serialization.json.JsonObject)
+            ?.get("keypairs") as? kotlinx.serialization.json.JsonArray) ?: return emptyList<kotlinx.serialization.json.JsonElement>() to emptySet()
+        val out = ArrayList<kotlinx.serialization.json.JsonElement>()
+        val kids = HashSet<String>()
+        for (entry in original) {
+            val kp = (entry as? kotlinx.serialization.json.JsonObject)?.get("keypair") as? kotlinx.serialization.json.JsonObject
+            val kid = (kp?.get("kid") as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+            val priv = kp?.get("privateKey") as? kotlinx.serialization.json.JsonObject
+            val parsed = if (kid != null && priv != null) {
+                try { ECKey.Builder(ECKey.parse(priv.toString())).keyID(kid).build() } catch (_: Exception) { null }
+            } else null
+            when {
+                parsed == null -> out.add(entry) // not readable here: verbatim
+                keys[kid!!] == parsed -> { out.add(entry); kids.add(kid) }
+                else -> {} // replaced by a different in-memory key
+            }
+        }
+        return out to kids
     }
 
     /**
