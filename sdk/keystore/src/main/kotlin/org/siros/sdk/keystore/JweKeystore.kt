@@ -667,9 +667,11 @@ class JweKeystore(
     override suspend fun removeExtensionEntry(namespace: String, key: String) = mutex.withLock {
         requireUnlocked()
         noteOpaqueRemoval(namespace, key)
+        // Before the namespace lookup: a namespace holding only values this build does not read has no in-memory map, and the
+        // removal must still beat the verbatim carrying of the opaque value on every export.
+        touchedExtensionKeys.add(namespace to key)
         val ns = extensions[namespace] ?: return@withLock
         ns.remove(key)
-        touchedExtensionKeys.add(namespace to key)
         if (ns.isEmpty()) extensions.remove(namespace)
     }
 

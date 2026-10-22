@@ -368,6 +368,29 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun removingTheOnlyOpaqueEntryOfANamespaceRemovesItFromEveryExport() = runTest {
+        // The namespace holds nothing this build reads (no in-memory map), only opaque values.
+        val ext = buildJsonObject {
+            put("n", buildJsonObject { put("opaque", buildJsonObject { put("x", JsonPrimitive(1)) }); put("num", JsonPrimitive(2)) })
+            put("other", buildJsonObject { put("s", JsonPrimitive("v")) })
+        }
+        val k = unlocked(plaintext(extraS = mapOf("extensions" to ext)))
+        k.removeExtensionEntry("n", "opaque")
+        for (round in 1..3) {
+            val out = decrypt(k.exportEncryptedContainer())
+            val n = state(out)["extensions"]!!.jsonObject["n"]!!.jsonObject
+            assertEquals("round $round", listOf("num"), n.keys.toList())
+            assertEquals("round $round: exactly one tombstone", 1, out["events"]!!.jsonArray.count { it.jsonObject["key"]?.jsonPrimitive?.content == "opaque" })
+            k.removeExtensionEntry("n", "opaque") // a repeated removal changes nothing and emits nothing
+        }
+        // Removing the last opaque entry drops the (now empty) namespace's value too, and the other namespace is untouched.
+        k.removeExtensionEntry("n", "num")
+        val out = state(decrypt(k.exportEncryptedContainer()))["extensions"]!!.jsonObject
+        assertEquals(buildJsonObject { }, out["n"] ?: buildJsonObject { })
+        assertEquals(ext["other"], out["other"])
+    }
+
+    @Test
     fun hashKeyOrderAndNumbersFollowJavaScript() {
         fun h(js: String, e: JsonObject) = assertEquals(
             java.security.MessageDigest.getInstance("SHA-256").digest(js.toByteArray()).joinToString("") { "%02x".format(it) },
