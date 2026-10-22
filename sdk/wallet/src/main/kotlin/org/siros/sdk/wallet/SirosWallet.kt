@@ -2592,7 +2592,10 @@ class SirosWallet private constructor(
         credentialId: Long,
         disclosedClaims: List<String>?,
         sessionTranscriptBytes: ByteArray,
-    ): ByteArray {
+    ): ByteArray = zkSigningMutex.withLock {
+        // The same lock as every other path that consumes a credential instance (DC API, the engine's zkp_req redirect route): the
+        // eligibility check, the signing and the use record are one step, so a redirect waiting on its consent dialog cannot present
+        // the single copy that this proximity presentation also uses.
         val credential = credentialStore.getById(credentialId)
             ?: throw WalletException("Credential not found: $credentialId")
         val allInstances = credentialStore.getAll().filter { it.batchId == credential.batchId }
@@ -2613,7 +2616,7 @@ class SirosWallet private constructor(
             requestedClaims = disclosedClaims ?: emptyList(),
             timestamp = System.currentTimeMillis(),
         ))
-        return response
+        response
     }
 
     /**

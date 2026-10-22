@@ -7331,6 +7331,34 @@ class SirosWalletTest {
         assertEquals(0, e.s.prover.calls)
     }
 
+    @Test
+    fun circuitZkRedirect_aProximityPresentationCannotUseTheSingleCopyAPendingRedirectWillConsume() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.s.wallet.credentialConsumptionPolicy = CredentialConsumptionPolicy.CONSUME_ALL
+        var proximitySigned = 0
+        coEvery { (getField(e.s.wallet, "keystore") as KeystoreManager).signMdocPresentationForProximity(any(), any(), any(), any()) } coAnswers {
+            proximitySigned++
+            ByteArray(1)
+        }
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // the redirect now waits on its consent dialog, holding the presentation lock
+        assertEquals(1, e.s.consents.size)
+        val proximity = backgroundScope.async { runCatching { e.s.wallet.signMdocPresentationForProximity(1L, null, ByteArray(1)) } }
+        runCurrent()
+        assertTrue("the proximity presentation waits for the redirect's lock", proximity.isActive)
+        assertEquals(0, proximitySigned)
+        gate.complete(true)
+        advanceUntilIdle()
+        // The redirect consumed the only copy; the proximity presentation then finds nothing eligible and signs nothing.
+        val result = proximity.await()
+        assertTrue("proximity refused: $result", result.isFailure && result.exceptionOrNull() is WalletException)
+        assertEquals(0, proximitySigned)
+        assertEquals(1, e.s.history.size)
+    }
+
     private fun queryForDoctype(doctype: String) = Json.parseToJsonElement(
         """{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"$doctype"},"_req":[{"fn_id":"pseudonym","return":"n","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
     )
