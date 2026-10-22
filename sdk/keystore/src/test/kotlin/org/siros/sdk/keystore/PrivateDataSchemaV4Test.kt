@@ -470,6 +470,30 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun anExplicitSetThatTheEventHistoryContradictsIsWrittenAsAnOverridingEvent() = runTest {
+        fun ev(id: Long, ts: Long, value: JsonElement) = JsonObject(mapOf(
+            "type" to JsonPrimitive("set_extension"), "schemaVersion" to JsonPrimitive(4), "eventId" to JsonPrimitive(id), "parentHash" to JsonPrimitive(""),
+            "timestampSeconds" to JsonPrimitive(ts), "namespace" to JsonPrimitive("n"), "key" to JsonPrimitive("k"), "value" to value,
+        ))
+        val ext = buildJsonObject { put("n", buildJsonObject { put("k", JsonPrimitive("v1")) }) }
+        for ((label, pending) in listOf("conflicting value" to JsonPrimitive("v2"), "tombstone" to kotlinx.serialization.json.JsonNull)) {
+            val k = unlocked(plaintext(events = listOf(ev(1, 1, pending)), extraS = mapOf("extensions" to ext)))
+            k.setExtensionEntry("n", "k", "v1") // equals the snapshot, but the history says otherwise
+            val first = decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray
+            assertEquals(label, 2, first.size)
+            val written = first.last().jsonObject
+            assertEquals(label, JsonPrimitive("v1"), written["value"])
+            assertTrue(label, written["timestampSeconds"]!!.jsonPrimitive.content.toLong() > 1)
+            // Repeated exports write nothing more, and an untouched snapshot entry never gets an event.
+            assertEquals(label, 2, decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray.size)
+            k.setExtensionEntry("n", "k", "v1")
+            assertEquals(label, 2, decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray.size)
+        }
+        val untouched = unlocked(plaintext(events = listOf(ev(1, 1, JsonPrimitive("v2"))), extraS = mapOf("extensions" to ext)))
+        assertEquals(1, decrypt(untouched.exportEncryptedContainer())["events"]!!.jsonArray.size)
+    }
+
+    @Test
     fun hashKeyOrderAndNumbersFollowJavaScript() {
         fun h(js: String, e: JsonObject) = assertEquals(
             java.security.MessageDigest.getInstance("SHA-256").digest(js.toByteArray()).joinToString("") { "%02x".format(it) },

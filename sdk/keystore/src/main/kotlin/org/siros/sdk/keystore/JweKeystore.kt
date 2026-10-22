@@ -1077,11 +1077,14 @@ class JweKeystore(
         if (opaqueInS || liveInEvents(namespace, key)) pendingOpaqueRemovals.add(namespace to key)
     }
 
-    /** Whether the last write (by timestamp, then event id) to `(namespace, key)` in the event history, including this session's, is a value. */
-    private fun liveInEvents(namespace: String, key: String): Boolean {
+    /**
+     * The value the event history (including this session's events) leaves at `(namespace, key)`: null when no event writes it,
+     * [kotlinx.serialization.json.JsonNull] when the last write (by timestamp, then event id) is a tombstone, else the value.
+     */
+    private fun eventValue(namespace: String, key: String): kotlinx.serialization.json.JsonElement? {
         val events = (preservedWalletState?.get("events") as? kotlinx.serialization.json.JsonArray).orEmpty() + appendedEvents
         var best: Pair<Long, Long>? = null
-        var live = false
+        var value: kotlinx.serialization.json.JsonElement? = null
         for (e in events) {
             val o = e as? kotlinx.serialization.json.JsonObject ?: continue
             fun str(n: String) = (o[n] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
@@ -1091,10 +1094,31 @@ class JweKeystore(
             val cur = best
             if (cur == null || at.first > cur.first || (at.first == cur.first && at.second > cur.second)) {
                 best = at
-                live = o["value"] !is kotlinx.serialization.json.JsonNull
+                value = o["value"]
             }
         }
-        return live
+        return value
+    }
+
+    /** Whether the last write to `(namespace, key)` in the event history is a value (not a tombstone). */
+    private fun liveInEvents(namespace: String, key: String): Boolean =
+        eventValue(namespace, key).let { it != null && it !is kotlinx.serialization.json.JsonNull }
+
+    /**
+     * Keys this session set whose value equals the loaded one but which the event history contradicts (a pending event with another
+     * value, or a tombstone): the snapshot comparison alone would write nothing, and replaying the history would then undo the set.
+     */
+    private fun contradictedExplicitSets(): Map<Pair<String, String>, String> {
+        val out = LinkedHashMap<Pair<String, String>, String>()
+        for ((namespace, key) in touchedExtensionKeys) {
+            val value = extensions[namespace]?.get(key) ?: continue
+            if (extensionsAtLastSync[namespace]?.get(key) != value) continue // a real change: the normal difference covers it
+            val effective = eventValue(namespace, key)
+            if (effective != null && (effective as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content != value) {
+                out[namespace to key] = value
+            }
+        }
+        return out
     }
 
     /** The events for the extension changes since the container was loaded or last exported. */
@@ -1108,7 +1132,7 @@ class JweKeystore(
         }
         val random = SecureRandom()
         return ExtensionEvents.diff(
-            extensionsAtLastSync, extensions, parent, original.filterIsInstance<kotlinx.serialization.json.JsonObject>(), System.currentTimeMillis() / 1000, pendingOpaqueRemovals.toSet(),
+            extensionsAtLastSync, extensions, parent, original.filterIsInstance<kotlinx.serialization.json.JsonObject>(), System.currentTimeMillis() / 1000, pendingOpaqueRemovals.toSet(), contradictedExplicitSets(),
         ) { random.nextInt().toLong().and(0xFFFFFFFFL).let { if (it == 0L) 1L else it } }
     }
 

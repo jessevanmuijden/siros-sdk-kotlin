@@ -139,12 +139,14 @@ internal object ExtensionEvents {
         existing: List<JsonObject>,
         nowSeconds: Long,
         extraTombstones: Set<Pair<String, String>> = emptySet(),
+        extraSets: Map<Pair<String, String>, String> = emptyMap(),
         nextEventId: () -> Long,
     ): List<JsonObject> {
         val changes = sortedMapOf<Pair<String, String>, String?>(compareBy({ it.first }, { it.second }))
         for ((ns, entries) in after) for ((k, v) in entries) if (before[ns]?.get(k) != v) changes[ns to k] = v
         for ((ns, entries) in before) for (k in entries.keys) if (after[ns]?.containsKey(k) != true) changes[ns to k] = null
         for (nk in extraTombstones) if (after[nk.first]?.containsKey(nk.second) != true) changes.putIfAbsent(nk, null)
+        for ((nk, v) in extraSets) changes.putIfAbsent(nk, v)
         val out = ArrayList<JsonObject>()
         val taken = existing.mapNotNull { PrivateDataSchema.longOrNull(it["eventId"]) }.toHashSet()
         // Merge is last-write-wins by (timestampSeconds, eventId), so a new event for a key must sort

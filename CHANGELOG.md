@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timestampSeconds`, and `parentHash` chained as wallet-frontend chains events (hash of the previous event,
   or `lastEventHash` when `events` is empty; SHA-256 hex of the key-sorted compact JSON, checked against the
   chain in the spec's vectors, including JavaScript key order, number and string serialization). A new event for a key always sorts after earlier ones for it (`timestampSeconds`, then `eventId`, as the merge rule orders them). `lastEventHash` is left as authored. Events are derived from the difference
-  to the entries loaded or last exported, so repeated exports append nothing twice. `set_extension` events
+  to the entries loaded or last exported (plus an explicit set that the event history contradicts), so repeated exports append nothing twice. `set_extension` events
   stamped 3 by earlier clients are read and kept; the SDK never writes one.
 - **Older SDK releases have no such guard.** The Kotlin exporter before this change unconditionally
   wrote version 3, so an older SDK that rewrites a version 4 container silently downgrades it
