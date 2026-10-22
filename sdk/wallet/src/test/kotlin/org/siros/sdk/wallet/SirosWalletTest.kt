@@ -121,6 +121,11 @@ class SirosWalletTest {
     fun tearDown() {
         Dispatchers.resetMain()
         SirosWallet.createEngineSession = { baseUrl, tenantId -> WalletEngineSession(baseUrl, tenantId) }
+        // Every czkSetup wallet's scope records what escapes a launch (its scope has no other handler, like the real one): an
+        // unexpected failure of a signing coroutine fails the test that caused it, not only the two that inspect the recorder.
+        val escaped = czkUncaught.toList()
+        czkUncaught.clear()
+        assertTrue("an exception escaped a wallet coroutine: $escaped", escaped.isEmpty())
     }
 
     @Test
@@ -6418,6 +6423,9 @@ class SirosWalletTest {
         }
     }
 
+    /** What escaped a signing launch of a czkSetup wallet (its scope has no other handler, like the real one). */
+    private val czkUncaught = mutableListOf<Throwable>()
+
     private fun czkSetup(
         functions: List<org.siros.sdk.credentials.CircuitZkFunction> = listOf(
             org.siros.sdk.credentials.CircuitZkFunction(
@@ -6516,7 +6524,7 @@ class SirosWalletTest {
         val consentHandler = PresentationConsentHandler { r -> events += "consent"; consents += r; consent(r) }
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "Alice")),
-            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob() + kotlinx.coroutines.CoroutineExceptionHandler { _, t -> czkUncaught += t }),
             "apiClient" to apiClient,
             "keystore" to keystore,
             "credentialStore" to store,
@@ -6684,6 +6692,7 @@ class SirosWalletTest {
         every { engine.cancelFlow(any()) } just runs
         every { engine.sendSignRefusal(any(), any(), any()) } just runs
         every { engine.sendSignResponse(any(), vpToken = any(), messageId = any()) } just runs
+        every { engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) } just runs
         every { engine.sendMatchResponse(any(), any(), any()) } just runs
         val seen = mutableListOf<JsonObject?>()
         val s = czkSetup(trust = czkIds("x509_san_dns" to redirectClientId.removePrefix("x509_san_dns:")), consent = consent, flagOn = flagOn, offersCircuit = offersCircuit, credentials = credentials, onPlan = { seen += it })
@@ -6768,6 +6777,159 @@ class SirosWalletTest {
         assertTrue(e.s.history.single().zkProof) // written once, when answered
         verify(exactly = 0) { e.engine.cancelFlow(any()) }
         verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+    }
+
+    /** A verifier response-encryption key as the engine sends it in `response_encryption`: public JWK with a kid. */
+    private fun verifierKey() = com.nimbusds.jose.jwk.gen.ECKeyGenerator(com.nimbusds.jose.jwk.Curve.P_256).keyID("verifier-enc-1").generate()
+
+    private fun redirectSignEncrypted(
+        key: com.nimbusds.jose.jwk.ECKey,
+        verifiedClientId: String? = "x509_san_dns:rp.example",
+        state: String? = "st-1",
+        alg: String = "ECDH-ES",
+        enc: String = "A128GCM",
+    ) = redirectSign().let { m ->
+        m.copy(
+            params = m.params.copy(
+                responseEncryption = org.siros.sdk.transport.ResponseEncryptionRequest(
+                    jwk = Json.parseToJsonElement(key.toPublicJWK().toJSONString()).jsonObject, alg = alg, enc = enc,
+                ),
+                state = state,
+                verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = verifiedClientId, responseMode = "direct_post.jwt", signed = true, signatureVerification = "verified"),
+            ),
+        )
+    }
+
+    @Test
+    fun circuitZkRedirect_withResponseEncryption_answersOnlyWithAResponseJweTheVerifierCanOpen() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        val key = verifierKey()
+        e.sign.emit(redirectSignEncrypted(key, verifiedClientId = "x509_san_dns:rp.example"))
+        advanceUntilIdle()
+
+        val jwe = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(jwe), messageId = "m1") }
+        // NOTHING but the JWE: no vp_token alongside, no refusal.
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+        // Five non-empty segments (direct ECDH-ES has an empty encrypted-key segment only), header as the engine validates it.
+        val segments = jwe.captured.split(".")
+        assertEquals(5, segments.size)
+        // Only the encrypted-key segment may be empty, and only for direct ECDH-ES (this request's alg).
+        segments.forEachIndexed { i, seg -> if (i != 1) assertTrue("segment $i is empty", seg.isNotEmpty()) }
+        val parsed = com.nimbusds.jose.JWEObject.parse(jwe.captured)
+        val protectedHeader = Json.parseToJsonElement(String(java.util.Base64.getUrlDecoder().decode(segments[0]))).jsonObject
+        assertEquals("ECDH-ES", protectedHeader["alg"]!!.jsonPrimitive.content)
+        assertEquals("A128GCM", protectedHeader["enc"]!!.jsonPrimitive.content)
+        assertEquals("verifier-enc-1", protectedHeader["kid"]!!.jsonPrimitive.content)
+        assertEquals("ECDH-ES", parsed.header.algorithm.name)
+        assertEquals("A128GCM", parsed.header.encryptionMethod.name)
+        assertEquals("verifier-enc-1", parsed.header.keyID)
+        parsed.decrypt(com.nimbusds.jose.crypto.ECDHDecrypter(key))
+        val claims = Json.parseToJsonElement(parsed.payload.toString()).jsonObject
+        assertEquals("st-1", claims["state"]!!.jsonPrimitive.content)
+        assertEquals("x509_san_dns:rp.example", claims["aud"]!!.jsonPrimitive.content)
+        val token = claims["vp_token"]!!.jsonObject
+        assertEquals(setOf("q"), token.keys)
+        val decoded = CzkDecoded(token["q"]!!.jsonArray.single().jsonPrimitive.content)
+        assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym(redirectClientId)), decoded.results["n"])
+    }
+
+    @Test
+    fun circuitZkRedirect_theJarmAudienceIsTheEnginesVerifiedClientId_notTheSignRequestAudience() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        val key = verifierKey()
+        e.sign.emit(redirectSignEncrypted(key, verifiedClientId = "x509_san_dns:verified.example"))
+        advanceUntilIdle()
+        val jwe = slot<String>()
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(jwe), messageId = "m1") }
+        val parsed = com.nimbusds.jose.JWEObject.parse(jwe.captured).also { it.decrypt(com.nimbusds.jose.crypto.ECDHDecrypter(key)) }
+        assertEquals("x509_san_dns:verified.example", Json.parseToJsonElement(parsed.payload.toString()).jsonObject["aud"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun circuitZkRedirect_withResponseEncryptionButNoVerifiedClientId_isRefusedAndNothingIsSent() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSignEncrypted(verifierKey(), verifiedClientId = null))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "jarm-audience") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_anUnusableVerifierKey_isRefusedAndNothingIsSent() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // An algorithm pair the key cannot be used with: the response cannot be built, so the wallet refuses rather than send a plain vp_token.
+        e.sign.emit(redirectSignEncrypted(verifierKey(), alg = "RSA-OAEP-256"))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "response-encryption") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_aSelectedCredentialDeletedBeforeSigning_isRefusedNotSilentlyDropped() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // The credential the user picked disappears between the match and the sign request.
+        (getField(e.s.wallet, "credentialStore") as org.siros.sdk.credentials.CredentialStore).delete(1L)
+        e.sign.emit(redirectSignEncrypted(verifierKey()))
+        advanceUntilIdle()
+        // Correlated refusal (message_id echoed), nothing proved, nothing sent in the clear or encrypted.
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
+    @Test
+    fun circuitZkRedirect_anOversizedResponse_isRefusedWithTheMessageIdNotLeftToTheEnginesTimeout() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        // `state` is echoed into the encrypted claims: 5 MiB of it makes the JWE exceed the engine's 4 MiB limit.
+        e.sign.emit(redirectSignEncrypted(verifierKey(), state = "s".repeat(5 * 1024 * 1024)))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "response-encryption") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+    }
+
+    @Test
+    fun circuitZkRedirect_aSocketThatRejectsTheAnswerAndTheRefusal_letsNoExceptionEscape() = runTest(dispatcher) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        every { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) } throws IllegalStateException("socket refused the frame")
+        every { e.engine.sendSignRefusal(any(), any(), any()) } throws IllegalStateException("socket refused the frame")
+        e.sign.emit(redirectSignEncrypted(verifierKey()))
+        advanceUntilIdle() // an exception escaping the signing launch would fail the test here
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "error") }
+        assertTrue("nothing escaped the launch: $czkUncaught", czkUncaught.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_aRefusalSurvivesARejectingSocket() = runTest(dispatcher) {
+        val e = engineCzk(consent = { false })
+        e.matchOnce()
+        advanceUntilIdle()
+        every { e.engine.sendSignRefusal(any(), any(), any()) } throws IllegalStateException("socket refused the frame")
+        e.sign.emit(redirectSignEncrypted(verifierKey()))
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "consent-declined") }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        assertTrue("nothing escaped the launch: $czkUncaught", czkUncaught.isEmpty())
     }
 
     private fun czkTwoCredentials() = listOf(

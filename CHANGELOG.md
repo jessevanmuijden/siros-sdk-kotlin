@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Redirect `zkp_req` presentations answer `response_jwe` when the engine asks for client-side encryption**
+  (go-wallet-backend#471; builds on #280 and the engine-blind helpers of #283). When the `sign_presentation` request carries
+  `response_encryption`, `handleCircuitZkEngineSignPresentation` builds the JARM response itself
+  (`BlindPresentation.responseJwe`: `vp_token` `{queryId: [base64url CBOR ZkpPresentation]}`, `state` echoed,
+  `aud` = `verified_request.client_id`, protected header `alg`/`enc` as requested and the verifier JWK's `kid`)
+  and answers `{response_jwe}` with NO `vp_token`; a refusal or error never carries one. A request that asks for
+  encryption without a `verified_request.client_id`, a selected credential that is gone, a key/algorithm that cannot be applied
+  or an oversized response is refused (`SIGN_REFUSED` with the message id), never answered in the clear. Without
+  `response_encryption` (plain response modes) the answer is the `vp_token` as before. A refusal is sent before the local
+  cleanup and best effort: a socket that rejects the frame no longer throws out of the signing launch.
+
 ### Fixed
 - The sample consent screen judged a `zkp_req` query's candidates by their stored (mdoc) format, so under `CONSUME_NON_ZKP`
   a second presentation of the same credential disabled Share or dropped the credential although the SDK permits reuse for
