@@ -62,6 +62,8 @@ internal class BlindIssuance(
     private val keyFactory: (String, String) -> CredentialResponseKey? = { alg, enc -> CredentialResponseKey.generate(alg, enc) },
     /** Milliseconds, for the grace of a stale flow; replaceable so a test can use virtual time. */
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Runs at the start of [offer], before it claims anything; lets a test pause a caller between its own liveness check and the claim. */
+    private val beforeClaim: () -> Unit = {},
 ) {
     private class FlowState(val generation: Int) {
         @Volatile var key: CredentialResponseKey? = null
@@ -72,6 +74,19 @@ internal class BlindIssuance(
 
     private val flows = ConcurrentHashMap<String, FlowState>()
 
+    /** Guards the claim of a flow's state and the insertion of its key against [clear], which ends every flow at once. */
+    private val lock = Any()
+
+    /**
+     * Counts the session-wide teardowns ([clear]). A caller captures it BEFORE it checks that its session is alive and hands it to
+     * [offer], which re-checks it under [lock] when it claims the flow's state: a teardown that runs between the caller's check and
+     * the claim (the check and the claim are separate operations) is then noticed and the offer fails. A teardown after the claim
+     * removes the claimed state, which [offer] notices when it stores the key.
+     */
+    @Volatile
+    var epoch: Long = 0
+        private set
+
     /**
      * The `generate_proof` step: returns the public JWK to answer with, or null to decline (the engine offered no
      * encryption). A previous key of the flow is replaced.
@@ -79,7 +94,8 @@ internal class BlindIssuance(
      * @throws BlindIssuanceException when the issuer REQUIRES encryption and the wallet cannot provide a key for the
      *   negotiated pair: the issuance fails here, with a message that says why, instead of at the issuer.
      */
-    fun offer(flowId: String, request: CredentialResponseEncryptionRequest?, generation: Int = NO_GENERATION): JsonObject? {
+    fun offer(flowId: String, request: CredentialResponseEncryptionRequest?, generation: Int = NO_GENERATION, epoch: Long? = null): JsonObject? {
+        beforeClaim()
         if (request == null) {
             flows[flowId]?.key = null
             return null
@@ -87,7 +103,10 @@ internal class BlindIssuance(
         // The flow's state is claimed BEFORE the key is generated and the key is stored only while that very state is still
         // the flow's: a clear() or drop() that finishes during generation removes it, and the stale insertion is discarded
         // instead of resurrecting the flow (a handler can outlive the teardown that cancelled its scope).
-        val state = flows.compute(flowId) { _, old -> if (old == null || old.staleAt != NOT_STALE) FlowState(generation) else old }!!
+        val state = synchronized(lock) {
+            if (epoch != null && epoch != this.epoch) throw BlindIssuanceException("The session ended before its response key was requested")
+            flows.compute(flowId) { _, old -> if (old == null || old.staleAt != NOT_STALE) FlowState(generation) else old }!!
+        }
         val key = keyFactory(request.alg, request.enc)
         if (key == null) {
             state.key = null
@@ -97,9 +116,12 @@ internal class BlindIssuance(
             }
             return null
         }
-        if (flows[flowId] !== state) throw BlindIssuanceException("The issuance ended while its response key was being generated")
-        // (A teardown after this check is a teardown right after the offer returned: the state is out of the map and so is the key.)
-        state.key = key
+        synchronized(lock) {
+            // (A teardown during generation removed the state, so this identity check is what notices it; the epoch is checked at the claim.)
+            if (flows[flowId] !== state) throw BlindIssuanceException("The issuance ended while its response key was being generated")
+            // (A teardown after this is a teardown right after the offer returned: the state is out of the map and so is the key.)
+            state.key = key
+        }
         return key.publicJwk
     }
 
@@ -168,6 +190,11 @@ internal class BlindIssuance(
         if (credentials.size > BlindIssuanceControl.MAX_CREDENTIAL_COUNT) {
             throw BlindIssuanceException("The credential response carries more than ${BlindIssuanceControl.MAX_CREDENTIAL_COUNT} credentials", notificationId)
         }
+        // A deferred issuance cannot deliver a secret (privatedata-spec 5A.2). A PENDING response is never handed to the receipt
+        // check (its metadata is dropped below), so a seed it carries is refused here, with the notification_id so the issuer is told.
+        if (transactionId != null && metadata != null && !metadata.malformed && metadata.members.containsKey(org.siros.sdk.credentials.SecretSeedDelivery.MEMBER)) {
+            throw BlindIssuanceException(DeliveredMetadataRefusal.DEFERRED_SEED.text, notificationId)
+        }
         // Only a response that carries credentials is retained: a pending one (a transaction_id) is validated and answered but
         // keeps nothing, so repeated deferrals do not accumulate up to 1 MiB of metadata each.
         if (credentials.isNotEmpty()) {
@@ -208,7 +235,10 @@ internal class BlindIssuance(
 
     /** Forgets every flow's key and everything opened (cancel, logout, a new connection). */
     fun clear() {
-        flows.clear()
+        synchronized(lock) {
+            epoch++
+            flows.clear()
+        }
     }
 
     /** Whether a key is currently held for [flowId]. */

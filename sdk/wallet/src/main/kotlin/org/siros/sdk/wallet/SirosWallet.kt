@@ -6525,6 +6525,9 @@ class SirosWallet private constructor(
 
     private var wmpPeer: org.siros.sdk.transport.wmp.WmpPeer? = null
 
+    /** Test seam: runs after a sign request has passed its liveness checks and before it is dispatched (to pause it there). */
+    internal var signDispatchHook: (() -> Unit)? = null
+
     /** Counts the ends of WMP peers: a callback built for one lifetime is refused once it has moved on (see [wmpProfile]). */
     @Volatile
     private var wmpLifetime: Int = 0
@@ -7089,7 +7092,14 @@ class SirosWallet private constructor(
         }
         return org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile(
             org.siros.sdk.transport.wmp.openid4x.OpenID4xConfig(
-                onSignRequest = { flowId, params -> requireLive(); handleWmpSignRequest(flowId, params) },
+                onSignRequest = { flowId, params ->
+                    // The epoch is read BEFORE the liveness check and travels into the key claim, which re-checks it: a teardown
+                    // between the check and the claim is then noticed (the two are separate operations).
+                    val epoch = blindIssuance.epoch
+                    requireLive()
+                    signDispatchHook?.invoke()
+                    handleWmpSignRequestAt(flowId, params, epoch)
+                },
                 onMatchRequest = { flowId, payload -> handleWmpMatchRequest(flowId, payload) },
                 onTrustEvaluation = { flowId, payload -> handleWmpTrustEvaluation(flowId, payload) },
                 onComplete = { flowId, result -> onWmpFlowComplete(peer, flowId, result) },
@@ -7120,9 +7130,15 @@ class SirosWallet private constructor(
     private suspend fun handleWmpSignRequest(
         flowId: String,
         params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
+    ): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult = handleWmpSignRequestAt(flowId, params, blindIssuance.epoch)
+
+    private suspend fun handleWmpSignRequestAt(
+        flowId: String,
+        params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
+        epoch: Long,
     ): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult {
         try {
-            return handleWmpSignRequestUnguarded(flowId, params)
+            return handleWmpSignRequestUnguarded(flowId, params, epoch)
         } catch (e: Exception) {
             if (params.action == "generate_proof" || params.action == org.siros.sdk.transport.BlindEncryptionWire.ACTION_DECRYPT_CREDENTIAL_RESPONSE) {
                 blindIssuance.drop(flowId)
@@ -7134,12 +7150,13 @@ class SirosWallet private constructor(
     private suspend fun handleWmpSignRequestUnguarded(
         flowId: String,
         params: org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams,
+        epoch: Long,
     ): org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult {
         return when (params.action) {
             "generate_proof" -> {
                 val count = params.count ?: 1
                 // Before any proof is made (which can prompt the user): see the legacy handler's identical step.
-                val responseKeyJwk = blindIssuance.offer(flowId, params.credentialResponseEncryption)
+                val responseKeyJwk = blindIssuance.offer(flowId, params.credentialResponseEncryption, epoch = epoch)
                 // A key-only request (encryption wanted, a configuration with no proof types): the key and NO proofs.
                 if (params.credentialResponseEncryption != null && params.proofTypesSupported.isNullOrEmpty()) {
                     return org.siros.sdk.transport.wmp.openid4x.SignSubFlowResult(
@@ -7668,6 +7685,8 @@ class SirosWallet private constructor(
         // Observe sign requests → auto-sign with keystore
         scope.launch {
             engine.signRequests().collect { msg ->
+                // Read BEFORE the liveness guard below and handed to the key claim, which re-checks it (see BlindIssuance.epoch).
+                val blindEpoch = blindIssuance.epoch
                 // A request that reaches this collector after its session ended (logout, destroy) or was replaced by another
                 // session object is neither processed nor answered: nothing may be allocated for a session nobody owns.
                 if (isDestroyed || engineSession !== engine) {
@@ -7682,6 +7701,7 @@ class SirosWallet private constructor(
                     Timber.w("Ignoring a ${msg.action} request of a replaced socket (flow ${msg.flowId})")
                     return@collect
                 }
+                signDispatchHook?.invoke()
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
                 noteFlowId(msg.flowId)
                 // An SCA request waits on the user (up to the consent limit); doing that inside this
@@ -7700,11 +7720,14 @@ class SirosWallet private constructor(
                             // Before any proof is made (which can prompt the user): an issuer that requires an
                             // encrypted response this wallet cannot open fails the issuance here.
                             val responseKeyJwk = try {
-                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption, msg.connectionGeneration)
+                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption, msg.connectionGeneration, blindEpoch)
                             } catch (e: BlindIssuanceException) {
                                 // Answer the request (its message_id echoed) so the engine does not wait out its signing
                                 // timeout; the failure is also reported locally below.
-                                engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId, error = e.message)
+                                // (A session that ended meanwhile gets no answer at all.)
+                                if (!isDestroyed && engineSession === engine) {
+                                    engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId, error = e.message)
+                                }
                                 throw e
                             }
                             // A key-only request (encryption wanted, a configuration with no proof types): the key and NO proofs.

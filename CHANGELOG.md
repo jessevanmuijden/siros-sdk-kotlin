@@ -97,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     deletes the old batch and its refresh token BEFORE the replacement is known: they are removed only once at least one
     replacement credential has been stored, so a rejected, unreadable or (encrypted) unavailable replacement leaves the old
     batch in place.
+  - **Review follow-ups, round 7.** The liveness check of a WMP callback (and the guards of the legacy sign-request collector) and the
+    claim of the flow's response-key state were separate operations, so a logout or destroy between them was undone by the late
+    claim. `BlindIssuance.epoch` (counts session-wide teardowns) is read BEFORE the liveness check, handed to `offer`, and
+    re-checked under the holder's lock when the state is claimed; a teardown after the claim removes the claimed state, which the
+    key insertion notices. A legacy request of a session that ended in the meantime is not answered. A PENDING (`transaction_id`)
+    response that carries `org.siros.secret_seed` is refused like any deferred seed (its metadata used to be dropped unread), with
+    its `notification_id` kept so `credential_failure` reaches the issuer on both transports.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

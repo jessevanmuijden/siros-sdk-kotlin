@@ -13272,6 +13272,131 @@ class SirosWalletTest {
         assertTrue(blind.holdsKey("flow-new"))
     }
 
+    @Test
+    fun aWmpCallbackPausedBetweenItsLivenessCheckAndTheKeyClaim_retainsNothingAfterTeardown() = runTest(dispatcher) {
+        for (teardown in listOf<(SirosWallet) -> Unit>({ it.logout() }, { it.destroy() })) {
+            val paused = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val blind = BlindIssuance()
+            val wallet = endedSessionWallet(blind)
+            wallet.signDispatchHook = { paused.countDown(); release.await() }
+            val method = wallet::class.declaredMemberFunctions.first { it.name == "wmpProfile" }
+            method.isAccessible = true
+            val profile = method.call(wallet, null) as org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile
+            val ctx = RecordingPeerContext()
+            profile.init(ctx)
+            // The callback passes its liveness check and stops just before it claims the flow's state.
+            val running = java.util.concurrent.Executors.newSingleThreadExecutor().submit { runBlocking { profile.handleProgress(wmpKeyOnlyRequest()) } }
+            assertTrue(paused.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            teardown(wallet)
+            release.countDown()
+            running.get(5, java.util.concurrent.TimeUnit.SECONDS)
+            assertFalse("the teardown is not undone by the late claim", blind.holdsKey("flow-late"))
+            assertEquals(null, blind.take("flow-late"))
+            assertTrue("no key is answered", ctx.notifications.none { it.second?.containsKey("credential_response_encryption_jwk") == true })
+        }
+    }
+
+    @Test
+    fun aLegacyRequestPausedBetweenItsGuardAndTheKeyClaim_retainsNothingAfterLogout_andIsNotAnswered() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.disconnect() } just runs
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val paused = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(Dispatchers.IO + SupervisorJob()),
+            "supervisorJob" to SupervisorJob(),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "sessionStore" to mockk<SessionStore>(relaxed = true),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to blind,
+        )
+        wallet.signDispatchHook = { paused.countDown(); release.await() }
+        invokeConnectEngine(wallet, "app-token")
+        runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(200) }
+        val emitter = kotlinx.coroutines.GlobalScope.launch(Dispatchers.Default) {
+            signFlow.emit(
+                SignRequestMessage(
+                    flowId = "flow-late", messageId = "m", action = "generate_proof",
+                    params = SignRequestParams(credentialResponseEncryption = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", true)),
+                )
+            )
+        }
+        assertTrue(paused.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        wallet.logout()
+        release.countDown()
+        runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(300) }
+        emitter.cancel()
+        assertFalse("the logout is not undone by the late claim", blind.holdsKey("flow-late"))
+        verify(exactly = 0) { engine.sendSignResponse(flowId = "flow-late", messageId = any(), error = any()) }
+        verify(exactly = 0) { engine.sendSignResponse(flowId = "flow-late", messageId = any(), credentialResponseEncryptionJwk = any()) }
+    }
+
+    @Test
+    fun aPendingDeferredResponseCarryingASeed_isReportedToTheIssuerOnBothTransports() = runTest(dispatcher) {
+        val seedBody = """{"transaction_id":"tx","interval":5,"notification_id":"n-seed","credential_metadata":{"org.siros.secret_seed":{"$deliveredNamespace":"${NymTestCredentials.seedHex}"}}}"""
+        // Legacy transport.
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        val blind = BlindIssuance()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to blind,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val jwk = blind.offer("flow-d", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-d", messageId = "msg-d", action = "decrypt_credential_response",
+                params = SignRequestParams(jwe = issuerEncrypt(jwk, "ECDH-ES", "A256GCM", seedBody), deferred = true),
+            )
+        )
+        advanceUntilIdle()
+        io.mockk.verifyOrder {
+            engine.sendCredentialNotification("flow-d", "n-seed", CredentialNotificationEvent.FAILURE, "credential_response_rejected")
+            engine.sendSignResponse(flowId = "flow-d", messageId = "msg-d", error = any())
+        }
+        verify(exactly = 0) { engine.sendSignResponse(flowId = "flow-d", messageId = "msg-d", transactionId = any(), interval = any()) }
+        // WMP transport.
+        val peer = mockk<org.siros.sdk.transport.wmp.WmpPeer>(relaxed = true)
+        val wmpBlind = BlindIssuance()
+        val wmpWallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "wmpPeer" to peer,
+            "blindIssuance" to wmpBlind,
+        )
+        val method = wmpWallet::class.declaredMemberFunctions.first { it.name == "handleWmpSignRequest" }
+        method.isAccessible = true
+        val wjwk = wmpBlind.offer("flow-w", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
+        val thrown = runCatching {
+            runBlocking {
+                method.callSuspend(
+                    wmpWallet, "flow-w",
+                    org.siros.sdk.transport.wmp.openid4x.SignSubFlowParams(action = "decrypt_credential_response", deferred = true, jwe = issuerEncrypt(wjwk, "ECDH-ES", "A256GCM", seedBody)),
+                )
+            }
+        }.exceptionOrNull()
+        assertTrue(unwrapped(thrown ?: throw AssertionError("expected a refusal")) is BlindIssuanceException)
+        coVerify(exactly = 1) {
+            peer.sendCredentialNotification(flowId = "flow-w", notificationId = "n-seed", event = CredentialNotificationEvent.FAILURE, eventDescription = "credential_response_rejected")
+        }
+    }
+
     private fun legacyEncryptedPresentationWallet(
         credentials: List<StoredCredential>,
         keystore: KeystoreManager,

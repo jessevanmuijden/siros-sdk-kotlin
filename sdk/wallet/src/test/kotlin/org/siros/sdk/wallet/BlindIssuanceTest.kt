@@ -443,5 +443,53 @@ class BlindIssuanceTest {
         b.purgeStale(graceMs = 30_000, now = 31_001)
         assertNull(b.take("old2"))
     }
+
+    // ---- the liveness check and the claim are one step against teardown; pending responses never carry a seed (round 7) ----
+
+    @Test
+    fun aTeardownBetweenTheCallersCheckAndTheClaim_isNoticedAndNothingIsRetained() {
+        val paused = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val holder = BlindIssuance(beforeClaim = { paused.countDown(); release.await() })
+        val epoch = holder.epoch // captured BEFORE the caller's own liveness check
+        val result = java.util.concurrent.Executors.newSingleThreadExecutor().submit<Result<JsonObject?>> {
+            runCatching { holder.offer("f", request, epoch = epoch) }
+        }
+        assertTrue(paused.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        holder.clear() // the teardown runs while the caller is between its check and its claim
+        release.countDown()
+        assertTrue("the offer fails", result.get(5, java.util.concurrent.TimeUnit.SECONDS).isFailure)
+        assertFalse("no key is retained after the teardown", holder.holdsKey("f"))
+        assertNull(holder.take("f"))
+        // A caller whose epoch was read AFTER the teardown is served.
+        val fresh = BlindIssuance()
+        fresh.clear()
+        assertNotNull(fresh.offer("g", request, epoch = fresh.epoch))
+    }
+
+    @Test
+    fun aPendingResponseCarryingASeedIsRefusedWithItsNotificationId_onFirstAndOnDeferredAnswers() {
+        val seed = """{"org.siros.secret_seed":{"org.siros.nym_auth":"00112233445566778899aabbccddeeff"}}"""
+        for (deferred in listOf(false, true)) {
+            val b = BlindIssuance()
+            val jwk = b.offer("f", request)!!
+            val e = assertThrows(BlindIssuanceException::class.java) {
+                b.open("f", issuerRaw(jwk, """{"transaction_id":"tx","interval":5,"notification_id":"n-seed","credential_metadata":$seed}"""), deferred = deferred)
+            }
+            assertEquals("the issuer can be told", "n-seed", e.notificationId)
+            assertFalse("the message names no value", e.message!!.contains("00112233"))
+            assertNull("nothing is retained", b.take("f"))
+        }
+    }
+
+    @Test
+    fun aNormalPendingResponseIsStillAnswered_evenWithOtherMetadata() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        val control = b.open("f", issuerRaw(jwk, """{"transaction_id":"tx","interval":5,"credential_metadata":{"display":[{"name":"x"}]}}"""), deferred = true)
+        assertEquals("tx", control.transactionId)
+        assertEquals(5, control.interval)
+        assertEquals("tx2", b.open("f", issuerRaw(jwk, """{"transaction_id":"tx2"}"""), deferred = true).transactionId)
+    }
 }
 
