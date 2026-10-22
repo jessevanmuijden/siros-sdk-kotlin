@@ -543,5 +543,51 @@ class BlindIssuanceTest {
         assertEquals(5, control.interval)
         assertEquals("tx2", b.open("f", issuerRaw(jwk, """{"transaction_id":"tx2"}"""), deferred = true).transactionId)
     }
+
+    // ---- "a key was offered" outlives the key (review of #293) ----
+
+    @Test
+    fun theOfferedMarkerSurvivesASocketReplacementAndItsGrace_andEndsOnlyWithTheFlow() {
+        val b = BlindIssuance()
+        assertFalse(b.wasOffered("f"))
+        b.offer("f", request, generation = 1)
+        assertTrue(b.wasOffered("f"))
+        b.markStaleBefore(2, now = 1_000)
+        assertFalse("the key is gone", b.holdsKey("f"))
+        assertTrue("the fact that one was offered is not", b.wasOffered("f"))
+        b.purgeStale(graceMs = 30_000, now = 99_000)
+        assertTrue("not even after the grace: the flow has not ended", b.wasOffered("f"))
+        b.drop("f")
+        assertFalse("a dropped flow is no longer offered", b.wasOffered("f"))
+    }
+
+    @Test
+    fun theOfferedMarkerEndsOnEveryTerminalPath_andIsBounded() {
+        // take (an encrypted completion), drop (error, cancel, sign failure, a plain completion), clear (logout, destroy, a new connection)
+        val b = BlindIssuance()
+        val jwk = b.offer("taken", request)!!
+        b.open("taken", issuer(jwk, response("c")), deferred = false)
+        b.offer("dropped", request)
+        b.offer("cleared", request)
+        assertTrue(b.wasOffered("taken") && b.wasOffered("dropped") && b.wasOffered("cleared"))
+        b.take("taken")
+        b.drop("dropped")
+        assertFalse(b.wasOffered("taken"))
+        assertFalse(b.wasOffered("dropped"))
+        assertTrue(b.wasOffered("cleared"))
+        b.clear()
+        assertFalse(b.wasOffered("cleared"))
+        // A declined offer (no encryption) never marks the flow, and neither does one that could not be served.
+        assertNull(b.offer("declined", null))
+        assertFalse(b.wasOffered("declined"))
+        assertNull(b.offer("unsupported", CredentialResponseEncryptionRequest("RSA-OAEP", "A128GCM", required = false)))
+        assertFalse(b.wasOffered("unsupported"))
+        // Bounded: flows whose end never arrives cannot grow the markers without limit; the oldest go first.
+        val many = BlindIssuance()
+        repeat(BlindIssuance.MAX_OFFERED_MARKERS + 50) { many.offer("flow-$it", request) }
+        assertFalse(many.wasOffered("flow-0"))
+        assertTrue(many.wasOffered("flow-${BlindIssuance.MAX_OFFERED_MARKERS + 49}"))
+        assertEquals(BlindIssuance.MAX_OFFERED_MARKERS, (0 until BlindIssuance.MAX_OFFERED_MARKERS + 50).count { many.wasOffered("flow-$it") })
+    }
 }
 

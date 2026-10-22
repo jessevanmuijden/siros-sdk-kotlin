@@ -74,6 +74,17 @@ internal class BlindIssuance(
 
     private val flows = ConcurrentHashMap<String, FlowState>()
 
+    /**
+     * The flows a response key was OFFERED for, as a fact of its own: it outlives the key, which a socket replacement clears
+     * ([markStaleBefore]) while a completion buffered before the replacement can still arrive, and it is what tells a plaintext
+     * completion apart from an encrypted one. Removed only when the flow ends or is dropped ([drop], [take]) or everything is
+     * ([clear]) - never by [markStaleBefore] or [purgeStale]. Bounded: the oldest are evicted beyond [MAX_OFFERED_MARKERS], so a
+     * flow whose end never arrives cannot grow it without limit. Guarded by [lock].
+     */
+    private val offeredFlows = object : LinkedHashMap<String, Unit>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>): Boolean = size > MAX_OFFERED_MARKERS
+    }
+
     /** Guards the claim of a flow's state and the insertion of its key against [clear], which ends every flow at once. */
     private val lock = Any()
 
@@ -121,6 +132,8 @@ internal class BlindIssuance(
             if (flows[flowId] !== state) throw BlindIssuanceException("The issuance ended while its response key was being generated")
             // (A teardown after this is a teardown right after the offer returned: the state is out of the map and so is the key.)
             state.key = key
+            offeredFlows.remove(flowId) // re-insert as the newest
+            offeredFlows[flowId] = Unit
         }
         return key.publicJwk
     }
@@ -224,6 +237,7 @@ internal class BlindIssuance(
      * Null when nothing was opened for the flow.
      */
     fun take(flowId: String): OpenedIssuance? {
+        synchronized(lock) { offeredFlows.remove(flowId) }
         val state = flows.remove(flowId) ?: return null
         val opened = synchronized(state.opened) { state.opened.toList() }
         if (opened.isEmpty()) return null
@@ -239,6 +253,7 @@ internal class BlindIssuance(
 
     /** Forgets one flow's key and everything opened for it. */
     fun drop(flowId: String) {
+        synchronized(lock) { offeredFlows.remove(flowId) }
         flows.remove(flowId)
     }
 
@@ -247,16 +262,26 @@ internal class BlindIssuance(
         synchronized(lock) {
             epoch++
             flows.clear()
+            offeredFlows.clear()
         }
     }
 
     /** Whether a key is currently held for [flowId]. */
     fun holdsKey(flowId: String): Boolean = flows[flowId]?.key != null
 
+    /**
+     * Whether a response key was offered for [flowId] and the flow has not ended since, whatever became of the key itself (a socket
+     * replacement drops it). A completion for such a flow that is not encrypted is a downgrade.
+     */
+    fun wasOffered(flowId: String): Boolean = synchronized(lock) { flowId in offeredFlows }
+
     companion object {
         /** A flow not tied to a connection generation (WMP) is never made stale by a socket replacement. */
         const val NO_GENERATION = Int.MAX_VALUE
         private const val NOT_STALE = Long.MIN_VALUE
+
+        /** How many "a key was offered" markers are kept at most (the oldest go first). */
+        const val MAX_OFFERED_MARKERS = 256
     }
 
     private fun credentialValue(entry: JsonElement, notificationId: String?): String {

@@ -12450,6 +12450,8 @@ class SirosWalletTest {
         wireMetadata: String? = null,
         /** True: a response key was offered although the issuer then answered in clear (an optional encryption). */
         offeredKey: Boolean = false,
+        /** With [offeredKey]: the socket the flow lived on was replaced (and the sweep ran) before the completion arrived. */
+        socketReplacedSinceOffer: Boolean = false,
         /** The `notification_id` the engine's ENCRYPTED completion frame carries on its entries (it should never be read). */
         frameNotificationId: String? = null,
         /** True: another flow (`flow-other`) holds an issuance key and an opened response while this one completes. */
@@ -12527,7 +12529,10 @@ class SirosWalletTest {
             val other = blind.offer("flow-other", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))!!
             blind.open("flow-other", issuerEncrypt(other, "ECDH-ES", "A256GCM", issuerBody("bystander credential").toString()), deferred = false)
         }
-        if (offeredKey) blind.offer(flowId, org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false))
+        if (offeredKey) {
+            blind.offer(flowId, org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false), generation = 0)
+            if (socketReplacedSinceOffer) blind.markStaleBefore(1)
+        }
         completeFlow.emit(
             FlowCompleteMessage(
                 flowId = flowId, credentials = completionResults,
@@ -13473,6 +13478,44 @@ class SirosWalletTest {
         val ids = s.store.getAll().map { it.id }
         assertEquals(1, ids.size)
         assertFalse("the superseded batch is gone", 41L in ids)
+    }
+
+    @Test
+    fun aBufferedPlainCompletionAfterASocketReplacement_isStillRefusedAsADowngrade() = runTest(dispatcher) {
+        // Controlled interleaving: a key was held for the flow, the socket was replaced (the sweep dropped the key), THEN the plaintext
+        // completion that was buffered before the replacement is processed.
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            encrypted = false, offeredKey = true, socketReplacedSinceOffer = true,
+        )
+        assertFalse("the sweep did drop the key", s.blind.holdsKey("flow-delivered"))
+        assertNothingStored(s)
+        verify(exactly = 1) { s.engine.sendCredentialNotification("flow-delivered", "notif-1", CredentialNotificationEvent.FAILURE, any()) }
+        verify(exactly = 1) { s.listener.onFlowError("flow-delivered", match { it.contains("answered in clear") }, any()) }
+        assertFalse("the marker ends with the flow", s.blind.wasOffered("flow-delivered"))
+    }
+
+    @Test
+    fun aBufferedPlainWmpCompletionAfterASocketReplacement_isStillRefusedAsADowngrade() = runTest(dispatcher) {
+        val blind = BlindIssuance()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to org.siros.sdk.keystore.JweKeystore(),
+            "eventListener" to listener,
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to blind,
+        )
+        blind.offer("flow-b", org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false), generation = 0)
+        blind.markStaleBefore(1)
+        assertFalse(blind.holdsKey("flow-b"))
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "onWmpFlowComplete" }
+        method.isAccessible = true
+        runBlocking { method.callSuspend(wallet, null, "flow-b", Json.parseToJsonElement("""{"credentials":[{"format":"dc+sd-jwt","credential":"x"}]}""").jsonObject) }
+        verify(exactly = 0) { listener.onFlowComplete("flow-b", any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-b", match { it.contains("answered in clear") }, any()) }
+        assertFalse(blind.wasOffered("flow-b"))
     }
 
     @Test

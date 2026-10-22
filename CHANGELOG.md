@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Every `credentials[]` entry of the decrypted response must be an object with a STRING `credential` (OID4VCI 1.0 section 8.3): the
     inner value is stored; a bare string, a non-object entry or a non-string/empty inner value (an `ldp_vc` object) is refused. The
     pre-1.0 draft shape, a top-level string `credential`, is still accepted.
+  - The plaintext-completion refusal keys on a separate per-flow "a response key was offered" marker (`BlindIssuance.wasOffered`) that
+    outlives the key: a socket replacement drops the key, so a plaintext completion buffered before the replacement is still
+    refused. The marker ends only with the flow (completion, error, cancel, sign failure, drop) or a session-wide clear, and is
+    bounded (the oldest of 256 are evicted).
   - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
     `enc` and `kid` only.
 

@@ -5891,7 +5891,7 @@ class SirosWallet private constructor(
         }
         val engineCreds = decoded.credentials.orEmpty()
         // A key was offered for this flow: a plain completion carrying credentials is an error, never accepted (the caller drops the key after).
-        if (opened == null && engineCreds.isNotEmpty() && blindIssuance.holdsKey(flowId)) {
+        if (opened == null && engineCreds.isNotEmpty() && blindIssuance.wasOffered(flowId)) {
             return DeliveredMetadataRefusal.PLAIN_RESPONSE to engineCreds.mapNotNull { it.notificationId }
         }
         if (opened != null && opened.credentials.size != engineCreds.size) {
@@ -5959,7 +5959,7 @@ class SirosWallet private constructor(
     private fun fillEncryptedCompletion(msg: FlowCompleteMessage): EncryptedCompletion {
         if (!msg.credentialResponseEncrypted) {
             // A key was offered for this flow, so the completion must be encrypted: plaintext credentials are an ERROR, never accepted.
-            val offered = blindIssuance.holdsKey(msg.flowId)
+            val offered = blindIssuance.wasOffered(msg.flowId)
             // A plain completion never reads the key an optional encryption offer left behind.
             blindIssuance.drop(msg.flowId)
             if (offered && !msg.credentials.isNullOrEmpty()) {
