@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     automatic reconnect) drops the private key of every flow that lived on an older one; what such a flow had already opened is
     kept for 30 s (so a completion buffered before the replacement can still be processed) and then forgotten. A pending
     (`transaction_id`) response is validated and answered but retains nothing; only a response that carries credentials is kept.
+  - **Review follow-ups, round 4.** `logout()` and `destroy()` now really close the WMP peer: it is captured before the field is
+    nulled (the old asynchronous `wmpPeer?.close()` read the field after it was null, so it never closed) and closed on a scope
+    of its own, so a `destroy()` that cancels the wallet's scope does not cancel it. A request that reaches an ENDED session is
+    refused before it allocates anything: the WMP callbacks check the session generation and `isDestroyed`, and the legacy
+    sign-request collector ignores requests of a session that was ended or replaced. A `generate_proof`/
+    `decrypt_credential_response` stamped with an older socket of the session is dropped (no key, no answer), and an accepted
+    offer is tied to the generation stamped on its frame, not the one current when it happens to be processed.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

@@ -1889,7 +1889,7 @@ class SirosWallet private constructor(
         engineStateJob = null
         engineSession?.disconnect()
         engineSession = null
-        scope.launch { wmpPeer?.close() }
+        closeWmpPeer(wmpPeer)
         wmpPeer = null
         credentialNotifier = null
         // The response keys and everything opened with them are session material: gone with the session, synchronously,
@@ -2156,7 +2156,7 @@ class SirosWallet private constructor(
         releaseAllZkProvers()
         engineSession?.disconnect()
         engineSession = null
-        scope.launch { wmpPeer?.close() }
+        closeWmpPeer(wmpPeer)
         wmpPeer = null
         credentialNotifier = null
         blindIssuance.clear()
@@ -7046,11 +7046,36 @@ class SirosWallet private constructor(
         }
     }
 
-    /** The OpenID4x profile this wallet runs over [peer]: every callback is the wallet's own. */
-    private fun wmpProfile(peer: org.siros.sdk.transport.wmp.WmpPeer?): org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile =
-        org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile(
+    /**
+     * Closes [peer] (captured BEFORE the field is nulled, which the old asynchronous `wmpPeer?.close()` read AFTER and so never
+     * closed it) on a scope of its own: a `destroy()` cancels the wallet's scope and must not cancel the close.
+     */
+    private fun closeWmpPeer(peer: org.siros.sdk.transport.wmp.WmpPeer?) {
+        if (peer == null) return
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                try {
+                    peer.close()
+                } catch (e: Exception) {
+                    Timber.w(e, "Closing the WMP peer failed (non-fatal)")
+                }
+            }
+        }
+    }
+
+    /**
+     * The OpenID4x profile this wallet runs over [peer]: every callback is the wallet's own. A callback that reaches the wallet
+     * after the session it was built for has ended (a logout or destroy; the peer has a scope of its own and may still deliver
+     * a request) is refused BEFORE it allocates anything.
+     */
+    private fun wmpProfile(peer: org.siros.sdk.transport.wmp.WmpPeer?): org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile {
+        val generation = sessionGeneration
+        fun requireLive() {
+            if (isDestroyed || sessionGeneration != generation) throw WalletException("This wallet session has ended")
+        }
+        return org.siros.sdk.transport.wmp.openid4x.OpenID4xProfile(
             org.siros.sdk.transport.wmp.openid4x.OpenID4xConfig(
-                onSignRequest = { flowId, params -> handleWmpSignRequest(flowId, params) },
+                onSignRequest = { flowId, params -> requireLive(); handleWmpSignRequest(flowId, params) },
                 onMatchRequest = { flowId, payload -> handleWmpMatchRequest(flowId, payload) },
                 onTrustEvaluation = { flowId, payload -> handleWmpTrustEvaluation(flowId, payload) },
                 onComplete = { flowId, result -> onWmpFlowComplete(peer, flowId, result) },
@@ -7058,6 +7083,7 @@ class SirosWallet private constructor(
                 onCancel = { flowId -> onWmpFlowCancel(flowId) },
             )
         )
+    }
 
     /** The orchestrator cancelled a WMP flow: its response key and opened response are released. */
     private fun onWmpFlowCancel(flowId: String) {
@@ -7624,6 +7650,20 @@ class SirosWallet private constructor(
         // Observe sign requests → auto-sign with keystore
         scope.launch {
             engine.signRequests().collect { msg ->
+                // A request that reaches this collector after its session ended (logout, destroy) or was replaced by another
+                // session object is neither processed nor answered: nothing may be allocated for a session nobody owns.
+                if (isDestroyed || engineSession !== engine) {
+                    Timber.w("Ignoring a sign request of an ended engine session (flow ${msg.flowId})")
+                    return@collect
+                }
+                // One stamped with an older socket of this session is dead on the engine (and would be answered on the wrong
+                // connection): no key is allocated for it.
+                if ((msg.action == "generate_proof" || msg.action == org.siros.sdk.transport.BlindEncryptionWire.ACTION_DECRYPT_CREDENTIAL_RESPONSE) &&
+                    msg.connectionGeneration < engine.connectionGeneration
+                ) {
+                    Timber.w("Ignoring a ${msg.action} request of a replaced socket (flow ${msg.flowId})")
+                    return@collect
+                }
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
                 noteFlowId(msg.flowId)
                 // An SCA request waits on the user (up to the consent limit); doing that inside this
@@ -7642,7 +7682,7 @@ class SirosWallet private constructor(
                             // Before any proof is made (which can prompt the user): an issuer that requires an
                             // encrypted response this wallet cannot open fails the issuance here.
                             val responseKeyJwk = try {
-                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption, engine.connectionGeneration)
+                                blindIssuance.offer(msg.flowId, params?.credentialResponseEncryption, msg.connectionGeneration)
                             } catch (e: BlindIssuanceException) {
                                 // Answer the request (its message_id echoed) so the engine does not wait out its signing
                                 // timeout; the failure is also reported locally below.
