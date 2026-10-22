@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The sample consent screen judged a `zkp_req` query's candidates by their stored (mdoc) format, so under `CONSUME_NON_ZKP`
+  a second presentation of the same credential disabled Share or dropped the credential although the SDK permits reuse for
+  a proof. New `CredentialUtils.eligibleInstances(MatchResult, ...)` takes the ZK status from the query; the screen uses it
+  for both the exhausted-query check and the accepted ids.
+
 ### Added
 - **`zkp_req` over the redirect transport (QR / same-device, `direct_post.jwt`).** The engine
   session now matches, proves and answers `zkp_req` requests: the verifier's `client_metadata`
