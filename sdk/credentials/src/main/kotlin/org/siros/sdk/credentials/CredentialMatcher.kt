@@ -83,6 +83,11 @@ object CredentialMatcher {
         val ppidContext: String? = null,
         /** The plan a `circuit_zk` query was matched under; null for every other format. */
         val circuitZkPlan: CircuitZkPlan? = null,
+        /**
+         * Why a `zkp_req` query matched nothing, as a stable content-free code (`invalid-request`, `request-rejected`,
+         * `no-circuit`, `source-format`, `no-credential`); null when it matched or for any other format.
+         */
+        val circuitZkRefusal: String? = null,
     )
 
     /**
@@ -475,13 +480,14 @@ object CredentialMatcher {
         clientMetadata: JsonObject?,
     ): MatchResult? {
         val queryId = query["id"]?.jsonPrimitive?.contentOrNull ?: return null
-        val (plan, matched) = CircuitZkMatching.match(query, clientMetadata, credentials, support)
+        val evaluation = CircuitZkMatching.evaluate(query, clientMetadata, credentials, support)
         return MatchResult(
             queryId = queryId,
             format = query["format"]?.jsonPrimitive?.contentOrNull,
-            candidates = matched,
+            candidates = evaluation.matched,
             requestedClaims = emptyList(),
-            circuitZkPlan = plan,
+            circuitZkPlan = evaluation.plan,
+            circuitZkRefusal = evaluation.refusal,
         )
     }
 

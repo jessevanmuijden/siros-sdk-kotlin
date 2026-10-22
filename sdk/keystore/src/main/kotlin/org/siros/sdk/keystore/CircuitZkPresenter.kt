@@ -53,12 +53,15 @@ internal enum class CircuitZkRefusalReason {
     CIRCUIT_UNSUPPORTED_BY_APP,
     INVALID_INPUT, INVALID_CIRCUIT, SEED_MISMATCH, ISSUER_SIGNATURE, DEVICE_SIGNATURE, CREDENTIAL, UNSATISFIED,
     PROVER_FAILED, PROOF_INVALID, MISMATCH, INTERNAL,
+
+    /** The credential's `x5chain` has no usable Document Signer certificate (absent, empty, or its first element is empty or oversized). */
+    ISSUER_KEY_UNUSABLE,
 }
 
 private const val SECRET_SEED_BYTES = 16
 
 /** The steps of [CircuitZkPresenter.present], in order. Internal. */
-internal enum class CircuitZkStep { VALIDATE, DOCTYPE, NAMESPACE, WITNESS, COMMITMENT, SECRET_COMMITMENT, PREDICATE, CIRCUIT, PROVE, BUILD }
+internal enum class CircuitZkStep { VALIDATE, DOCTYPE, NAMESPACE, WITNESS, COMMITMENT, SECRET_COMMITMENT, PREDICATE, CIRCUIT, ISSUER_KEY, PROVE, BUILD }
 
 /** What kind of wallet-held private input a function needs. */
 enum class CircuitZkWitnessKind {
@@ -468,10 +471,16 @@ class CircuitZkPresenter(
             it.supports(plan, document.docType, serving) && prover.admits(it, plan) && filter.offeredCircuitId(it) != null && filter.offersProofSystem(it)
         } ?: refuse(CircuitZkStep.CIRCUIT)
 
-        // 6b. The issuer chain the response must carry (leaf first, within the wire limits): checked before any proof is made.
-        val chain = issuerChain(document)?.takeIf {
-            it.size <= CircuitZkResponsePresentation.MAX_KEYS && it.all { c -> c.size in 1..CircuitZkResponsePresentation.MAX_KEY_BYTES }
-        } ?: refuse(CircuitZkStep.BUILD)
+        // 6b. The issuer key set the response must carry: ONLY the Document Signer (leaf) certificate, the first of the
+        // credential's x5chain (rulebook v0.4: a set of DS certificates, not a chain; the circuits take one issuer key Q, the
+        // leaf's). Never the intermediates or the root. Checked before any proof is made.
+        val leaf = issuerChain(document)?.firstOrNull()
+            ?.takeIf { it.size in 1..CircuitZkResponsePresentation.MAX_KEY_BYTES }
+            ?: run {
+                Timber.w("circuit_zk presentation refused (step=${CircuitZkStep.ISSUER_KEY})")
+                throw CircuitZkError.AccessDenied(CircuitZkStep.ISSUER_KEY, CircuitZkRefusalReason.ISSUER_KEY_UNUSABLE)
+            }
+        val chain = listOf(leaf)
 
         // 7. Prove.
         val output = try {
@@ -495,8 +504,8 @@ class CircuitZkPresenter(
             witnesses.values.forEach { it.privateSeed?.fill(0) }
         }
 
-        // 8. Assemble. Every planned function has a result (none skipped), and the issuer chain travels with the proof:
-        // the verifier validates it through its trust evaluation and takes the issuer key from its leaf.
+        // 8. Assemble. Every planned function has a result (none skipped), and the DS certificate travels with the proof:
+        // the verifier validates it through its trust evaluation and takes the issuer key from it.
         val handles = plan.functions.map { it.handle }.toSet()
         if (output.results.keys != handles) refuse(CircuitZkStep.BUILD)
         val presentation = try {

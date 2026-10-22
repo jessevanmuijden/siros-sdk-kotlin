@@ -49,8 +49,9 @@ sealed interface ResultValue {
  *
  * @property systemId A `system_id` the request OFFERED (`system_id_values`); the verifier's registry maps it to a proof system.
  * @property proof The proof bytes, opaque here.
- * @property issuerKeySet For `mso_mdoc`: the DER Document Signer certificates, leaf first, taken from the credential's own
- *   `issuerAuth` `x5chain`; at most [MAX_KEYS] of at most [MAX_KEY_BYTES] bytes each. The verifier validates them through
+ * @property issuerKeySet For `mso_mdoc`: the DER Document Signer certificates (a set, not a chain). The wallet's presenter sends
+ *   exactly ONE, the DS leaf (first of the credential's `issuerAuth` `x5chain`; never an intermediate or the root), because the
+ *   archive circuits take a single issuer key Q; this class accepts at most [MAX_KEYS] of at most [MAX_KEY_BYTES] bytes each. The verifier validates them through
  *   its trust evaluation and takes the issuer key from the validated certificate.
  * @property proofTime The circuit's time input in the exact 20-byte form ([ProofTime]); REQUIRED for `mso_mdoc`, so the
  *   presenter always sets it for that source format.

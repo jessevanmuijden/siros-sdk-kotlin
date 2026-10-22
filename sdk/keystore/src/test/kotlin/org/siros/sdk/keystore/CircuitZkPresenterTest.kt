@@ -275,26 +275,40 @@ class CircuitZkPresenterTest {
     }
 
     @Test
-    fun `the issuer key set is the credentials own x5chain, leaf first, and the whole presentation validates`() {
+    fun `a two-certificate x5chain yields a one-element issuer key set holding only the DS leaf, and the whole presentation validates`() {
         val ca = ByteArray(30) { (it + 100).toByte() }
         val result = present(presenter(), request(cred = credential(chain = listOf(cert, ca))))
-        assertEquals(2, result.presentation.issuerKeySet.size)
-        assertArrayEquals(cert, result.presentation.issuerKeySet[0])
-        assertArrayEquals(ca, result.presentation.issuerKeySet[1])
+        assertEquals(1, result.presentation.issuerKeySet.size)
+        assertArrayEquals(cert, result.presentation.issuerKeySet.single())
         val p = plan(pseudonymFn(), ageFn())
         val token = JsonObject(mapOf("q" to kotlinx.serialization.json.JsonArray(listOf(result.json)))).toString()
         assertNull(org.siros.sdk.credentials.CircuitZkResponseValidator.validate(p, token))
     }
 
     @Test
-    fun `an issuer chain outside the wire limits is refused before any proof is made`() {
+    fun `a long x5chain still sends the leaf only, and the leaf outside the wire limit is refused before any proof is made`() {
         val prover = CountingProver(FakeCircuitZkProver.optIn())
-        assertDenied(CircuitZkStep.BUILD) { present(presenter(prover), request(cred = credential(chain = List(9) { cert }))) }
-        assertDenied(CircuitZkStep.BUILD) { present(presenter(prover), request(cred = credential(chain = listOf(ByteArray(4097))))) }
-        assertEquals(0, prover.calls)
-        // The limits are inclusive.
-        present(presenter(prover), request(cred = credential(chain = List(8) { ByteArray(4096) })))
+        val long = present(presenter(prover), request(cred = credential(chain = listOf(cert) + List(8) { ByteArray(4097) })))
+        assertEquals(1, long.presentation.issuerKeySet.size)
+        assertArrayEquals(cert, long.presentation.issuerKeySet.single())
         assertEquals(1, prover.calls)
+        assertDeniedIssuerKey { present(presenter(prover), request(cred = credential(chain = listOf(ByteArray(4097))))) }
+        assertDeniedIssuerKey { present(presenter(prover), request(cred = credential(chain = listOf(ByteArray(0), cert)))) }
+        assertEquals(1, prover.calls)
+        // The limit is inclusive.
+        present(presenter(prover), request(cred = credential(chain = listOf(ByteArray(4096)))))
+        assertEquals(2, prover.calls)
+    }
+
+    private fun assertDeniedIssuerKey(block: () -> Unit) {
+        try {
+            block()
+            fail("expected an issuer-key refusal")
+        } catch (e: CircuitZkError.AccessDenied) {
+            assertEquals(CircuitZkStep.ISSUER_KEY, e.step)
+            assertEquals(CircuitZkRefusalReason.ISSUER_KEY_UNUSABLE, e.reason)
+            assertEquals("circuit_zk_access_denied", e.errorCode)
+        }
     }
 
     // -------- refusals --------
@@ -417,7 +431,8 @@ class CircuitZkPresenterTest {
 
     @Test
     fun `a credential without an x5chain is refused`() {
-        assertDenied(CircuitZkStep.BUILD) { present(presenter(), request(cred = credential(withX5chain = false))) }
+        assertDeniedIssuerKey { present(presenter(), request(cred = credential(withX5chain = false))) }
+        assertDeniedIssuerKey { present(presenter(), request(cred = credential(chain = emptyList()))) }
     }
 
     @Test
