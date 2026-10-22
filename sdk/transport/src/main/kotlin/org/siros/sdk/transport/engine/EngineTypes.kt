@@ -429,6 +429,14 @@ data class FlowCompleteMessage(
      */
     @kotlinx.serialization.Transient val issuerTrust: IssuerTrustReport? = null,
 ) {
+    init {
+        // A PLAIN completion carries every credential's value: only an encrypted one has placeholders, which the wallet fills
+        // from its own decrypted response. A missing value is a malformed completion, refused here (it used to fail decoding).
+        require(credentialResponseEncrypted || credentials.orEmpty().all { it.credential.isNotEmpty() }) {
+            "A completion that is not encrypted carries a value for every credential"
+        }
+    }
+
     /**
      * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
      * stamped by the session on receipt, never on the wire. Kept out of the

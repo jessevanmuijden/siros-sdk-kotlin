@@ -345,6 +345,15 @@ class OpenID4xProfileTest {
     }
 
     @Test
+    fun aPlainFlowCompleteResultMustCarryAValueForEveryCredential_anEncryptedOneMayNot() {
+        fun decode(body: String) = FlowCompleteResult.decode(kotlinx.serialization.json.Json.parseToJsonElement(body) as JsonObject)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { decode("""{"credentials":[{"format":"dc+sd-jwt"}]}""") }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { decode("""{"credentials":[{"format":"dc+sd-jwt","credential":""}]}""") }
+        assertEquals(1, decode("""{"credentials":[{"format":"dc+sd-jwt"}],"credential_response_encrypted":true}""")!!.credentials!!.size)
+        assertEquals("x", decode("""{"credentials":[{"format":"dc+sd-jwt","credential":"x"}]}""")!!.credentials!!.single().credential)
+    }
+
+    @Test
     fun flowCompleteResultWithANonBooleanEncryptedMarkerReadsItAsFalse() {
         listOf(""""true"""", "1", "null", "{}").forEach { flag ->
             val result = kotlinx.serialization.json.Json.parseToJsonElement(

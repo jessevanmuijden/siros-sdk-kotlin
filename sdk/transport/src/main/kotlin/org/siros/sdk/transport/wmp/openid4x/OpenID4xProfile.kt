@@ -176,6 +176,13 @@ data class FlowCompleteResult(
     @Serializable(with = org.siros.sdk.transport.RedactedMembersSerializer::class)
     val redactedMembers: Set<String> = emptySet(),
 ) {
+    init {
+        // Only an encrypted completion has placeholders; a plain one carries a value for every credential.
+        require(credentialResponseEncrypted || credentials.orEmpty().all { it.credential.isNotEmpty() }) {
+            "A completion that is not encrypted carries a value for every credential"
+        }
+    }
+
     /** Whether the renewal material (`refresh_token`, `dpop_jwk`, `dpop_key_id`) was withheld, wholly or in part. */
     val renewalMaterialRedacted: Boolean
         get() = redactedMembers.any { it == "refresh_token" || it == "dpop_jwk" || it == "dpop_key_id" }

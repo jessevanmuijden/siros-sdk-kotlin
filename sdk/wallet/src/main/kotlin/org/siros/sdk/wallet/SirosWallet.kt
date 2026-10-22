@@ -8331,18 +8331,9 @@ class SirosWallet private constructor(
                         .find { it.batchId == oldBatchId && it.instanceId == 0 }
                         ?.let { CredentialUtils.extractClaims(it) }
                 }
-                pendingRenewalSourceBatchId?.let { oldBatchId ->
-                    credentialStore.getAll()
-                        .filter { it.batchId == oldBatchId }
-                        .forEach {
-                            credentialStore.delete(it.id)
-                            // Same §6.1.2 rule as deleteCredential's - a
-                            // superseded batch's holder state must go with it.
-                            bbsHolderStateVault?.remove(it.id.toString())
-                        }
-                    removeCredentialRefreshToken(oldBatchId)
-                    Timber.d("Replaced renewed credential batch $oldBatchId with $batchId")
-                }
+                // The old batch is superseded only once at least one replacement credential has been stored (below): a replacement
+                // that is rejected or unreadable must not leave the wallet with neither.
+                val supersededBatchId = pendingRenewalSourceBatchId
                 val wasRenewal = pendingRenewalSourceBatchId != null
                 pendingRenewalSourceBatchId = null
 
@@ -8598,6 +8589,21 @@ class SirosWallet private constructor(
                     persistAndSyncKeystore()
                     rejectDeliveredMetadata(msg.flowId, msg.credentials.orEmpty().mapNotNull { it.notificationId }, DeliveredMetadataRefusal.NO_STORAGE)
                     return@collect
+                }
+
+                // Credential re-issuance/renewal plan: the replacement is in the store, so the batch it replaces goes now - its
+                // credentials AND its refresh_token entry (privatedata-spec §6.2), and with each its holder state.
+                if (supersededBatchId != null && storedCount > 0) {
+                    credentialStore.getAll()
+                        .filter { it.batchId == supersededBatchId }
+                        .forEach {
+                            credentialStore.delete(it.id)
+                            // Same §6.1.2 rule as deleteCredential's - a
+                            // superseded batch's holder state must go with it.
+                            bbsHolderStateVault?.remove(it.id.toString())
+                        }
+                    removeCredentialRefreshToken(supersededBatchId)
+                    Timber.d("Replaced renewed credential batch $supersededBatchId with $batchId")
                 }
 
                 // Credential re-issuance/renewal plan (Phase 2): durably

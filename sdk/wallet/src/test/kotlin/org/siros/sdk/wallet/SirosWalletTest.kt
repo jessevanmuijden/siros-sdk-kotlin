@@ -12337,6 +12337,53 @@ class SirosWalletTest {
     }
 
     @Test
+    fun aMalformedPlainWmpCompletion_isNeverReportedAsSuccess() = runTest(dispatcher) {
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to org.siros.sdk.keystore.JweKeystore(),
+            "eventListener" to listener,
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "blindIssuance" to BlindIssuance(),
+        )
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "onWmpFlowComplete" }
+        method.isAccessible = true
+        val malformed = Json.parseToJsonElement("""{"credentials":[{"format":"dc+sd-jwt"}]}""").jsonObject
+        runBlocking { method.callSuspend(wallet, null, "flow-m", malformed) }
+        verify(exactly = 0) { listener.onFlowComplete(any(), any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-m", any(), any()) }
+    }
+
+    @Test
+    fun aRenewalWhoseReplacementIsRejectedOrUnreadable_leavesTheOldBatchInPlace() = runTest(dispatcher) {
+        val old = listOf(storedCopy(id = 41L, batchId = 77L))
+        // Plain, non-empty but unreadable: no replacement could be stored.
+        val unreadable = deliveredScenario(
+            listOf(deliveredResult(credential = "not-a-credential")),
+            encrypted = false, preexisting = old, renewalSourceBatchId = 77L,
+        )
+        assertEquals(listOf(41L), unreadable.store.getAll().map { it.id })
+        // Encrypted, but the wallet holds no response for it.
+        val lost = deliveredScenario(listOf(deliveredResult()), lostResponse = true, preexisting = old, renewalSourceBatchId = 77L)
+        assertEquals(listOf(41L), lost.store.getAll().map { it.id })
+        // Encrypted, but the entry count differs from what the wallet opened.
+        val mismatch = deliveredScenario(listOf(deliveredResult()), engineEntries = 2, preexisting = old, renewalSourceBatchId = 77L)
+        assertEquals(listOf(41L), mismatch.store.getAll().map { it.id })
+    }
+
+    @Test
+    fun aRenewalWhoseReplacementIsStored_stillSupersedesTheOldBatch() = runTest(dispatcher) {
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            encrypted = false, preexisting = listOf(storedCopy(id = 41L, batchId = 77L)), renewalSourceBatchId = 77L,
+        )
+        val ids = s.store.getAll().map { it.id }
+        assertEquals(1, ids.size)
+        assertFalse("the superseded batch is gone", 41L in ids)
+    }
+
+    @Test
     fun aWmpPlainCompletion_releasesTheKeyOfAnOptionalEncryptionOffer_andAnEncryptedOneStillReadsItsResponseFirst() = runTest(dispatcher) {
         val blind = heldBlindIssuance()
         val listener = mockk<WalletEventListener>(relaxed = true)

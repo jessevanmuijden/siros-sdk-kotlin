@@ -90,6 +90,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `state`: an automatic reconnect publishes RECONNECTING before its backoff and increments the generation later with no
     state change of its own. Under the single-flight reconnect, the generation is incremented and published in the one atomic step
     that installs the socket (`doConnect`, under `connLock`); a superseded attempt returns before it and publishes nothing.
+  - **Review follow-up: malformed plain completions.** `CredentialResult.credential` now defaults to empty (an encrypted completion's
+    placeholders), which would have let a plain completion without a credential value decode. `FlowCompleteMessage` and the WMP
+    `FlowCompleteResult` now refuse, at decoding, a completion that is not `credential_response_encrypted` unless every credential
+    has a non-empty value (as a missing value always did before this PR); encrypted placeholders stay valid. A renewal no longer
+    deletes the old batch and its refresh token BEFORE the replacement is known: they are removed only once at least one
+    replacement credential has been stored, so a rejected, unreadable or (encrypted) unavailable replacement leaves the old
+    batch in place.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the

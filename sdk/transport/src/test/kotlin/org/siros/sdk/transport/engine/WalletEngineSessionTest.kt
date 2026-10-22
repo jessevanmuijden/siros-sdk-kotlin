@@ -322,6 +322,34 @@ class WalletEngineSessionTest {
     }
 
     @Test
+    fun a_plain_completion_must_carry_a_value_for_every_credential_but_an_encrypted_one_may_not() {
+        val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        fun decode(body: String) = json.decodeFromString(FlowCompleteMessage.serializer(), """{"type":"flow_complete","flow_id":"f",$body}""")
+        // Missing, empty, and one entry among several: refused.
+        assertThrows(IllegalArgumentException::class.java) { decode(""""credentials":[{"format":"dc+sd-jwt"}]""") }
+        assertThrows(IllegalArgumentException::class.java) { decode(""""credentials":[{"format":"dc+sd-jwt","credential":""}]""") }
+        assertThrows(IllegalArgumentException::class.java) {
+            decode(""""credentials":[{"format":"dc+sd-jwt","credential":"x"},{"format":"dc+sd-jwt"}]""")
+        }
+        // Encrypted placeholders are valid; so is a completion with no credentials at all (a presentation).
+        assertEquals(2, decode(""""credentials":[{"format":"dc+sd-jwt"},{"format":"dc+sd-jwt"}],"credential_response_encrypted":true""").credentials!!.size)
+        assertEquals(null, decode(""""redirect_uri":"https://x"""").credentials)
+        assertEquals("x", decode(""""credentials":[{"format":"dc+sd-jwt","credential":"x"}]""").credentials!!.single().credential)
+    }
+
+    @Test
+    fun a_malformed_plain_completion_frame_emits_nothing_and_does_not_stop_the_next_frame() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        session.flowComplete().test {
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"bad","credentials":[{"format":"dc+sd-jwt"}]}""")
+            listener.onMessage(webSocket, """{"type":"flow_complete","flow_id":"good","credentials":[{"format":"dc+sd-jwt","credential":"j"}]}""")
+            assertEquals("good", awaitItem().flowId)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
     fun a_sign_request_decodes_the_blind_encryption_members() {
         val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
         val issuance = json.decodeFromString(
