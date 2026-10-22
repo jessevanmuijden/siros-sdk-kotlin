@@ -3,6 +3,7 @@ package org.siros.sdk.wallet
 
 import org.siros.sdk.credentials.CredentialAttributeDiff
 import org.siros.sdk.credentials.CredentialMatcher
+import org.siros.sdk.credentials.CredentialUtils
 import org.siros.sdk.credentials.StoredCredential
 
 /**
@@ -24,7 +25,27 @@ data class PresentationRequest(
     val credentialSets: List<CredentialMatcher.CredentialSetQuery>? = null,
     /** Which credential set options are satisfiable with available credentials. */
     val satisfiableOptions: List<CredentialMatcher.SatisfiableOption> = emptyList(),
-)
+) {
+    /**
+     * True when answering this request discloses NO credential data: every matched query is a circuit_zk / `zkp_req` query, which is
+     * answered with a zero-knowledge proof (a pseudonym, an age check) and never discloses a claim. A consent UI then has nothing to
+     * let the user select or confirm beyond choosing the credential and sharing or declining, so it can skip its claim-selection and
+     * "confirm what is shared" steps. A query that lists no claims in any other format is NOT such a request (it may ask for the
+     * whole credential), and an empty request is not either.
+     */
+    val disclosesNoClaims: Boolean
+        get() = matchResults.isNotEmpty() && matchResults.all {
+            CredentialUtils.isCircuitZkFormat(it.format) && it.requestedClaims.flatten().isEmpty()
+        }
+
+    /**
+     * How many steps a stepped consent UI needs: the overview with the credential choice, then (unless [disclosesNoClaims]) one
+     * claim-selection step per matched query and a final "confirm what is shared" summary. Share and Decline are on the last step, so
+     * a request that discloses nothing is one step.
+     */
+    val consentStepCount: Int
+        get() = if (disclosesNoClaims) 1 else matchResults.size + 2
+}
 
 /**
  * Callback interface for wallet events that require user interaction.

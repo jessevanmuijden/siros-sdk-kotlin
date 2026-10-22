@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- A request that discloses no claims no longer asks the user to confirm what is shared. New `PresentationRequest.disclosesNoClaims` (every
+  matched query is a circuit_zk / `zkp_req` query without claims: a pseudonym or an age proof, answered with a zero-knowledge proof) and
+  `PresentationRequest.consentStepCount` (1 for such a request, otherwise preview + one step per query + summary as before). The sample
+  consent screen follows it: choose the credential, then Share or Decline, with no empty claim-selection or summary step, and the
+  overview says that no data fields are shared instead of "0 data fields requested". Requests in any other format keep every step, also
+  when they list no claims (they may ask for the whole credential).
+
 ## [0.21.0] - 2026-10-22
 
 BREAKING: engine-blind encryption. The wallet, not the engine, now holds the OID4VCI credential-response key and builds the OID4VP direct_post.jwt response, so the engine relays ciphertext and never sees credentials, the delivered secret seed or a vp_token. This SDK REQUIRES a backend with go-wallet-backend #469 + #471; an older backend cannot issue to it or complete direct_post.jwt presentations, and an upgraded backend cannot serve an older SDK (no compatibility shims).
