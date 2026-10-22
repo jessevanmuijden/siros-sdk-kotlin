@@ -1063,14 +1063,38 @@ class JweKeystore(
         EncryptedContainer.serialize(updatedContainer)
     }
 
-    /** Remember removing [key] if the container holds a value for it this build does not read (non-string). */
+    /**
+     * Remember removing [key] if something other than the string entries this build reads still creates it: a non-string value in
+     * `S.extensions`, or a `set_extension` event whose result is a live value (an entry that exists only in the event history, as in a
+     * container whose `S.extensions` was not folded). Without a tombstone another client replaying the history would bring it back.
+     */
     private fun noteOpaqueRemoval(namespace: String, key: String) {
+        if ((namespace to key) in emittedOpaqueRemovals) return
         val held = ((preservedWalletState?.get("S") as? kotlinx.serialization.json.JsonObject)?.get("extensions") as? kotlinx.serialization.json.JsonObject)
             ?.get(namespace) as? kotlinx.serialization.json.JsonObject
-        val v = held?.get(key) ?: return
-        if ((v as? kotlinx.serialization.json.JsonPrimitive)?.isString != true && (namespace to key) !in emittedOpaqueRemovals) {
-            pendingOpaqueRemovals.add(namespace to key)
+        val v = held?.get(key)
+        val opaqueInS = v != null && (v as? kotlinx.serialization.json.JsonPrimitive)?.isString != true
+        if (opaqueInS || liveInEvents(namespace, key)) pendingOpaqueRemovals.add(namespace to key)
+    }
+
+    /** Whether the last write (by timestamp, then event id) to `(namespace, key)` in the event history, including this session's, is a value. */
+    private fun liveInEvents(namespace: String, key: String): Boolean {
+        val events = (preservedWalletState?.get("events") as? kotlinx.serialization.json.JsonArray).orEmpty() + appendedEvents
+        var best: Pair<Long, Long>? = null
+        var live = false
+        for (e in events) {
+            val o = e as? kotlinx.serialization.json.JsonObject ?: continue
+            fun str(n: String) = (o[n] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            fun num(n: String) = (o[n] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+            if (str("type") != "set_extension" || str("namespace") != namespace || str("key") != key) continue
+            val at = num("timestampSeconds") to num("eventId")
+            val cur = best
+            if (cur == null || at.first > cur.first || (at.first == cur.first && at.second > cur.second)) {
+                best = at
+                live = o["value"] !is kotlinx.serialization.json.JsonNull
+            }
         }
+        return live
     }
 
     /** The events for the extension changes since the container was loaded or last exported. */

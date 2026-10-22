@@ -163,14 +163,12 @@ internal object ExtensionEvents {
             var ts = nowSeconds
             var id = nextEventId()
             val (bTs, bId) = best[nk] ?: (Long.MIN_VALUE to 0L)
-            while (true) {
-                if (ts < bTs) ts = bTs
-                if (ts == bTs && id <= bId) {
-                    if (bId < MAX_EVENT_ID) id = bId + 1 else { ts = bTs + 1; id = nextEventId() }
-                }
-                if (id in taken) { if (id < MAX_EVENT_ID) id++ else { ts++; id = 1L }; continue }
-                break
-            }
+            // Merge is last-write-wins by (timestampSeconds, eventId), so a new event for a key must sort after the one it follows.
+            // The timestamp is advanced past it when needed, and the RANDOM id is kept: two writers updating the same key from the
+            // same history then still get different ordering keys (an id clamped to previous + 1 would make them equal).
+            if (ts < bTs || (ts == bTs && id <= bId)) ts = bTs + 1
+            var attempts = 0
+            while (id in taken) { id = if (attempts++ < 8) nextEventId() else if (id < MAX_EVENT_ID) id + 1 else 1L }
             taken.add(id)
             best[nk] = ts to id
             val event = JsonObject(

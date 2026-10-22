@@ -77,11 +77,13 @@ internal object PrivateDataSchema {
         return null
     }
 
-    /** A JSON number that is an integer, else null (a string "4" or 4.5 is not a version). */
+    /** A JSON number whose VALUE is an integer in the Int range (4, 4.0, 4e0), else null: a string "4" or 4.5 is not a version. */
     private fun intOrNull(e: kotlinx.serialization.json.JsonElement?): Int? {
         val p = e as? JsonPrimitive ?: return null
         if (p.isString) return null
-        return p.content.toIntOrNull()
+        val n = p.content.toBigDecimalOrNull() ?: return null
+        val i = try { n.toBigIntegerExact() } catch (_: ArithmeticException) { return null }
+        return if (i.bitLength() <= 31) i.toInt() else null
     }
 
     private fun JsonArray?.orEmpty(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()

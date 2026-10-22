@@ -391,6 +391,54 @@ class PrivateDataSchemaV4Test {
     }
 
     @Test
+    fun twoPeersUpdatingTheSameKeyFromTheSameHistoryGetDistinctOrderingKeys() {
+        val old = event("set_extension").let { JsonObject(it + mapOf("eventId" to JsonPrimitive(4_000_000_000L), "timestampSeconds" to JsonPrimitive(100), "namespace" to JsonPrimitive("n"), "key" to JsonPrimitive("k"), "value" to JsonPrimitive("v"))) }
+        fun peer(randomId: Long, after: Map<String, Map<String, String>>) =
+            ExtensionEvents.diff(mapOf("n" to mapOf("k" to "v")), after, "p", listOf(old), 100L) { randomId }.single()
+        val a = peer(5L, mapOf("n" to mapOf("k" to "a")))
+        val b = peer(6L, emptyMap()) // the other peer removes it
+        fun at(e: JsonObject) = e["timestampSeconds"]!!.jsonPrimitive.content.toLong() to e["eventId"]!!.jsonPrimitive.content.toLong()
+        assertTrue("both sort after the shared event", at(a).first > 100 && at(b).first > 100)
+        assertEquals("the random ids are kept", listOf(5L, 6L), listOf(at(a).second, at(b).second))
+        assertTrue("distinct ordering keys", at(a) != at(b))
+    }
+
+    @Test
+    fun removingAnEntryThatOnlyAnEventCreatesEmitsOneTombstone() = runTest {
+        val p = inputsOf("schema-version-event-types-001")["plaintextState"]!!.jsonObject
+        val setEvent = p["events"]!!.jsonArray.map { it.jsonObject }.last { it["type"]!!.jsonPrimitive.content == "set_extension" }
+        assertFalse("the vector has no folded S.extensions", "extensions" in state(p))
+        val ns = setEvent["namespace"]!!.jsonPrimitive.content
+        val key = setEvent["key"]!!.jsonPrimitive.content
+        val k = unlocked(p)
+        k.removeExtensionEntry(ns, key)
+        repeat(3) {
+            val events = decrypt(k.exportEncryptedContainer())["events"]!!.jsonArray.map { it.jsonObject }
+            val tombstones = events.filter { it["key"]?.jsonPrimitive?.content == key && it["value"] == kotlinx.serialization.json.JsonNull }
+            assertEquals(1, tombstones.size)
+            assertEquals(events.size - 1, events.indexOf(tombstones.single())) // appended last, chained from the previous event
+            k.removeExtensionEntry(ns, key)
+        }
+    }
+
+    @Test
+    fun versionsThatAreIntegersInAnySpellingAreAccepted() = runTest {
+        for (spelling in listOf("4.0", "4e0", "3.0")) {
+            val lit = kotlinx.serialization.json.JsonUnquotedLiteral(spelling)
+            val p = plaintext(version = lit, events = listOf(event("alter_settings", lit)))
+            val out = decrypt(unlocked(p).exportEncryptedContainer())
+            assertEquals(spelling, JsonPrimitive(4), state(out)["schemaVersion"])
+            // The event survives (the spelling of its version number may be normalised by the JSON codec; its value may not change).
+            val ev = out["events"]!!.jsonArray.single().jsonObject
+            assertEquals(spelling, "alter_settings", ev["type"]!!.jsonPrimitive.content)
+            assertEquals(spelling, spelling.toBigDecimal().compareTo(ev["schemaVersion"]!!.jsonPrimitive.content.toBigDecimal()), 0)
+        }
+        assertRefused(plaintext(version = kotlinx.serialization.json.JsonUnquotedLiteral("4.5")), Kind.STATE_VERSION, null)
+        assertRefused(plaintext(version = kotlinx.serialization.json.JsonUnquotedLiteral("5.0")), Kind.STATE_VERSION, 5)
+        assertRefused(plaintext(version = kotlinx.serialization.json.JsonUnquotedLiteral("99999999999")), Kind.STATE_VERSION, null)
+    }
+
+    @Test
     fun hashKeyOrderAndNumbersFollowJavaScript() {
         fun h(js: String, e: JsonObject) = assertEquals(
             java.security.MessageDigest.getInstance("SHA-256").digest(js.toByteArray()).joinToString("") { "%02x".format(it) },
