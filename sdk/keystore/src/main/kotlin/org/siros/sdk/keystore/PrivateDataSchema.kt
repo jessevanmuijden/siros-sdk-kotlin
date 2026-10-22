@@ -86,18 +86,18 @@ internal object PrivateDataSchema {
         val p = e as? JsonPrimitive ?: return null
         if (p.isString) return null
         val n = p.content.toBigDecimalOrNull() ?: return null
-        val i = try { n.toBigIntegerExact() } catch (_: ArithmeticException) { return null }
+        if (n.signum() == 0) return 0L
+        // Rejected by magnitude BEFORE any integer is built: a short literal such as 4e100000000 must not be expanded into a huge
+        // number (memory) just to be found out of range.
+        val s = n.stripTrailingZeros()
+        if (s.scale() > 0) return null // fractional
+        if (s.precision() - s.scale() > 19) return null // more integer digits than a Long can hold
+        val i = s.toBigIntegerExact()
         return if (i.bitLength() <= 63) i.toLong() else null
     }
 
     /** A JSON number whose VALUE is an integer in the Int range (4, 4.0, 4e0), else null: a string "4" or 4.5 is not a version. */
-    private fun intOrNull(e: kotlinx.serialization.json.JsonElement?): Int? {
-        val p = e as? JsonPrimitive ?: return null
-        if (p.isString) return null
-        val n = p.content.toBigDecimalOrNull() ?: return null
-        val i = try { n.toBigIntegerExact() } catch (_: ArithmeticException) { return null }
-        return if (i.bitLength() <= 31) i.toInt() else null
-    }
+    private fun intOrNull(e: kotlinx.serialization.json.JsonElement?): Int? = longOrNull(e)?.takeIf { it in Int.MIN_VALUE..Int.MAX_VALUE }?.toInt()
 
     private fun JsonArray?.orEmpty(): List<kotlinx.serialization.json.JsonElement> = this ?: emptyList()
 }
