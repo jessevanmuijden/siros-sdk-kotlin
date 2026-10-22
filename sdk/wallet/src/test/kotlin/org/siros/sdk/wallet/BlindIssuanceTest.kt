@@ -582,12 +582,20 @@ class BlindIssuanceTest {
         assertFalse(b.wasOffered("declined"))
         assertNull(b.offer("unsupported", CredentialResponseEncryptionRequest("RSA-OAEP", "A128GCM", required = false)))
         assertFalse(b.wasOffered("unsupported"))
-        // Bounded: flows whose end never arrives cannot grow the markers without limit; the oldest go first.
+        // Bounded FAIL-CLOSED: at capacity a NEW offer is refused and nothing existing is evicted.
         val many = BlindIssuance()
-        repeat(BlindIssuance.MAX_OFFERED_MARKERS + 50) { many.offer("flow-$it", request) }
-        assertFalse(many.wasOffered("flow-0"))
-        assertTrue(many.wasOffered("flow-${BlindIssuance.MAX_OFFERED_MARKERS + 49}"))
-        assertEquals(BlindIssuance.MAX_OFFERED_MARKERS, (0 until BlindIssuance.MAX_OFFERED_MARKERS + 50).count { many.wasOffered("flow-$it") })
+        repeat(BlindIssuance.MAX_OFFERED_MARKERS) { many.offer("flow-$it", request) }
+        val refused = assertThrows(BlindIssuanceException::class.java) { many.offer("one-too-many", request) }
+        assertTrue(refused.message!!, refused.message!!.contains("Too many"))
+        assertFalse("the refused offer left no marker, state or key", many.wasOffered("one-too-many") || many.holdsKey("one-too-many"))
+        assertTrue("the oldest keeps its marker and its key", many.wasOffered("flow-0") && many.holdsKey("flow-0"))
+        assertTrue(many.wasOffered("flow-${BlindIssuance.MAX_OFFERED_MARKERS - 1}"))
+        // A re-offer for a flow that already has a marker (a c_nonce retry) is not "new" and is served.
+        assertNotNull(many.offer("flow-0", request))
+        // Freeing one makes room again.
+        many.drop("flow-5")
+        assertNotNull(many.offer("one-too-many", request))
+        assertTrue(many.wasOffered("one-too-many"))
     }
 }
 

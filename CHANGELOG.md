@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The plaintext-completion refusal keys on a separate per-flow "a response key was offered" marker (`BlindIssuance.wasOffered`) that
     outlives the key: a socket replacement drops the key, so a plaintext completion buffered before the replacement is still
     refused. The marker ends only with the flow (completion, error, cancel, sign failure, drop) or a session-wide clear, and is
-    bounded (the oldest of 256 are evicted).
+    bounded FAIL-CLOSED: at 1024 flows with a key offered a NEW offer is refused and no existing marker is ever evicted.
   - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
     `enc` and `kid` only.
 - A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no

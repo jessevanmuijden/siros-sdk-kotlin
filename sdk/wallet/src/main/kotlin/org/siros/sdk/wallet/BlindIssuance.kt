@@ -78,12 +78,11 @@ internal class BlindIssuance(
      * The flows a response key was OFFERED for, as a fact of its own: it outlives the key, which a socket replacement clears
      * ([markStaleBefore]) while a completion buffered before the replacement can still arrive, and it is what tells a plaintext
      * completion apart from an encrypted one. Removed only when the flow ends or is dropped ([drop], [take]) or everything is
-     * ([clear]) - never by [markStaleBefore] or [purgeStale]. Bounded: the oldest are evicted beyond [MAX_OFFERED_MARKERS], so a
-     * flow whose end never arrives cannot grow it without limit. Guarded by [lock].
+     * ([clear]) - never by [markStaleBefore] or [purgeStale]. Bounded FAIL-CLOSED: at [MAX_OFFERED_MARKERS] a NEW offer is refused
+     * ([offer] throws) and no existing marker is ever evicted, because an evicted flow would lose the plaintext-completion
+     * guard while its key and buffered completion are still alive. Guarded by [lock].
      */
-    private val offeredFlows = object : LinkedHashMap<String, Unit>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>): Boolean = size > MAX_OFFERED_MARKERS
-    }
+    private val offeredFlows = HashSet<String>()
 
     /** Guards the claim of a flow's state and the insertion of its key against [clear], which ends every flow at once. */
     private val lock = Any()
@@ -116,6 +115,9 @@ internal class BlindIssuance(
         // instead of resurrecting the flow (a handler can outlive the teardown that cancelled its scope).
         val state = synchronized(lock) {
             if (epoch != null && epoch != this.epoch) throw BlindIssuanceException("The session ended before its response key was requested")
+            if (flowId !in offeredFlows && offeredFlows.size >= MAX_OFFERED_MARKERS) {
+                throw BlindIssuanceException("Too many issuances are in flight to start another")
+            }
             flows.compute(flowId) { _, old -> if (old == null || old.staleAt != NOT_STALE) FlowState(generation) else old }!!
         }
         val key = keyFactory(request.alg, request.enc)
@@ -132,8 +134,7 @@ internal class BlindIssuance(
             if (flows[flowId] !== state) throw BlindIssuanceException("The issuance ended while its response key was being generated")
             // (A teardown after this is a teardown right after the offer returned: the state is out of the map and so is the key.)
             state.key = key
-            offeredFlows.remove(flowId) // re-insert as the newest
-            offeredFlows[flowId] = Unit
+            offeredFlows.add(flowId)
         }
         return key.publicJwk
     }
@@ -280,8 +281,8 @@ internal class BlindIssuance(
         const val NO_GENERATION = Int.MAX_VALUE
         private const val NOT_STALE = Long.MIN_VALUE
 
-        /** How many "a key was offered" markers are kept at most (the oldest go first). */
-        const val MAX_OFFERED_MARKERS = 256
+        /** How many flows may have a response key offered at once; far above normal use. A further offer is refused (never an eviction). */
+        const val MAX_OFFERED_MARKERS = 1024
     }
 
     private fun credentialValue(entry: JsonElement, notificationId: String?): String {

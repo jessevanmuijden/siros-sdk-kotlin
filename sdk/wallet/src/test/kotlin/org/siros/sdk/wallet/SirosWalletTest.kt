@@ -12452,6 +12452,8 @@ class SirosWalletTest {
         offeredKey: Boolean = false,
         /** With [offeredKey]: the socket the flow lived on was replaced (and the sweep ran) before the completion arrived. */
         socketReplacedSinceOffer: Boolean = false,
+        /** Runs after the key was offered and before the completion arrives (to put the holder under pressure, say). */
+        beforeCompletion: (BlindIssuance) -> Unit = {},
         /** The `notification_id` the engine's ENCRYPTED completion frame carries on its entries (it should never be read). */
         frameNotificationId: String? = null,
         /** True: another flow (`flow-other`) holds an issuance key and an opened response while this one completes. */
@@ -12532,6 +12534,7 @@ class SirosWalletTest {
         if (offeredKey) {
             blind.offer(flowId, org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false), generation = 0)
             if (socketReplacedSinceOffer) blind.markStaleBefore(1)
+            beforeCompletion(blind)
         }
         completeFlow.emit(
             FlowCompleteMessage(
@@ -13493,6 +13496,25 @@ class SirosWalletTest {
         verify(exactly = 1) { s.engine.sendCredentialNotification("flow-delivered", "notif-1", CredentialNotificationEvent.FAILURE, any()) }
         verify(exactly = 1) { s.listener.onFlowError("flow-delivered", match { it.contains("answered in clear") }, any()) }
         assertFalse("the marker ends with the flow", s.blind.wasOffered("flow-delivered"))
+    }
+
+    @Test
+    fun aPlainCompletionForTheOldestFlowAfterCapacityPressure_isStillRefusedAndTheNewOfferIsTheOneRefused() = runTest(dispatcher) {
+        val request = org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A256GCM", false)
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            encrypted = false, offeredKey = true, socketReplacedSinceOffer = true,
+            beforeCompletion = { blind ->
+                // Fill the table to capacity with other flows, then offer one more: THAT offer is refused, nothing is evicted.
+                repeat(BlindIssuance.MAX_OFFERED_MARKERS - 1) { blind.offer("filler-$it", request, generation = 0) }
+                org.junit.Assert.assertThrows(BlindIssuanceException::class.java) { blind.offer("one-too-many", request) }
+                assertTrue("the oldest flow is still expected to be encrypted", blind.wasOffered("flow-delivered"))
+            },
+        )
+        // Its plaintext completion is refused: nothing stored, the issuer told.
+        assertNothingStored(s)
+        verify(exactly = 1) { s.engine.sendCredentialNotification("flow-delivered", "notif-1", CredentialNotificationEvent.FAILURE, any()) }
+        verify(exactly = 1) { s.listener.onFlowError("flow-delivered", match { it.contains("answered in clear") }, any()) }
     }
 
     @Test
