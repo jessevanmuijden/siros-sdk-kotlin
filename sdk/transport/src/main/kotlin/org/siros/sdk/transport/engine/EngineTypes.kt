@@ -216,17 +216,53 @@ data class SignResponseMessage(
      */
     @SerialName("dpop_key_id") val dpopKeyId: String? = null,
     @SerialName("dpop_proof") val dpopProof: String? = null,
+    /**
+     * Answer to a `generate_proof` request that carried [SignRequestParams.credentialResponseEncryption]: the PUBLIC
+     * JWK (`{kty, crv, x, y, use: "enc", alg}`) of a key this wallet generated for the credential response. The
+     * engine puts it in `credential_response_encryption` and so cannot open the issuer's reply. Absent declines.
+     */
+    @SerialName("credential_response_encryption_jwk") val credentialResponseEncryptionJwk: JsonObject? = null,
+    /**
+     * Answer to `decrypt_credential_response`: the only members of the opened Credential Response the engine may
+     * learn, because it has to act on them (deferred polling). The credentials and the response-level
+     * `credential_metadata` stay in the wallet.
+     */
+    @SerialName("transaction_id") val transactionId: String? = null,
+    val interval: Int? = null,
+    /**
+     * Answer to `decrypt_credential_response` for ISSUED credentials: how many credentials the decrypted response carries
+     * (1..256). EXACTLY ONE of [credentialCount], [transactionId] (deferred) or [error] answers a decrypt request; the engine
+     * fails the issuance on both or neither, so a message carrying two of them is refused here.
+     */
+    @SerialName("credential_count") val credentialCount: Int? = null,
+    /**
+     * Answer to a `direct_post.jwt` `sign_presentation` that carried [SignRequestParams.responseEncryption]: the
+     * compact JWE of the whole authorization response. Replaces [vpToken], which the engine then never sees.
+     */
+    @SerialName("response_jwe") val responseJwe: String? = null,
     val timestamp: String? = null,
     // Appended after timestamp (append-only: a data class's property order is part of its binary API).
     /**
      * A sign-stage refusal (wmp spec 3.2.6): [errorCode] [SIGN_REFUSED] answers the `sign_request` (its `message_id` echoed) with
      * "the wallet will not sign". The engine ends the signing at once and tells the verifier `access_denied` with no description.
-     * [error] is wallet-private detail the engine only logs: never anything sensitive. Without [SIGN_REFUSED] an error-bearing
-     * response is a plain SIGN_ERROR (the flow fails, the verifier is not contacted).
+     * [error] is wallet-private detail the engine only logs: never anything sensitive; it is also how a wallet reports that it could
+     * not open an issuer's JWE (`decrypt_credential_response`). Without [SIGN_REFUSED] an error-bearing response is a plain
+     * SIGN_ERROR (the flow fails, the verifier is not contacted). A refusal carries no result: [responseJwe] is never present with
+     * [error] or [errorCode], so the encrypted-response member can never shadow it.
      */
     @SerialName("error_code") val errorCode: String? = null,
     val error: String? = null,
 ) {
+    init {
+        require(responseJwe == null || (error == null && errorCode == null)) {
+            "A sign_response that carries an error or error_code carries no response_jwe"
+        }
+        require(responseJwe == null || vpToken == null) { "A sign_response carries response_jwe or vp_token, never both" }
+        require(listOfNotNull(credentialCount, transactionId, error).size <= 1) {
+            "A decrypt_credential_response answer carries exactly one of credential_count, transaction_id or error"
+        }
+    }
+
     companion object {
         const val SIGN_REFUSED = "SIGN_REFUSED"
     }
@@ -334,23 +370,30 @@ data class FlowCompleteMessage(
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
     @SerialName("selected_credential_configuration_id") val selectedCredentialConfigurationId: String? = null,
     /**
-     * The response-level `credential_metadata` of the issuer's credential response, exactly as the engine relays
-     * it (one object for every credential of the response). Not display metadata; see [ResponseCredentialMetadata].
+     * True when the issuer's Credential Response was a JWE the wallet opened itself (`decrypt_credential_response`).
+     * The engine then never held the credentials, so each [CredentialResult.credential] is empty and is filled from the
+     * wallet's own decrypted response, entry by entry; so is the response-level `credential_metadata`.
      */
-    @SerialName("credential_metadata") override val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
-    /** Set by the engine only when the issuer's response was JWE-decrypted. Metadata without it came over plain JSON. */
-    @SerialName("credential_metadata_encrypted_response")
+    @SerialName("credential_response_encrypted")
     @Serializable(with = org.siros.sdk.transport.EncryptedResponseFlagSerializer::class)
-    override val credentialMetadataEncryptedResponse: Boolean = false,
+    val credentialResponseEncrypted: Boolean = false,
+    /**
+     * The display-only members (`display`, `claims`) of the response-level `credential_metadata` of a PLAIN (unencrypted)
+     * issuer response, as the engine relays them. Every other member is dropped on decoding and extension content (a seed)
+     * is never carried here; it is read only from a response the wallet decrypted itself. Ignored when
+     * [credentialResponseEncrypted]. Not printed.
+     */
+    @SerialName("credential_metadata")
+    @Serializable(with = org.siros.sdk.transport.DisplayOnlyCredentialMetadataSerializer::class)
+    val credentialMetadata: org.siros.sdk.transport.ResponseCredentialMetadata? = null,
     /**
      * `redacted_members`: on a REPLAYED or resumed completion, the members that were present and withheld (from
-     * `credential_metadata`, `credential_metadata_encrypted_response`, [refreshToken], [dpopJwk], [dpopKeyId]); the
-     * credentials are kept. A listed member is NOT RECOVERABLE: never invented or reused from an earlier flow, and renewal
+     * [refreshToken], [dpopJwk], [dpopKeyId]); the credentials are kept. A listed member is NOT RECOVERABLE: never invented or reused from an earlier flow, and renewal
      * of that issuance is unavailable (the client re-issues).
      */
     @SerialName("redacted_members")
     @Serializable(with = org.siros.sdk.transport.RedactedMembersSerializer::class)
-    override val redactedMembers: Set<String> = emptySet(),
+    val redactedMembers: Set<String> = emptySet(),
     /**
      * OAuth refresh_token the issuer returned alongside this batch, if any
      * (credential re-issuance/renewal plan, Phase 1). The SDK does not
@@ -385,7 +428,15 @@ data class FlowCompleteMessage(
      * the consumer never races the separate progress and completion channels.
      */
     @kotlinx.serialization.Transient val issuerTrust: IssuerTrustReport? = null,
-) : org.siros.sdk.transport.DeliveredResponseMetadata {
+) {
+    init {
+        // A PLAIN completion carries every credential's value: only an encrypted one has placeholders, which the wallet fills
+        // from its own decrypted response. A missing value is a malformed completion, refused here (it used to fail decoding).
+        require(credentialResponseEncrypted || credentials.orEmpty().all { it.credential.isNotEmpty() }) {
+            "A completion that is not encrypted carries a value for every credential"
+        }
+    }
+
     /**
      * Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]);
      * stamped by the session on receipt, never on the wire. Kept out of the
@@ -394,6 +445,10 @@ data class FlowCompleteMessage(
      */
     @kotlinx.serialization.Transient
     var connectionGeneration: Int = 0
+
+    /** Whether the renewal material (`refresh_token`, `dpop_jwk`, `dpop_key_id`) was withheld, wholly or in part. */
+    val renewalMaterialRedacted: Boolean
+        get() = redactedMembers.any { it == "refresh_token" || it == "dpop_jwk" || it == "dpop_key_id" }
 }
 
 /** Server-side issuer trust outcome reported by the engine for one flow. */
@@ -407,11 +462,11 @@ data class IssuerTrustReport(
 @Serializable
 data class CredentialResult(
     val format: String,
-    val credential: String,
+    /** Empty when [FlowCompleteMessage.credentialResponseEncrypted]: the engine never held it, the wallet fills it in. */
+    val credential: String = "",
     val vct: String? = null,
     @SerialName("type_metadata") val typeMetadata: JsonElement? = null,
     @SerialName("notification_id") val notificationId: String? = null,
-    /** The credential's own members only: delivered metadata is response-level, see [FlowCompleteMessage.credentialMetadata]. */
 ) {
     // The credential itself is never printed.
     override fun toString() = "CredentialResult(format=$format, credential=<redacted>, notificationId=$notificationId)"
@@ -514,6 +569,25 @@ data class SignRequestParams(
     @SerialName("holder_commitments") val holderCommitments: List<String>? = null,
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
+    /**
+     * `generate_proof`: the response-encryption pair the engine negotiated with the issuer. When present the wallet
+     * generates a fresh key per request and returns its public JWK in
+     * [SignResponseMessage.credentialResponseEncryptionJwk].
+     */
+    @SerialName("credential_response_encryption")
+    val credentialResponseEncryption: org.siros.sdk.transport.CredentialResponseEncryptionRequest? = null,
+    /** `decrypt_credential_response`: the issuer's compact JWE, and whether it answers a deferred request. */
+    val jwe: String? = null,
+    val deferred: Boolean? = null,
+    /**
+     * `sign_presentation` over `direct_post.jwt`: the verifier's key and the `alg`/`enc` to build the encrypted
+     * response with. Present means the wallet returns [SignResponseMessage.responseJwe], not a `vp_token`.
+     */
+    @SerialName("response_encryption") val responseEncryption: org.siros.sdk.transport.ResponseEncryptionRequest? = null,
+    /** The request's `state`, which the encrypted response must echo. */
+    val state: String? = null,
+    /** The request as the engine validated it; its `client_id` is the `aud` of an encrypted response. */
+    @SerialName("verified_request") val verifiedRequest: org.siros.sdk.transport.VerifiedRequest? = null,
     // Appended last: a data class's property order is part of its binary API (componentN, copy, constructor).
     /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
     @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
