@@ -52,6 +52,7 @@ class WalletEngineSessionTest {
         }
         // Returning [client] itself from build() keeps every test's existing
         // newWebSocket stub above meaningful without needing a second one.
+        every { webSocket.send(any<String>()) } returns true
         every { client.newBuilder() } returns builder
         every { builder.pingInterval(any(), any()) } returns builder
         every { builder.build() } returns client
@@ -114,7 +115,7 @@ class WalletEngineSessionTest {
         // The very first connection must use the hardcoded default, not
         // whatever a server that hasn't spoken yet might eventually say.
         verify(exactly = 1) {
-            builder.pingInterval(WalletEngineSession.DEFAULT_PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
+            builder.pingInterval(10_000L, TimeUnit.MILLISECONDS)
         }
 
         // onMessage only enqueues the frame for WalletEngineSession's own
@@ -124,7 +125,7 @@ class WalletEngineSessionTest {
         session.messages().test {
             listener.onMessage(
                 webSocket,
-                """{"type":"handshake_complete","session_id":"session-123","config":{"ping_interval_ms":7000}}""",
+                """{"type":"handshake_complete","session_id":"session-123","config":{"ping_interval_ms":15000}}""",
             )
             awaitItem()
             cancelAndIgnoreRemainingEvents()
@@ -136,7 +137,7 @@ class WalletEngineSessionTest {
 
         session.forceReconnect()
 
-        verify(exactly = 1) { builder.pingInterval(7000L, TimeUnit.MILLISECONDS) }
+        verify(exactly = 1) { builder.pingInterval(15000L, TimeUnit.MILLISECONDS) }
         verify(exactly = 2) { client.newWebSocket(any(), any()) }
     }
 
@@ -1120,6 +1121,24 @@ class WalletEngineSessionTest {
         // The superseded call must not cancel/replace the newer caller's socket.
         verify(exactly = 2) { client.newWebSocket(any(), any()) }
         verify(exactly = 1) { webSocket.cancel() }
+    }
+
+    @Test
+    fun overlappingForceReconnect_publishesOnlyTheSocketThatWasActuallyInstalled() = runTest {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "t", client = client)
+        val gate = kotlinx.coroutines.CompletableDeferred<String>()
+        var calls = 0
+        session.connect("app-token", tokenProvider = { if (calls++ == 0) gate.await() else "fresh-token" })
+        assertEquals(1, session.connectionGenerations.value)
+
+        val first = launch(start = CoroutineStart.UNDISPATCHED) { session.forceReconnect() }
+        session.forceReconnect()
+        assertEquals("the newer caller's socket is published", 2, session.connectionGenerations.value)
+        gate.complete("stale-token")
+        first.join()
+        // The superseded call installed nothing, so nothing more is published, and the flow and the counter agree.
+        assertEquals(2, session.connectionGenerations.value)
+        assertEquals(session.connectionGeneration, session.connectionGenerations.value)
     }
 
     @Test

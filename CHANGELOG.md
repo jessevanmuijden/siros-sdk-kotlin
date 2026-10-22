@@ -88,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `connectEngineForNewSession()`. `WalletEngineSession.connectionGenerations` (new, a `StateFlow<Int>` beside
     `connectionGeneration`) publishes every new socket, and the wallet observes it instead of inferring a replacement from
     `state`: an automatic reconnect publishes RECONNECTING before its backoff and increments the generation later with no
-    state change of its own.
+    state change of its own. Under the single-flight reconnect, the generation is incremented and published in the one atomic step
+    that installs the socket (`doConnect`, under `connLock`); a superseded attempt returns before it and publishes nothing.
   - **Refusal.** `SignResponseMessage` gains `error_code` (`SIGN_REFUSED`) and `error`, and cannot carry `response_jwe`
     together with either, so the encrypted-response member can never shadow a refusal (same for `SignSubFlowResult`).
   - New public API: `VerifiedRequest`, `CredentialResponseEncryptionRequest`, `ResponseEncryptionRequest` (sdk:transport; the
