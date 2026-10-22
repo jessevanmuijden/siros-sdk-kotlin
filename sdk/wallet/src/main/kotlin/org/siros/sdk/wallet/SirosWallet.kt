@@ -7639,7 +7639,9 @@ class SirosWallet private constructor(
                 }
                 // A zkp_req signing waits on the user for a flow of THIS connection: when the connection is gone, the signing (and the
                 // presentation lock it holds) goes with it, so an unrelated presentation is not held up by a stale dialog.
-                if (s == WalletEngineSession.State.RECONNECTING || s == WalletEngineSession.State.FAILED ||
+                // CONNECTING too: forceReconnect() drops the old socket and goes straight to CONNECTING (never RECONNECTING), and a
+                // signing of the dropped connection must not keep the presentation lock until its dialog is answered.
+                if (s == WalletEngineSession.State.CONNECTING || s == WalletEngineSession.State.RECONNECTING || s == WalletEngineSession.State.FAILED ||
                     s == WalletEngineSession.State.DISCONNECTED || s == WalletEngineSession.State.REAUTH_REQUIRED
                 ) {
                     stopAllZkSigning()

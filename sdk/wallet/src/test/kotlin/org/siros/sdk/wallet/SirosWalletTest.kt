@@ -7280,6 +7280,27 @@ class SirosWalletTest {
         }
     }
 
+    @Test
+    fun circuitZkRedirect_aForcedReconnectWhileConsentIsPending_releasesThePresentationLockAndSendsNothing() = runTest(dispatcher) {
+        val gate = kotlinx.coroutines.CompletableDeferred<Boolean>()
+        val e = engineCzk(consent = { gate.await() })
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(redirectSign())
+        runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
+        assertEquals(1, e.s.consents.size)
+        val mutex = getField(e.s.wallet, "zkSigningMutex") as kotlinx.coroutines.sync.Mutex
+        assertTrue("the pending signing holds the presentation lock", mutex.isLocked)
+        // forceReconnect(): the old socket is dropped and the state goes to CONNECTING (not RECONNECTING).
+        e.state.value = WalletEngineSession.State.CONNECTING
+        runCurrent()
+        assertFalse("an unrelated (DC API) presentation is not held up by the stale dialog", mutex.isLocked)
+        gate.complete(true)
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        assertEquals(0, e.s.prover.calls)
+    }
+
     private fun queryForDoctype(doctype: String) = Json.parseToJsonElement(
         """{"credentials":[{"id":"q","format":"zkp_req","meta":{"source_format":"mso_mdoc","doctype_value":"$doctype"},"_req":[{"fn_id":"pseudonym","return":"n","params":{"config":"known-offender-matching-psc","ver":1,"prf":"sha-256"}}]}]}""",
     )
