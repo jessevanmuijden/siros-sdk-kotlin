@@ -102,12 +102,13 @@ class NoEligibleWscdPluginException(
  * suitable to show the user.
  */
 class WscdAuthenticatorNotPresentException(
-    val issuer: String,
-    val credentialType: String,
+    /** Null when the wallet was using its default keystore with no credential type in scope. */
+    val issuer: String?,
+    val credentialType: String?,
     val pluginId: String,
 ) : WscdSelectionException(
-    "No applicable WSCD is available: the '$pluginId' authenticator is not present " +
-        "(issuer=$issuer credentialType=$credentialType)"
+    "No applicable WSCD is available: the '$pluginId' authenticator is not present" +
+        (if (issuer != null) " (issuer=$issuer credentialType=$credentialType)" else "")
 )
 
 /**

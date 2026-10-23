@@ -6985,15 +6985,39 @@ class SirosWallet private constructor(
         }
     }
 
+    /**
+     * Returns [effective] only if its external authenticator (if it has one) is reachable. The static
+     * tier table cannot say a token is plugged in; this asks the keystore, without prompting, before
+     * anything can ask for a PIN. "Cannot tell" counts as not present. Applied to EVERY path that
+     * yields a keystore, including the wallet's default one.
+     */
+    private suspend fun requireAuthenticatorPresent(
+        effective: KeystoreManager,
+        pluginId: String,
+        issuer: String?,
+        credentialType: String?,
+    ): KeystoreManager {
+        val present = try {
+            effective.isAuthenticatorPresent()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "could not determine authenticator presence for $pluginId")
+            false
+        }
+        if (!present) throw WscdAuthenticatorNotPresentException(issuer, credentialType, pluginId)
+        return effective
+    }
+
     private suspend fun resolveEffectiveKeystoreForIssuance(): KeystoreManager {
         val available = config.availableKeystores
         if (available.isNullOrEmpty()) {
             Timber.i("resolveEffectiveKeystoreForIssuance: no availableKeystores configured, using default keystore")
-            return keystore
+            return requireAuthenticatorPresent(keystore, "default", null, null)
         }
         val offer = activeOffer ?: run {
             Timber.i("resolveEffectiveKeystoreForIssuance: no activeOffer, using default keystore")
-            return keystore
+            return requireAuthenticatorPresent(keystore, available.entries.firstOrNull { it.value === keystore }?.key ?: "default", null, null)
         }
         val issuer = offer.credentialIssuerIdentifier
 
@@ -7037,20 +7061,12 @@ class SirosWallet private constructor(
             currentDefaultPluginId = currentDefaultPluginId,
         )
         Timber.i("resolveEffectiveKeystoreForIssuance: resolve() returned pluginId=$pluginId")
-        if (pluginId == null) return keystore
+        if (pluginId == null) {
+            return requireAuthenticatorPresent(keystore, currentDefaultPluginId ?: "default", issuer, credentialType)
+        }
 
         val resolved = available[pluginId] ?: keystore
-        // The static tier table says fido2 is sufficient; it cannot say a token is plugged in. Ask the
-        // keystore (no prompt) before anything can ask for a PIN; "cannot tell" is "not present".
-        val present = try {
-            resolved.isAuthenticatorPresent()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Timber.w(e, "resolveEffectiveKeystoreForIssuance: could not determine authenticator presence for $pluginId")
-            false
-        }
-        if (!present) throw WscdAuthenticatorNotPresentException(issuer, credentialType, pluginId)
+        requireAuthenticatorPresent(resolved, pluginId, issuer, credentialType)
         config.onWscdOperationStart?.invoke(pluginId)
         return resolved
     }
