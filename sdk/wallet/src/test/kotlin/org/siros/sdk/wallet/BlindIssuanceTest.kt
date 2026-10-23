@@ -496,6 +496,30 @@ class BlindIssuanceTest {
         assertNull(b.take("old2"))
     }
 
+    @Test
+    fun retireDropsTheKeyNowButKeepsWhatWasOpenedForTheGrace() {
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request, generation = 1)!!
+        b.open("f", issuer(jwk, response("kept")), deferred = false)
+        b.retire("f", now = 1_000)
+        assertFalse(b.holdsKey("f"))
+        assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(jwk, response("x")), deferred = false) }
+        b.purgeStale(graceMs = 30_000, now = 20_000)
+        assertEquals("a completion buffered before the loss still finds what was opened", listOf("kept"), b.take("f")!!.credentials)
+        // After the grace the flow and its capacity-consuming marker are both gone.
+        val jwk2 = b.offer("g", request, generation = 1)!!
+        b.open("g", issuer(jwk2, response("kept")), deferred = false)
+        b.retire("g", now = 1_000)
+        b.purgeStale(graceMs = 30_000, now = 31_001)
+        assertNull(b.take("g"))
+        b.drop("g") // what the wallet does when the grace ends (the flow has ended)
+        assertEquals(0, b.offeredCount())
+        // Nothing opened: forgotten at once.
+        b.offer("h", request, generation = 1)
+        b.retire("h", now = 1_000)
+        assertEquals(0, b.offeredCount())
+    }
+
     // ---- the liveness check and the claim are one step against teardown; pending responses never carry a seed (round 7) ----
 
     @Test

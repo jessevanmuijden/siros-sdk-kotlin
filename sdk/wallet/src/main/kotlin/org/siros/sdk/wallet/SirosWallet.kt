@@ -7211,7 +7211,7 @@ class SirosWallet private constructor(
      * (the engine answers an action for it with nothing: "action for unknown flow").
      */
     private fun isFlowLost(engine: WalletEngineSession, flowId: String): Boolean {
-        if (flowId in lostFlowIds) return true
+        if (flowId in lostFlowIds || flowId in terminatedFlowIds) return true
         val born = flowConnectionGeneration[flowId] ?: return false
         return born != engine.connectionGeneration
     }
@@ -7223,17 +7223,32 @@ class SirosWallet private constructor(
      * is dropped and the wallet goes back to Ready (no spinner). Nothing is sent to the engine.
      */
     private fun endFlowLost(flowId: String) {
-        if (flowId in terminatedFlowIds || !lostFlowIds.add(flowId)) return
+        if (flowId in terminatedFlowIds || flowId in abandonedFlowIds) return
+        // A browser authorization in progress is resumable on a new flow and socket (completeAuthorization): not lost, and the context
+        // it will resume with must stay.
+        if (pendingAuthorizations.containsKey(flowId)) return
+        if (!lostFlowIds.add(flowId)) return
         Timber.w("Flow $flowId lost with its engine connection; ending it locally")
         terminatedFlowIds.add(flowId)
+        // Shared issuance state is reset only when this flow owns it: a presentation lost while a new issuance has just claimed the
+        // guards must not erase the new one's holder contribution, renewal lineage or in-flight marker.
+        val activeFlow = _state.value as? WalletState.FlowActive
+        val ownsIssuance = blindIssuance.wasOffered(flowId) ||
+            (activeFlow?.flowId == flowId && activeFlow.flowType == WalletState.FlowActive.FLOW_TYPE_ISSUANCE)
         selectionJobsByFlow.remove(flowId)?.cancel()
         stopZkSigning(flowId, refuse = false)
         clearFlowMatchState(flowId)
         pscIssuerByFlow.remove(flowId)
-        blindIssuance.drop(flowId)
+        // The key goes now; what was already opened stays for the grace period so a buffered completion is not lost.
+        blindIssuance.retire(flowId)
+        scope.launch {
+            kotlinx.coroutines.delay(BLIND_STALE_GRACE_MS)
+            blindIssuance.purgeStale(BLIND_STALE_GRACE_MS)
+            blindIssuance.drop(flowId) // the flow has ended: its marker must not consume capacity for good
+        }
         discardZkIssuancePreparation(flowId)
         flowConnectionGeneration.remove(flowId)
-        resetIssuanceGuards()
+        if (ownsIssuance) resetIssuanceGuards()
         eventListener?.onFlowError(flowId, FLOW_LOST_MESSAGE)
         val current = _state.value
         if (current is WalletState.FlowActive && current.flowId == flowId) {
@@ -8497,18 +8512,38 @@ class SirosWallet private constructor(
                         // verified identity (client_id/DID/cert subject) a
                         // missing name could otherwise fall back to. See #218.
                         val trustResultForFlow = lastTrustResults[msg.flowId]
-                        listener.onCredentialSelectionRequired(
-                            PresentationRequest(
-                                verifierName = trustResultForFlow?.entityName,
-                                trustResult = trustResultForFlow,
-                                matchResults = matchResults,
-                                candidates = candidates,
-                                credentialSets = dcqlOutput.credentialSets,
-                                satisfiableOptions = dcqlOutput.satisfiableOptions,
+                        // The wait is registered like the progress route's, so a lost connection stops THIS wait (and only it: the
+                        // shared match collector keeps serving new flows) and the answer is not sent to a session that does not know it.
+                        flowConnectionGeneration.putIfAbsent(msg.flowId, engine.connectionGeneration)
+                        val selection = scope.async {
+                            listener.onCredentialSelectionRequired(
+                                PresentationRequest(
+                                    verifierName = trustResultForFlow?.entityName,
+                                    trustResult = trustResultForFlow,
+                                    matchResults = matchResults,
+                                    candidates = candidates,
+                                    credentialSets = dcqlOutput.credentialSets,
+                                    satisfiableOptions = dcqlOutput.satisfiableOptions,
+                                )
                             )
-                        )
+                        }
+                        selectionJobsByFlow[msg.flowId] = selection
+                        try {
+                            selection.await()
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            // Only the selection was cancelled (the flow was lost): the collector itself carries on.
+                            if (!currentCoroutineContext().isActive) throw e
+                            return@collect
+                        } finally {
+                            selectionJobsByFlow.remove(msg.flowId, selection)
+                        }
                     } else {
                         eligibleInstances(candidates, isZk).map { it.id }
+                    }
+
+                    if (isFlowLost(engine, msg.flowId)) {
+                        endFlowLost(msg.flowId)
+                        return@collect
                     }
 
                     // The app is trusted to only return IDs it was offered,
@@ -8585,6 +8620,24 @@ class SirosWallet private constructor(
         scope.launch {
             engine.flowProgress().collect { msg ->
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
+                // Progress buffered before a loss reaches this collector after the sweeps ran: a lost flow, or one first seen on an
+                // older connection, must not be registered or open a consent wait that nothing would ever end.
+                val progressFlow = msg.flowId
+                if (progressFlow in lostFlowIds ||
+                    (msg.connectionGeneration < engine.connectionGeneration && !pendingAuthorizations.containsKey(progressFlow))
+                ) {
+                    if (progressFlow !in lostFlowIds && progressFlow !in terminatedFlowIds) {
+                        if (flowConnectionGeneration.containsKey(progressFlow)) {
+                            endFlowLost(progressFlow) // a flow the wallet knew: ended and reported once, like any lost flow
+                        } else {
+                            // First seen on an obsolete connection: the app never heard of it, so nothing is reported; it is only
+                            // remembered as dead so that its later frames are ignored too.
+                            lostFlowIds.add(progressFlow)
+                        }
+                        terminatedFlowIds.add(progressFlow)
+                    }
+                    return@collect
+                }
                 noteFlowId(msg.flowId)
                 msg.flowId?.let { flowConnectionGeneration.putIfAbsent(it, msg.connectionGeneration) }
                 Timber.d("Flow ${msg.flowId} progress: ${msg.step}")
@@ -9179,6 +9232,9 @@ class SirosWallet private constructor(
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
+                // An error for a flow already ended locally as lost (one buffered before the loss): the app was told once, and a second
+                // report would also reset state that may now belong to a newer flow.
+                if (fid in lostFlowIds) return@collect
                 if (msg.error.code == ERROR_UNKNOWN_FLOW) {
                     // The engine does not know this flow (its session was replaced or the flow ended there): an action sent for it
                     // came back as this. For a flow this wallet believes live it can never complete: ended exactly like a lost

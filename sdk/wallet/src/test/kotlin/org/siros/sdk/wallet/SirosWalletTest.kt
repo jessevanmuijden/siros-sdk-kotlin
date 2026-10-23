@@ -7182,6 +7182,122 @@ class SirosWalletTest {
         assertEquals("f2", (e.currentWalletState() as WalletState.FlowActive).flowId)
     }
 
+    private fun TestScope.lostFlowSetup(ignoreCancellation: Boolean = false): Pair<EngineCzk, WaitingSelectionListener> {
+        val e = engineCzk(flows = listOf("f1", "f9"))
+        val listener = WaitingSelectionListener(kotlinx.coroutines.CompletableDeferred(), ignoreCancellation)
+        e.s.wallet.setEventListener(listener)
+        return e to listener
+    }
+
+    private fun EngineCzk.replaceSocket() {
+        engineGeneration.incrementAndGet()
+        generations.value = engineGeneration.get()
+    }
+
+    private fun staleProgress(flow: String, step: String = "credential_selection") =
+        FlowProgressMessage(flowId = flow, step = step, payload = buildJsonObject {
+            put("dcql_query", redirectQuery)
+            putJsonObject("verifier") { put("client_id", redirectClientId); put("name", "Example RP") }
+            put("client_metadata", redirectMetadata)
+        }).also { it.connectionGeneration = 0 }
+
+    @Test
+    fun flowLost_progressBufferedOnTheOldSocketAfterTheLossNeverReopensConsent() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.matchOnce()
+        runCurrent()
+        e.replaceSocket()
+        runCurrent()
+        assertEquals(1, listener.errors.size)
+        // A second selection frame of the dead flow, and the very first frame of another flow, both stamped with the old connection.
+        listener.cancelled = false
+        e.progress.emit(staleProgress("f1"))
+        e.progress.emit(staleProgress("f9"))
+        runCurrent()
+        assertFalse("no consent wait was opened for either", listener.cancelled)
+        assertTrue(e.currentWalletState() is WalletState.Ready)
+        assertEquals("the app was told once", 1, listener.errors.size)
+        verify(exactly = 0) { e.engine.sendFlowAction(any(), "consent", any()) }
+    }
+
+    @Test
+    fun flowLost_anOrdinaryErrorBufferedBeforeTheLossIsNotReportedASecondTime() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.matchOnce()
+        runCurrent()
+        e.replaceSocket()
+        runCurrent()
+        e.errors.emit(FlowErrorMessage(flowId = "f1", error = org.siros.sdk.transport.engine.FlowError(code = "x", message = "boom")))
+        runCurrent()
+        assertEquals(1, listener.errors.size)
+    }
+
+    @Test
+    fun flowLost_aLateAnswerAfterAnOrdinaryEngineErrorSendsNothing() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup(ignoreCancellation = true)
+        val answer = kotlinx.coroutines.CompletableDeferred<List<Long>>()
+        e.s.wallet.setEventListener(WaitingSelectionListener(answer, ignoreCancellation = true))
+        e.matchOnce()
+        runCurrent()
+        e.errors.emit(FlowErrorMessage(flowId = "f1", error = org.siros.sdk.transport.engine.FlowError(code = "x", message = "boom")))
+        runCurrent()
+        answer.complete(listOf(1L))
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendFlowAction("f1", "consent", any()) }
+        verify(exactly = 0) { e.engine.sendFlowAction("f1", "decline", any()) }
+        assertNotNull(listener)
+    }
+
+    @Test
+    fun flowLost_theMatchRequestRouteIsStoppedByTheLossToo_andAnswersNothing() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+        runCurrent()
+        e.replaceSocket()
+        runCurrent()
+        assertTrue("the wait of the match route was cancelled", listener.cancelled)
+        assertEquals(1, listener.errors.size)
+        verify(exactly = 0) { e.engine.sendMatchResponse(any(), any(), any()) }
+        // The shared collector is alive: a new flow on the new connection is served.
+        listener.cancelled = false
+        e.match.emit(MatchRequestMessage(flowId = "f9", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+        runCurrent()
+        assertTrue(e.currentWalletState() !is WalletState.Disconnected)
+        assertEquals(1, listener.errors.size)
+    }
+
+    @Test
+    fun flowLost_anAbandonedFlowAndABrowserAuthorizationInProgressAreNotEndedAsLost() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.matchOnce()
+        runCurrent()
+        @Suppress("UNCHECKED_CAST")
+        (getField(e.s.wallet, "abandonedFlowIds") as MutableSet<String>).add("f1")
+        e.replaceSocket()
+        runCurrent()
+        assertTrue("an abandoned flow's cancellation is not reported again", listener.errors.isEmpty())
+        @Suppress("UNCHECKED_CAST")
+        (getField(e.s.wallet, "flowConnectionGeneration") as MutableMap<String, Int>)["auth"] = 0
+        @Suppress("UNCHECKED_CAST")
+        (getField(e.s.wallet, "pendingAuthorizations") as MutableMap<String, Any>)["auth"] = Any()
+        e.replaceSocket()
+        runCurrent()
+        assertTrue("a browser authorization in progress is resumable, not lost", listener.errors.isEmpty())
+    }
+
+    @Test
+    fun flowLost_aLostPresentationDoesNotEraseTheStateAnIssuanceJustClaimed() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.matchOnce()
+        runCurrent()
+        // A new issuance claimed the shared guards before reconnecting.
+        setField(e.s.wallet, "issuanceInFlight", true)
+        e.replaceSocket()
+        runCurrent()
+        assertEquals(1, listener.errors.size)
+        assertEquals("the presentation does not own the issuance guards", true, getField(e.s.wallet, "issuanceInFlight"))
+    }
+
     private fun czkTwoCredentials() = listOf(
         StoredCredential(id = 1L, format = "mso_mdoc", raw = CzkFixtures.mdoc(CzkFixtures.psc, "2000-06-15"), credentialIssuerIdentifier = CzkFixtures.ISSUER,
             metadata = CredentialMetadata(name = "Nym A"), batchId = 1L, instanceId = 0),
@@ -11078,9 +11194,9 @@ class SirosWalletTest {
 
         wallet.startIssuanceByOffer(startOffer)
         assertTrue((stateFlow.value as WalletState.FlowActive).isPending)
-        progressFlow.emit(FlowProgressMessage(flowId = "flow-1", step = "parsing_offer"))
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-1", step = "parsing_offer").also { it.connectionGeneration = engineGeneration.get() })
         advanceUntilIdle()
-        progressFlow.emit(FlowProgressMessage(flowId = "flow-1", step = "offer_parsed"))
+        progressFlow.emit(FlowProgressMessage(flowId = "flow-1", step = "offer_parsed").also { it.connectionGeneration = engineGeneration.get() })
         advanceUntilIdle()
 
         val s = stateFlow.value as WalletState.FlowActive
@@ -11452,6 +11568,10 @@ class SirosWalletTest {
         val stateFlow = values["_state"] as? MutableStateFlow<WalletState>
         if (stateFlow != null && "state" !in values) {
             values["state"] = stateFlow.asStateFlow()
+        }
+        // allocateInstance skips this initializer too; the lost-flow sweeps ask whether a browser authorization is parked.
+        if ("pendingAuthorizations" !in values) {
+            values["pendingAuthorizations"] = mutableMapOf<String, Any>()
         }
         if ("pscIssuerByFlow" !in values) {
             values["pscIssuerByFlow"] = java.util.concurrent.ConcurrentHashMap<String, String>()

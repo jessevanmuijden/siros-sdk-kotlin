@@ -161,6 +161,24 @@ internal class BlindIssuance(
     }
 
     /**
+     * The flow's engine session is gone: its private key is dropped now, but what it already opened stays readable for the
+     * [purgeStale] grace period (a completion buffered before the loss is still processed against it). A flow with nothing opened
+     * is forgotten at once.
+     */
+    fun retire(flowId: String, now: Long = clock()) {
+        synchronized(lock) {
+            val state = flows[flowId] ?: return
+            state.key = null
+            if (state.opened.isEmpty()) {
+                flows.remove(flowId)
+                offeredFlows.remove(flowId)
+            } else if (state.staleAt == NOT_STALE) {
+                state.staleAt = now
+            }
+        }
+    }
+
+    /**
      * The `decrypt_credential_response` step: opens [jwe] with the flow's key and keeps what it says. Returns what
      * the engine needs to continue (a deferred issuance's `transaction_id`), nothing else.
      *
