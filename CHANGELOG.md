@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A flow whose engine connection is lost or replaced is ended instead of leaving a spinner.** The engine keeps a flow only for the life of
+  its session: when it closed the socket (read timeout) and the wallet reconnected, the consent screen stayed up, a later Decline went to the
+  new session ("action for unknown flow"), nothing came back, and the app sat on "selecting credentials" until the user cancelled.
+  The wallet now ends such a flow locally when the engine session goes `RECONNECTING`, `FAILED` or `REAUTH_REQUIRED`, or its socket is
+  replaced: `WalletEventListener.onFlowError` is called once with a "connection lost, start it again" message, a credential selection still
+  waiting on the app is cancelled (so `onCredentialSelectionRequired` unwinds and the consent UI can dismiss), the per-flow state (match
+  results, pending zkp_req signing, issuance preparation, blind-issuance keys via their existing drop) is dropped and the wallet returns to
+  Ready. An answer that reaches the wallet afterwards (an app that ignores the cancellation, a Decline tapped later) is not sent: it would
+  reach a session that does not know the flow. Flows started on the new connection are not affected. The sample app clears its pending
+  consent when the SDK cancels the wait.
+
 ### Changed
 - A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no
   data. New `PresentationRequest.disclosesNoClaims` is true ONLY when every matched query is a `zkp_req` query whose plan consists solely of

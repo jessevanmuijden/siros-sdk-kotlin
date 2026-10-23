@@ -7170,12 +7170,72 @@ class SirosWallet private constructor(
         }
     }
 
+    /** The engine connection generation each flow was first seen on (its session, which is all the engine keeps the flow for). */
+    private val flowConnectionGeneration = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    /** Flows ended locally because their engine session is gone (see [endFlowLost]). */
+    private val lostFlowIds: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
+    /** The coroutine of each flow that is waiting on the app for a credential selection, so a lost flow can stop it. */
+    private val selectionJobsByFlow = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
+
+    /**
+     * Whether [flowId] can no longer complete: it was ended as lost, or it lives on an engine connection that has been replaced
+     * (the engine answers an action for it with nothing: "action for unknown flow").
+     */
+    private fun isFlowLost(engine: WalletEngineSession, flowId: String): Boolean {
+        if (flowId in lostFlowIds) return true
+        val born = flowConnectionGeneration[flowId] ?: return false
+        return born != engine.connectionGeneration
+    }
+
+    /**
+     * Ends flows whose engine connection is gone: a flow only exists on the engine for the life of the session that started it, so
+     * once the socket is replaced or lost it can never complete and nothing the user does for it reaches anything. The listener is
+     * told once ([WalletEventListener.onFlowError]), a consent or selection still waiting on the app is cancelled, the per-flow state
+     * is dropped and the wallet goes back to Ready (no spinner). Nothing is sent to the engine.
+     */
+    private fun endFlowLost(flowId: String) {
+        if (flowId in terminatedFlowIds || !lostFlowIds.add(flowId)) return
+        Timber.w("Flow $flowId lost with its engine connection; ending it locally")
+        terminatedFlowIds.add(flowId)
+        selectionJobsByFlow.remove(flowId)?.cancel()
+        stopZkSigning(flowId, refuse = false)
+        clearFlowMatchState(flowId)
+        pscIssuerByFlow.remove(flowId)
+        blindIssuance.drop(flowId)
+        discardZkIssuancePreparation(flowId)
+        flowConnectionGeneration.remove(flowId)
+        resetIssuanceGuards()
+        eventListener?.onFlowError(flowId, FLOW_LOST_MESSAGE)
+        val current = _state.value
+        if (current is WalletState.FlowActive && current.flowId == flowId) {
+            _state.value = readyState(current.userId, current.displayName, current.credentials)
+        }
+    }
+
+    /** The active flow (and any other known one) lost its connection: the state of the engine session says so. */
+    private fun endFlowsOnConnectionLoss() {
+        val active = (_state.value as? WalletState.FlowActive)?.takeIf { !it.isPending }?.flowId
+        val ids = LinkedHashSet<String>()
+        active?.let { ids.add(it) }
+        ids.addAll(selectionJobsByFlow.keys)
+        ids.forEach { endFlowLost(it) }
+    }
+
+    /** Flows first seen on a connection older than [generation] are gone with it. */
+    private fun endFlowsOfOlderConnections(generation: Int) {
+        flowConnectionGeneration.entries.filter { it.value < generation }.forEach { endFlowLost(it.key) }
+    }
+
     /**
      * The engine session got a new socket (connection [generation]): the response keys of the flows that lived on an older one
      * are dropped now, and what they had opened is kept for [BLIND_STALE_GRACE_MS] only, so a completion that was already
      * buffered can still be processed against it.
      */
     private fun onEngineSocketReplaced(generation: Int) {
+        // The engine keeps a flow only as long as its session: the flows of an older socket can never complete.
+        endFlowsOfOlderConnections(generation)
         blindIssuance.markStaleBefore(generation)
         scope.launch {
             kotlinx.coroutines.delay(BLIND_STALE_GRACE_MS)
@@ -7972,6 +8032,13 @@ class SirosWallet private constructor(
                 ) {
                     stopAllZkSigning()
                 }
+                // A connection lost mid-flow: the flow's engine session is gone (the engine drops its flows with the session), so
+                // it can never complete. Ended here, not left to a spinner until the user cancels.
+                if (s == WalletEngineSession.State.RECONNECTING || s == WalletEngineSession.State.FAILED ||
+                    s == WalletEngineSession.State.REAUTH_REQUIRED
+                ) {
+                    endFlowsOnConnectionLoss()
+                }
             }
         }
         engine.connect(
@@ -8480,6 +8547,7 @@ class SirosWallet private constructor(
             engine.flowProgress().collect { msg ->
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
                 noteFlowId(msg.flowId)
+                msg.flowId?.let { flowConnectionGeneration.putIfAbsent(it, msg.connectionGeneration) }
                 Timber.d("Flow ${msg.flowId} progress: ${msg.step}")
 
                 // Handle trust evaluation — matching wallet-frontend reference implementation
@@ -10223,7 +10291,7 @@ class SirosWallet private constructor(
         flowId: String,
         payload: kotlinx.serialization.json.JsonObject?,
     ) {
-        scope.launch {
+        val selectionJob = scope.launch {
             try {
                 // `.jsonObject` throws on JsonNull rather than treating it
                 // like absent - a real NIST reference-verifier request over
@@ -10345,6 +10413,13 @@ class SirosWallet private constructor(
                     eligible.map { it.id }
                 }
 
+                // The flow's engine session may be gone by the time the user answers (the socket was replaced or lost while the
+                // consent screen was up): an action for it would reach a session that does not know the flow, and nothing would
+                // ever answer. The listener has been told the flow was lost (endFlowLost); nothing is sent.
+                if (isFlowLost(engine, flowId)) {
+                    endFlowLost(flowId)
+                    return@launch
+                }
                 if (selectedIds.isEmpty()) {
                     // A genuine decline: the user was shown credentials that
                     // could have answered this request and chose none.
@@ -10465,6 +10540,9 @@ class SirosWallet private constructor(
                 }
             }
         }
+        // Registered so a flow whose engine connection is lost can stop its pending selection (see endFlowLost).
+        selectionJobsByFlow[flowId] = selectionJob
+        selectionJob.invokeOnCompletion { selectionJobsByFlow.remove(flowId, selectionJob) }
     }
 
     /**
@@ -10596,6 +10674,9 @@ class SirosWallet private constructor(
         /** Thrown wherever a call needs the backend and the wallet has no session yet. */
         private const val NOT_CONNECTED = "Not connected"
         private const val ABANDONED_START_TTL_MS = 30_000L
+
+        /** Reported through [WalletEventListener.onFlowError] when a flow's engine connection is lost: restart it. */
+        internal const val FLOW_LOST_MESSAGE = "The connection to the engine was lost, so this request can no longer be completed. Please start it again."
 
         /**
          * How long what an abandoned issuance opened stays readable after its socket was replaced: long enough for a completion

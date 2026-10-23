@@ -6698,6 +6698,7 @@ class SirosWalletTest {
         val errors: MutableSharedFlow<FlowErrorMessage>,
         val state: MutableStateFlow<WalletEngineSession.State>,
         val metadataSeen: MutableList<JsonObject?>,
+        val generations: MutableStateFlow<Int> = MutableStateFlow(0),
     )
 
     private fun TestScope.engineCzk(
@@ -6716,7 +6717,8 @@ class SirosWalletTest {
         val progress = MutableSharedFlow<FlowProgressMessage>()
         val complete = MutableSharedFlow<FlowCompleteMessage>()
         val errors = MutableSharedFlow<FlowErrorMessage>()
-        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete, flowErrors = errors)
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(signRequests = sign, matchRequests = match, progressFlow = progress, flowComplete = complete, flowErrors = errors, generations = generations)
         val engineState = MutableStateFlow(WalletEngineSession.State.CONNECTED)
         every { engine.state } returns engineState
         every { engine.cancelFlow(any()) } just runs
@@ -6736,7 +6738,7 @@ class SirosWalletTest {
                 context = buildJsonObject { putJsonArray("verifier_ids") { add(buildJsonObject { put("verifier_id_type", "x509_san_dns"); put("verifier_id", redirectClientId.removePrefix("x509_san_dns:")) }) } },
             )
         }
-        return EngineCzk(s, engine, match, sign, progress, complete, errors, engineState, seen)
+        return EngineCzk(s, engine, match, sign, progress, complete, errors, engineState, seen, generations)
     }
 
     private val redirectQuery = Json.parseToJsonElement(
@@ -6755,7 +6757,7 @@ class SirosWalletTest {
                 putJsonObject("verifier") { put("client_id", redirectClientId); put("name", "Example RP") }
                 put("client_metadata", redirectMetadata)
             },
-        ))
+        ).also { it.connectionGeneration = engineGeneration.get() }) // stamped by the session on receipt, as in production
     }
 
     private fun redirectSign(thumbprint: String? = redirectThumbprint, audience: String = redirectClientId, responseUri: String? = "https://rp.example/response", creds: List<String> = listOf("1"), flow: String = "f1", messageId: String = "m1") =
@@ -6960,6 +6962,93 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "consent-declined") }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertTrue("nothing escaped the launch: $czkUncaught", czkUncaught.isEmpty())
+    }
+
+    /** A listener whose selection callback waits for [answer]; it reports what it saw. */
+    private class WaitingSelectionListener(val answer: kotlinx.coroutines.CompletableDeferred<List<Long>>, val ignoreCancellation: Boolean = false) : WalletEventListener {
+        var cancelled = false
+        val errors = mutableListOf<Pair<String, String>>()
+        override suspend fun onCredentialSelectionRequired(request: PresentationRequest): List<Long> = try {
+            if (ignoreCancellation) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { answer.await() } else answer.await()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            cancelled = true
+            throw e
+        }
+        override fun onFlowError(flowId: String, errorMessage: String, redirectUri: String?) { errors += flowId to errorMessage }
+    }
+
+    private fun EngineCzk.currentWalletState() = getField(s.wallet, "_state").let { (it as MutableStateFlow<*>).value }
+
+    @Test
+    fun flowLost_theConnectionIsLostWhileTheConsentScreenIsUp_endsTheFlowAndDismissesTheWait() = runTest(dispatcher) {
+        val e = engineCzk(seedTrust = true)
+        val answer = kotlinx.coroutines.CompletableDeferred<List<Long>>()
+        val listener = WaitingSelectionListener(answer)
+        e.s.wallet.setEventListener(listener)
+        e.matchOnce()
+        runCurrent()
+        // Selection is on screen and the wallet is mid-flow.
+        assertTrue(e.currentWalletState() is WalletState.FlowActive)
+        // The engine closed the socket: the session (and with it the flow) is gone.
+        e.state.value = WalletEngineSession.State.RECONNECTING
+        runCurrent()
+        assertTrue("the pending selection was cancelled so the UI can dismiss it", listener.cancelled)
+        assertEquals(listOf("f1" to SirosWallet.FLOW_LOST_MESSAGE), listener.errors)
+        assertTrue("no spinner: back to Ready", e.currentWalletState() is WalletState.Ready)
+        // Nothing was sent into the void.
+        verify(exactly = 0) { e.engine.sendFlowAction("f1", "decline", any()) }
+        verify(exactly = 0) { e.engine.sendFlowAction("f1", "consent", any()) }
+    }
+
+    @Test
+    fun flowLost_aReplacedSocketEndsTheFlowEvenWithoutAStateChange() = runTest(dispatcher) {
+        val e = engineCzk()
+        val answer = kotlinx.coroutines.CompletableDeferred<List<Long>>()
+        val listener = WaitingSelectionListener(answer)
+        e.s.wallet.setEventListener(listener)
+        e.matchOnce()
+        runCurrent()
+        assertTrue(e.currentWalletState() is WalletState.FlowActive)
+        // The session got a new socket (generation 1) with no RECONNECTING seen (it was conflated away).
+        engineGeneration.incrementAndGet()
+        e.generations.value = engineGeneration.get()
+        runCurrent()
+        assertTrue(listener.cancelled)
+        assertEquals(1, listener.errors.size)
+        assertTrue(e.currentWalletState() is WalletState.Ready)
+    }
+
+    @Test
+    fun flowLost_anAppThatAnswersAfterwards_causesNothingToBeSentToTheNewSession() = runTest(dispatcher) {
+        val e = engineCzk()
+        val answer = kotlinx.coroutines.CompletableDeferred<List<Long>>()
+        // The app does not honour cancellation (like a continuation nobody cancels): the user taps Decline two minutes later.
+        e.s.wallet.setEventListener(WaitingSelectionListener(answer, ignoreCancellation = true))
+        e.matchOnce()
+        runCurrent()
+        engineGeneration.incrementAndGet()
+        e.generations.value = engineGeneration.get()
+        e.state.value = WalletEngineSession.State.RECONNECTING
+        runCurrent()
+        answer.complete(emptyList()) // Decline
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendFlowAction(any(), "decline", any()) }
+        verify(exactly = 0) { e.engine.sendFlowAction(any(), "consent", any()) }
+        assertTrue(e.currentWalletState() is WalletState.Ready)
+    }
+
+    @Test
+    fun flowLost_aFlowStartedOnTheNewConnectionIsNotEnded() = runTest(dispatcher) {
+        val e = engineCzk(flows = listOf("f1", "f2"))
+        e.s.wallet.setEventListener(WaitingSelectionListener(kotlinx.coroutines.CompletableDeferred()))
+        engineGeneration.incrementAndGet()
+        e.generations.value = engineGeneration.get()
+        runCurrent()
+        // A flow that begins after the socket was replaced lives on the new connection.
+        e.matchOnce(flow = "f2")
+        runCurrent()
+        assertTrue(e.currentWalletState() is WalletState.FlowActive)
+        assertEquals("f2", (e.currentWalletState() as WalletState.FlowActive).flowId)
     }
 
     private fun czkTwoCredentials() = listOf(
@@ -11265,6 +11354,15 @@ class SirosWalletTest {
         }
         if ("zkSignJobsByFlow" !in values) {
             values["zkSignJobsByFlow"] = java.util.concurrent.ConcurrentHashMap<String, Any>()
+        }
+        if ("flowConnectionGeneration" !in values) {
+            values["flowConnectionGeneration"] = java.util.concurrent.ConcurrentHashMap<String, Int>()
+        }
+        if ("lostFlowIds" !in values) {
+            values["lostFlowIds"] = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+        }
+        if ("selectionJobsByFlow" !in values) {
+            values["selectionJobsByFlow"] = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Job>()
         }
         if ("lastTrustResults" !in values) {
             values["lastTrustResults"] = mutableMapOf<String, TrustResult>()
