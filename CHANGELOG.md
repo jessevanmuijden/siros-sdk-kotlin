@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     outlives the key: a socket replacement drops the key, so a plaintext completion buffered before the replacement is still
     refused. The marker ends only with the flow (completion, error, cancel, sign failure, drop) or a session-wide clear, and is
     bounded FAIL-CLOSED: at 1024 flows with a key offered a NEW offer is refused and no existing marker is ever evicted.
+    The marker and the flow's state are removed in ONE critical section (`drop`, `take`), the same lock under which a late key
+    installation validates its state and sets the marker, so a cancellation racing a key generation can no longer leave an orphaned
+    marker that consumes capacity.
   - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
     `enc` and `kid` only.
 - A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no

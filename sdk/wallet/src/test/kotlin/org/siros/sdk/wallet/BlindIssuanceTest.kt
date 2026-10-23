@@ -597,5 +597,34 @@ class BlindIssuanceTest {
         assertNotNull(many.offer("one-too-many", request))
         assertTrue(many.wasOffered("one-too-many"))
     }
+
+    @Test
+    fun aKeyInstalledWhileDropIsBetweenItsTwoRemovals_cannotLeaveAnOrphanedMarker() {
+        val genStarted = java.util.concurrent.CountDownLatch(1)
+        val genRelease = java.util.concurrent.CountDownLatch(1)
+        val dropPaused = java.util.concurrent.CountDownLatch(1)
+        val dropRelease = java.util.concurrent.CountDownLatch(1)
+        val holder = BlindIssuance(
+            keyFactory = { alg, enc -> genStarted.countDown(); genRelease.await(); CredentialResponseKey.generate(alg, enc) },
+            duringDrop = { dropPaused.countDown(); dropRelease.await() },
+        )
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        val offer = pool.submit<Result<JsonObject?>> { runCatching { holder.offer("f", request) } }
+        assertTrue(genStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // drop starts (the flow's state is claimed, its key being generated) and stops BETWEEN removing the marker and the state...
+        val drop = pool.submit { holder.drop("f") }
+        assertTrue(dropPaused.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // ...the key is now ready to be installed, and gets the chance to be...
+        genRelease.countDown()
+        Thread.sleep(300)
+        dropRelease.countDown()
+        drop.get(5, java.util.concurrent.TimeUnit.SECONDS)
+        val result = offer.get(5, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue("the late installation finds its flow gone and fails", result.isFailure)
+        assertFalse(holder.wasOffered("f"))
+        assertFalse(holder.holdsKey("f"))
+        assertEquals("no marker is left to consume capacity", 0, holder.offeredCount())
+        pool.shutdownNow()
+    }
 }
 

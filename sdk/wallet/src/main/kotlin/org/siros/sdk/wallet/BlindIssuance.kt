@@ -64,6 +64,8 @@ internal class BlindIssuance(
     private val clock: () -> Long = System::currentTimeMillis,
     /** Runs at the start of [offer], before it claims anything; lets a test pause a caller between its own liveness check and the claim. */
     private val beforeClaim: () -> Unit = {},
+    /** Runs inside [drop]'s critical section, between removing the marker and removing the state; lets a test prove the two are one step. */
+    private val duringDrop: () -> Unit = {},
 ) {
     private class FlowState(val generation: Int) {
         @Volatile var key: CredentialResponseKey? = null
@@ -238,8 +240,11 @@ internal class BlindIssuance(
      * Null when nothing was opened for the flow.
      */
     fun take(flowId: String): OpenedIssuance? {
-        synchronized(lock) { offeredFlows.remove(flowId) }
-        val state = flows.remove(flowId) ?: return null
+        // The marker and the state go in ONE step under the lock that also validates a late key installation (see offer).
+        val state = synchronized(lock) {
+            offeredFlows.remove(flowId)
+            flows.remove(flowId)
+        } ?: return null
         val opened = synchronized(state.opened) { state.opened.toList() }
         if (opened.isEmpty()) return null
         val carriers = opened.filter { it.credentials.isNotEmpty() }
@@ -254,9 +259,17 @@ internal class BlindIssuance(
 
     /** Forgets one flow's key and everything opened for it. */
     fun drop(flowId: String) {
-        synchronized(lock) { offeredFlows.remove(flowId) }
-        flows.remove(flowId)
+        // One critical section: a key installation checks the flow's state and sets the marker under this same lock, so it can never
+        // land between the two removals and leave a marker (a slot of the capacity) with no flow behind it.
+        synchronized(lock) {
+            offeredFlows.remove(flowId)
+            duringDrop()
+            flows.remove(flowId)
+        }
     }
+
+    /** How many flows are marked as offered (for tests: an orphaned marker would consume capacity). */
+    internal fun offeredCount(): Int = synchronized(lock) { offeredFlows.size }
 
     /** Forgets every flow's key and everything opened (cancel, logout, a new connection). */
     fun clear() {
