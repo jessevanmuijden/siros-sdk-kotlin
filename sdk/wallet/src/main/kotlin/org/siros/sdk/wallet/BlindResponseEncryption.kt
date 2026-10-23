@@ -99,6 +99,26 @@ internal object AuthorizationResponseEncryption {
     private const val JARM_ISSUER = "https://self-issued.me/v2"
     private const val JARM_LIFETIME_SECONDS = 300L
 
+    /**
+     * The RFC 7638 thumbprint (base64url, unpadded, SHA-256) of the verifier's public key. For `direct_post.jwt` this is the ONE source
+     * of the mdoc session transcript's thumbprint: the key the response is encrypted to.
+     *
+     * @throws IllegalArgumentException when [jwk] is not a usable public JWK.
+     */
+    fun jwkThumbprint(jwk: JsonObject): String {
+        val parsed = try {
+            JWK.parse(jwk.toString())
+        } catch (e: Exception) {
+            throw IllegalArgumentException("The verifier's encryption key is not a JWK")
+        }
+        require(!parsed.isPrivate) { "The verifier's encryption key must be a public key" }
+        return try {
+            parsed.computeThumbprint().toString()
+        } catch (e: Exception) {
+            throw IllegalArgumentException("The verifier's encryption key has no thumbprint")
+        }
+    }
+
     /** The engine refuses a larger `response_jwe`. */
     const val MAX_RESPONSE_JWE_BYTES = 4 * 1024 * 1024
 
@@ -124,7 +144,8 @@ internal object AuthorizationResponseEncryption {
 
     /**
      * The compact JWE of the response: claims `iss`, `aud`, `iat`, `exp` (`iat` + 300 s), `vp_token` and, when the
-     * request had one, `state`; protected header `alg`, `enc`, the verifier key's `kid` and `cty: JWT`.
+     * request had one, `state`; protected header `alg`, `enc` and the verifier key's `kid` (no `cty`: the plaintext is plain JSON
+     * claims, not a nested JWT, which RFC 7519 section 5.2 says not to mark and a strict verifier would try to parse as one).
      *
      * @param vpToken the DCQL `{queryId: [tokens]}` object, or the bare token string for a request without DCQL.
      * @param verifierJwk the verifier's public key exactly as the engine resolved it (EC or RSA, with its `kid`).
@@ -155,7 +176,6 @@ internal object AuthorizationResponseEncryption {
         }
         require(!jwk.isPrivate) { "The verifier's encryption key must be a public key" }
         val header = JWEHeader.Builder(JWEAlgorithm.parse(alg), EncryptionMethod.parse(enc))
-            .contentType("JWT")
             .apply { jwk.keyID?.let { keyID(it) } }
             .build()
         val encrypter = when (jwk) {

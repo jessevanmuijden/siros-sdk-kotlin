@@ -43,6 +43,9 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
      * credentials are unavailable and nothing is invented.
      */
     RESPONSE_UNAVAILABLE("the encrypted credential response is not available in this wallet"),
+
+    /** A response key was offered for the flow but the completion is plain: an encrypted response is never silently downgraded. */
+    PLAIN_RESPONSE("the issuer answered in clear although an encrypted response was requested"),
 }
 
 /** One received credential, as far as the receipt check needs it. */
