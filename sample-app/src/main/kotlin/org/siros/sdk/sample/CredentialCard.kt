@@ -72,6 +72,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.ImageLoader
+import coil.compose.SubcomposeAsyncImageContent
 import coil.decode.SvgDecoder
 import coil.request.ImageRequest
 import kotlinx.coroutines.CancellationException
@@ -353,30 +354,18 @@ fun CredentialCard(
             Row(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (logoUri != null) {
-                    coil.compose.AsyncImage(
-                        model = coilLogoModel(logoUri),
+                if (logoUri != null || issuerName != null) {
+                    IssuerLogo(
+                        uri = logoUri,
+                        initial = issuerName.orEmpty(),
                         contentDescription = meta?.logo?.altText ?: issuerName,
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape),
-                        contentScale = ContentScale.Crop,
-                    )
-                } else if (issuerName != null) {
-                    Box(
                         modifier = Modifier
                             .size(32.dp)
                             .clip(CircleShape)
                             .background(fgColor.copy(alpha = 0.15f)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = issuerName.take(1).uppercase(),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = fgColor,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
+                        contentScale = ContentScale.Crop,
+                        initialColor = fgColor,
+                    )
                 }
                 if (issuerName != null) {
                     Spacer(modifier = Modifier.width(8.dp))
@@ -1134,23 +1123,101 @@ internal fun extractFullBleedBackgroundImage(svg: String): Pair<String, ByteArra
     return svg.replaceRange(match.range, "") to bytes
 }
 
+/** What the app may load for a logo URI after the SDK's [LogoSanitizer] has had its say. */
+internal sealed interface LogoSource {
+    data class Remote(val url: String) : LogoSource
+    class Png(val bytes: ByteArray) : LogoSource
+    data object Fallback : LogoSource
+}
+
+/** Fail closed: anything the SDK does not accept becomes [LogoSource.Fallback] (the issuer initial). */
+internal fun logoSourceFor(uri: String?): LogoSource =
+    when (val r = org.siros.sdk.credentials.logo.LogoSanitizer.sanitize(uri)) {
+        is org.siros.sdk.credentials.logo.LogoResult.Rejected -> LogoSource.Fallback
+        is org.siros.sdk.credentials.logo.LogoResult.Accepted -> when (val l = r.logo) {
+            is org.siros.sdk.credentials.logo.DisplayLogo.Remote -> LogoSource.Remote(l.url)
+            is org.siros.sdk.credentials.logo.DisplayLogo.Image -> LogoSource.Png(l.png)
+        }
+    }
+
+/** The first character shown in the issuer-initial badge; "?" is never shown, the badge is just empty. */
+internal fun logoInitial(name: String?): String = name?.trim()?.take(1)?.uppercase().orEmpty()
+
 /**
- * Coil's default components handle raw byte arrays (via `ByteArrayMapper` ->
- * `ByteBufferFetcher`, both built in) but never decode a `data:` URI *string*
- * on their own - passing one straight to `AsyncImage.model` just fails
- * silently. Issuer-published logos are frequently embedded this way (e.g.
- * geneva2026.mdoc.online's `credential_metadata.display[].logo.uri`), so
- * unwrap the base64 payload ourselves and hand Coil the bytes directly
- * instead of the URI string.
+ * Whether the initial badge must be drawn in place of the image: always,
+ * unless the image actually loaded. Loading, a failed fetch (offline, 404)
+ * and a decode error all show the initial rather than a blank square.
  */
-internal fun coilLogoModel(uri: String): Any {
-    if (!uri.startsWith("data:")) return uri
-    val comma = uri.indexOf(',')
-    if (comma < 0 || !uri.substring(0, comma).contains("base64")) return uri
-    return try {
-        java.util.Base64.getDecoder().decode(uri.substring(comma + 1))
-    } catch (e: Exception) {
-        uri
+internal fun showInitialFor(state: coil.compose.AsyncImagePainter.State): Boolean =
+    state !is coil.compose.AsyncImagePainter.State.Success
+
+/**
+ * An issuer/credential logo that can never show less than the issuer
+ * initial: a rejected URI, a still-loading image and a failed load all
+ * draw [initial] centered in the box. Pass the box shape/background in
+ * [modifier].
+ */
+@Composable
+internal fun IssuerLogo(
+    uri: String?,
+    initial: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Fit,
+    initialColor: Color = Color.Unspecified,
+    initialStyle: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.labelMedium,
+) {
+    val source = remember(uri) { logoSourceFor(uri) }
+    val initialText = logoInitial(initial)
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        val badge = @Composable {
+            Text(
+                text = initialText,
+                style = initialStyle,
+                color = initialColor,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        when (source) {
+            LogoSource.Fallback -> badge()
+            is LogoSource.Png -> LogoLayer(source.bytes, contentDescription, contentScale, badge)
+            is LogoSource.Remote -> {
+                val logo = rememberNormalizedLogoModel(source.url)
+                logo.backgroundImageBytes?.let { backgroundBytes ->
+                    coil.compose.AsyncImage(
+                        model = backgroundBytes,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
+                LogoLayer(logo.model, contentDescription, contentScale, badge)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogoLayer(
+    model: Any,
+    contentDescription: String?,
+    contentScale: ContentScale,
+    badge: @Composable () -> Unit,
+) {
+    // SubcomposeAsyncImage, not AsyncImage: a plain AsyncImage draws nothing
+    // while loading or after a failed load, leaving a blank badge.
+    coil.compose.SubcomposeAsyncImage(
+        model = model,
+        contentDescription = contentDescription,
+        modifier = Modifier.fillMaxSize(),
+        contentScale = contentScale,
+    ) {
+        if (showInitialFor(painter.state)) {
+            // The content slot does not inherit the outer Box's alignment.
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { badge() }
+        } else {
+            SubcomposeAsyncImageContent()
+        }
     }
 }
 
@@ -1167,9 +1234,9 @@ internal fun coilLogoModel(uri: String): Any {
 internal data class NormalizedLogo(val model: Any, val backgroundImageBytes: ByteArray? = null)
 
 /**
- * Async counterpart to [coilLogoModel] for logo/preview URIs that need
- * fetching (remote `http(s)`) rather than just base64-decoding an already-
- * inline `data:` URI. Applies the same [ensureSvgViewBox]/
+ * Normalizes a remote logo/preview URI (callers pass only what
+ * `LogoSanitizer` accepted, i.e. https; `data:` logos never come here).
+ * Applies the same [ensureSvgViewBox]/
  * [ensureSvgImageHeight]/[extractFullBleedBackgroundImage] normalization an
  * already-stored credential's card SVG gets in [fetchAndSubstituteSvg] -
  * without it, a logo/preview URI pointing at an SVG whose `<image>` element
@@ -1178,7 +1245,7 @@ internal data class NormalizedLogo(val model: Any, val backgroundImageBytes: Byt
  * or - if the SVG has a full-bleed embedded raster `<image>` - renders with
  * AndroidSVG's confirmed ~30%-down dark-band mis-render (see
  * [extractFullBleedBackgroundImage]'s doc comment), since the plain
- * [coilLogoModel] path (used by the Add Credentials offer list and the
+ * path (used by the Add Credentials offer list and the
  * stored-credential detail screen, neither of which goes through
  * [fetchAndSubstituteSvg]'s pipeline) hands Coil the untouched SVG
  * bytes/URI.
@@ -1188,13 +1255,8 @@ internal data class NormalizedLogo(val model: Any, val backgroundImageBytes: Byt
  * function existed.
  */
 internal suspend fun fetchAndNormalizeLogoModel(uri: String): NormalizedLogo {
-    if (uri.startsWith("data:")) {
-        if (!uri.startsWith("data:image/svg+xml", ignoreCase = true)) {
-            return NormalizedLogo(coilLogoModel(uri))
-        }
-        val svgText = decodeSvgDataUri(uri) ?: return NormalizedLogo(coilLogoModel(uri))
-        return normalizeSvgLogoOrFallback(svgText, uri)
-    }
+    // Only https URLs reach here (LogoSanitizer admits nothing else); data:
+    // logos are decoded and re-encoded by the SDK before the app sees them.
     if (!uri.startsWith("http")) return NormalizedLogo(uri)
     return try {
         withContext(Dispatchers.IO) {
@@ -1237,7 +1299,7 @@ private fun normalizeSvgLogoOrFallback(svgText: String, fallback: String): Norma
  */
 @Composable
 internal fun rememberNormalizedLogoModel(uri: String): NormalizedLogo {
-    var logo by remember(uri) { mutableStateOf(NormalizedLogo(coilLogoModel(uri))) }
+    var logo by remember(uri) { mutableStateOf(NormalizedLogo(uri)) }
     LaunchedEffect(uri) {
         logo = fetchAndNormalizeLogoModel(uri)
     }

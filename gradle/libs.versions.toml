@@ -31,6 +31,8 @@ camerax = "1.4.1"
 mlkit-barcode = "17.3.0"
 zxing-core = "3.5.3"
 coil = "2.7.0"
+androidsvg = "1.4"
+robolectric = "4.14.1"
 upokecenter-cbor = "4.5.4"
 json-schema-validator = "0.3.1"
 
@@ -74,6 +76,8 @@ camerax-view = { module = "androidx.camera:camera-view", version.ref = "camerax"
 mlkit-barcode = { module = "com.google.mlkit:barcode-scanning", version.ref = "mlkit-barcode" }
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxing-core" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
+androidsvg = { module = "com.caverock:androidsvg-aar", version.ref = "androidsvg" }
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 coil-svg = { module = "io.coil-kt:coil-svg", version.ref = "coil" }
 upokecenter-cbor = { module = "com.upokecenter:cbor", version.ref = "upokecenter-cbor" }
 

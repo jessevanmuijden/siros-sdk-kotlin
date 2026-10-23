@@ -231,6 +231,19 @@ The entries below are the detailed changes that make up this release.
     `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
 
 ### Added
+- **`LogoSanitizer`: display logos given as `data:` URIs are supported and
+  sanitized** (sirosfoundation/siros-sdk-kotlin#300). `LogoSanitizer.sanitize(uri)`
+  returns `LogoResult.Accepted(DisplayLogo.Remote | DisplayLogo.Image)` or a
+  typed `LogoRejection`, and fails closed. `data:` URIs are parsed strictly
+  (RFC 2397, base64 only), limited to png/jpeg/webp/gif/svg+xml and 256 KiB
+  decoded; rasters are decoded by `BitmapFactory` (max 2048 px per edge,
+  declared type must match the bytes) and re-encoded to a clean PNG, so
+  metadata and trailing payloads are dropped. SVG is refused if it contains
+  script, foreignObject, `use`, animation, event handlers, external
+  references, DOCTYPE or entities, and otherwise rasterized with AndroidSVG
+  to PNG; it is never handed on as XML. `https:` stays allowed, `http:` and
+  everything else is rejected. The sample app uses it for every logo and now
+  falls back to the issuer initial when an accepted https logo fails to load.
 - **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`
   `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`
   throws it, before building or storing anything, when the unlocked container has an
