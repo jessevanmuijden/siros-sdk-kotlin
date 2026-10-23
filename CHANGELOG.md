@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting on the app is cancelled (so `onCredentialSelectionRequired` unwinds and the consent UI can dismiss), the per-flow state (match
   results, pending zkp_req signing, issuance preparation, blind-issuance keys via their existing drop) is dropped and the wallet returns to
   Ready. An answer that reaches the wallet afterwards (an app that ignores the cancellation, a Decline tapped later) is not sent: it would
-  reach a session that does not know the flow. Flows started on the new connection are not affected. The sample app clears its pending
-  consent when the SDK cancels the wait.
+  reach a session that does not know the flow. Flows started on the new connection are not affected. The engine's own answer to an action for a flow it does not
+  know, `flow_error` with code `UNKNOWN_FLOW`, ends a flow the wallet believes live the same way (and a frame for an already ended or never
+  known flow is ignored: it neither tells the app twice nor resets a newer flow); any other `flow_error` now also cancels a selection still
+  waiting on the app. Unrecognised error codes decode as before. The sample app clears its pending consent when the SDK cancels the wait.
 
 ### Changed
 - A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no

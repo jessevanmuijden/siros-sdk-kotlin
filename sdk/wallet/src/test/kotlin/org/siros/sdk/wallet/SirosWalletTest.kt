@@ -7037,6 +7037,65 @@ class SirosWalletTest {
         assertTrue(e.currentWalletState() is WalletState.Ready)
     }
 
+    private fun unknownFlow(flow: String, gen: Int = 0) = FlowErrorMessage(
+        flowId = flow, step = "",
+        error = org.siros.sdk.transport.engine.FlowError(code = "UNKNOWN_FLOW", message = "Flow not found or already completed"),
+    ).also { it.connectionGeneration = gen }
+
+    @Test
+    fun flowLost_anUnknownFlowFrameForALiveFlowEndsItLikeALostConnection() = runTest(dispatcher) {
+        val e = engineCzk()
+        val answer = kotlinx.coroutines.CompletableDeferred<List<Long>>()
+        val listener = WaitingSelectionListener(answer)
+        e.s.wallet.setEventListener(listener)
+        e.matchOnce()
+        runCurrent()
+        assertTrue(e.currentWalletState() is WalletState.FlowActive)
+        // The user's action reached a session that does not know the flow; the engine says so.
+        e.errors.emit(unknownFlow("f1"))
+        runCurrent()
+        assertTrue("the pending selection was cancelled", listener.cancelled)
+        assertEquals(listOf("f1" to SirosWallet.FLOW_LOST_MESSAGE), listener.errors)
+        assertTrue(e.currentWalletState() is WalletState.Ready)
+    }
+
+    @Test
+    fun flowLost_anUnknownFlowFrameForAnEndedOrUnknownFlowIsIgnored() = runTest(dispatcher) {
+        val e = engineCzk(flows = listOf("f1", "f2"))
+        val listener = WaitingSelectionListener(kotlinx.coroutines.CompletableDeferred())
+        e.s.wallet.setEventListener(listener)
+        // A different, newer flow is active; a late UNKNOWN_FLOW for a dead one must not touch it or tell the app.
+        e.matchOnce(flow = "f2")
+        runCurrent()
+        e.errors.emit(unknownFlow("f1-dead"))
+        runCurrent()
+        assertEquals("f2", (e.currentWalletState() as WalletState.FlowActive).flowId)
+        assertTrue(listener.errors.isEmpty())
+        // After the live flow ended once, a second frame for it is ignored too (the app is told once).
+        e.errors.emit(unknownFlow("f2"))
+        runCurrent()
+        e.errors.emit(unknownFlow("f2"))
+        runCurrent()
+        assertEquals(1, listener.errors.size)
+    }
+
+    @Test
+    fun flowLost_aFlowErrorWithAnUnrecognisedCodeStillDecodesAndEndsTheFlow() = runTest(dispatcher) {
+        val wire = """{"type":"flow_error","flow_id":"f1","step":"","error":{"code":"SOME_FUTURE_CODE","message":"m","details":{"x":1}},"extra":true}"""
+        val msg = Json { ignoreUnknownKeys = true }.decodeFromString(FlowErrorMessage.serializer(), wire)
+        assertEquals("SOME_FUTURE_CODE", msg.error.code)
+        val e = engineCzk()
+        val listener = WaitingSelectionListener(kotlinx.coroutines.CompletableDeferred())
+        e.s.wallet.setEventListener(listener)
+        e.matchOnce()
+        runCurrent()
+        e.errors.emit(msg)
+        runCurrent()
+        assertTrue("the pending selection was cancelled", listener.cancelled)
+        assertEquals(1, listener.errors.size)
+        assertTrue(e.currentWalletState() is WalletState.Ready)
+    }
+
     @Test
     fun flowLost_aFlowStartedOnTheNewConnectionIsNotEnded() = runTest(dispatcher) {
         val e = engineCzk(flows = listOf("f1", "f2"))

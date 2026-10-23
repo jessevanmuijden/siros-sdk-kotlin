@@ -9134,7 +9134,21 @@ class SirosWallet private constructor(
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
+                if (msg.error.code == ERROR_UNKNOWN_FLOW) {
+                    // The engine does not know this flow (its session was replaced or the flow ended there): an action sent for it
+                    // came back as this. For a flow this wallet believes live it can never complete: ended exactly like a lost
+                    // connection. For one already ended, or one the wallet never had (a late reply of a dead flow), it is ignored:
+                    // it must neither tell the app twice nor reset the state of a newer flow.
+                    val believedLive = fid !in terminatedFlowIds && fid !in lostFlowIds && (
+                        (_state.value as? WalletState.FlowActive)?.takeIf { !it.isPending }?.flowId == fid ||
+                            selectionJobsByFlow.containsKey(fid) || flowConnectionGeneration.containsKey(fid)
+                        )
+                    if (believedLive) endFlowLost(fid) else Timber.i("UNKNOWN_FLOW for flow $fid ignored (not a live flow of this wallet)")
+                    return@collect
+                }
                 terminatedFlowIds.add(fid)
+                selectionJobsByFlow.remove(fid)?.cancel()
+                flowConnectionGeneration.remove(fid)
                 stopZkSigning(fid, refuse = false)
                 clearFlowMatchState(fid)
                 pscIssuerByFlow.remove(fid)
@@ -10674,6 +10688,9 @@ class SirosWallet private constructor(
         /** Thrown wherever a call needs the backend and the wallet has no session yet. */
         private const val NOT_CONNECTED = "Not connected"
         private const val ABANDONED_START_TTL_MS = 30_000L
+
+        /** The engine's `flow_error` code for a flow it does not know (session replaced, flow already ended). */
+        internal const val ERROR_UNKNOWN_FLOW = "UNKNOWN_FLOW"
 
         /** Reported through [WalletEventListener.onFlowError] when a flow's engine connection is lost: restart it. */
         internal const val FLOW_LOST_MESSAGE = "The connection to the engine was lost, so this request can no longer be completed. Please start it again."
