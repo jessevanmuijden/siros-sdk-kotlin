@@ -12452,6 +12452,8 @@ class SirosWalletTest {
         offeredKey: Boolean = false,
         /** With [offeredKey]: the socket the flow lived on was replaced (and the sweep ran) before the completion arrived. */
         socketReplacedSinceOffer: Boolean = false,
+        /** The engine delivers the very same completion a SECOND time (the transport does not de-duplicate). */
+        repeatCompletion: Boolean = false,
         /** Runs after the key was offered and before the completion arrives (to put the holder under pressure, say). */
         beforeCompletion: (BlindIssuance) -> Unit = {},
         /** The `notification_id` the engine's ENCRYPTED completion frame carries on its entries (it should never be read). */
@@ -12536,19 +12538,22 @@ class SirosWalletTest {
             if (socketReplacedSinceOffer) blind.markStaleBefore(1)
             beforeCompletion(blind)
         }
-        completeFlow.emit(
-            FlowCompleteMessage(
-                flowId = flowId, credentials = completionResults,
-                credentialIssuer = "https://issuer.example", selectedCredentialConfigurationId = "nym",
-                credentialResponseEncrypted = encrypted,
-                credentialMetadata = wireMetadata?.let {
-                    Json.decodeFromString(FlowCompleteMessage.serializer(), """{"flow_id":"$flowId","credential_metadata":$it}""").credentialMetadata
-                },
-                redactedMembers = redactedMembers, refreshToken = refreshToken, dpopKeyId = refreshToken?.let { "key-1" },
-                issuerTrust = issuerTrust,
-            ),
+        val completionMessage = FlowCompleteMessage(
+            flowId = flowId, credentials = completionResults,
+            credentialIssuer = "https://issuer.example", selectedCredentialConfigurationId = "nym",
+            credentialResponseEncrypted = encrypted,
+            credentialMetadata = wireMetadata?.let {
+                Json.decodeFromString(FlowCompleteMessage.serializer(), """{"flow_id":"$flowId","credential_metadata":$it}""").credentialMetadata
+            },
+            redactedMembers = redactedMembers, refreshToken = refreshToken, dpopKeyId = refreshToken?.let { "key-1" },
+            issuerTrust = issuerTrust,
         )
+        completeFlow.emit(completionMessage)
         advanceUntilIdle()
+        if (repeatCompletion) {
+            completeFlow.emit(completionMessage)
+            advanceUntilIdle()
+        }
         return DeliveredScenario(wallet, store, keystore, listener, engine, blind)
     }
 
@@ -13496,6 +13501,29 @@ class SirosWalletTest {
         verify(exactly = 1) { s.engine.sendCredentialNotification("flow-delivered", "notif-1", CredentialNotificationEvent.FAILURE, any()) }
         verify(exactly = 1) { s.listener.onFlowError("flow-delivered", match { it.contains("answered in clear") }, any()) }
         assertFalse("the marker ends with the flow", s.blind.wasOffered("flow-delivered"))
+    }
+
+    @Test
+    fun aRepeatedPlaintextCompletionOfARefusedFlow_isIgnored_neverStoredAsAFreshOne() = runTest(dispatcher) {
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            encrypted = false, offeredKey = true, repeatCompletion = true,
+        )
+        // The first plaintext completion was refused (a key was offered) and the flow is terminal; the repeat finds no marker any
+        // more, so without the terminal-flow check it would be accepted as an ordinary plain completion and stored.
+        assertNothingStored(s)
+        verify(exactly = 1) { s.listener.onFlowError("flow-delivered", match { it.contains("answered in clear") }, any()) }
+        verify(exactly = 1) { s.engine.sendCredentialNotification("flow-delivered", "notif-1", CredentialNotificationEvent.FAILURE, any()) }
+    }
+
+    @Test
+    fun aRepeatedAcceptedCompletion_isNotStoredTwice() = runTest(dispatcher) {
+        val s = deliveredScenario(
+            listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+            encrypted = false, repeatCompletion = true,
+        )
+        assertEquals(1, s.store.getAll().size)
+        verify(exactly = 1) { s.listener.onFlowComplete("flow-delivered", any()) }
     }
 
     @Test

@@ -8634,6 +8634,12 @@ class SirosWallet private constructor(
         scope.launch {
             engine.flowComplete().collect { completion ->
                 if (isAbandonedFlowEvent(engine, completion.flowId, completion.connectionGeneration)) return@collect
+                // A flow that already ended (completed, refused, failed) completes once: the transport does not de-duplicate, and a
+                // repeat would find the flow's "key offered" marker gone and be taken for an ordinary plain completion.
+                if (completion.flowId in terminatedFlowIds) {
+                    Timber.w("Ignoring a repeated completion of the already ended flow ${completion.flowId}")
+                    return@collect
+                }
                 // An issuance whose response only this wallet could open completes with empty credentials: fill them
                 // from the response the wallet decrypted, or refuse. Taken before anything else can reset the state.
                 val filled = fillEncryptedCompletion(completion)

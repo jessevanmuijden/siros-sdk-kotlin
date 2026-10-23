@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     The marker and the flow's state are removed in ONE critical section (`drop`, `take`), the same lock under which a late key
     installation validates its state and sets the marker, so a cancellation racing a key generation can no longer leave an orphaned
     marker that consumes capacity.
+  - A completion for a flow that already ended is ignored (the transport does not de-duplicate): a repeated plaintext completion of a
+    refused flow can no longer be taken for an ordinary one once its marker is gone, and an accepted completion is not stored twice.
   - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
     `enc` and `kid` only.
 - A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no
