@@ -197,14 +197,32 @@ class LogoSanitizerTest {
     }
 
     @Test
-    fun `svg with embedded raster data image and local gradient reference is allowed`() {
+    fun `svg with quoted and padded local gradient references is allowed`() {
+        for (ref in listOf("url(#g)", "url('#g')", "url(&quot;#g&quot;)", "url( #g)", "url( '#g' )")) {
+            val s = svg(
+                """<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs>""" +
+                    """<rect width="64" height="64" fill="$ref"/>""",
+            )
+            assertTrue("$ref -> ${LogoSanitizer.sanitize(svgUri(s))}", LogoSanitizer.sanitize(svgUri(s)) is LogoResult.Accepted)
+        }
+    }
+
+    @Test
+    fun `svg with any embedded image is rejected, including a small raster`() {
         val png = Base64.getEncoder().encodeToString(encode(Bitmap.CompressFormat.PNG))
-        val s = svg(
-            """<defs><linearGradient id="g"><stop offset="0" stop-color="#f00"/></linearGradient></defs>""" +
-                """<rect width="64" height="64" fill="url(#g)"/>""" +
-                """<image width="8" height="8" xlink:href="data:image/png;base64,$png"/>""",
+        assertEquals(
+            LogoRejection.ActiveContent,
+            rejected(svgUri(svg("""<image width="8" height="8" xlink:href="data:image/png;base64,$png"/>"""))),
         )
-        image(svgUri(s))
+    }
+
+    @Test
+    fun `svg without viewBox keeps its artwork when scaled`() {
+        val s = """<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">""" +
+            """<rect x="768" y="768" width="200" height="200" fill="#ff0000"/></svg>"""
+        val img = image(svgUri(s))
+        val px = pngOf(img).getPixel((img.width * 0.8).toInt(), (img.height * 0.8).toInt())
+        assertEquals(Color.RED, px)
     }
 
     @Test

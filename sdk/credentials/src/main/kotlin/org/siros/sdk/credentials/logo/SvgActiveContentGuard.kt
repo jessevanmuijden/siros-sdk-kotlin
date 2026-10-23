@@ -8,21 +8,21 @@ import org.xmlpull.v1.XmlPullParserException
 
 /**
  * Refuses (never repairs) an SVG that contains anything but static shapes,
- * text, gradients and embedded raster `data:` images. Uses the platform pull
+ * text and gradients. `<image>` is refused outright, embedded `data:` rasters
+ * included: AndroidSVG would decode them before any size check could run. Uses the platform pull
  * parser, so malformed XML is itself a refusal. This is a gate in front of
  * the rasterizer, not a sanitizer: nothing is rewritten.
  */
 internal object SvgActiveContentGuard {
     private val FORBIDDEN_ELEMENTS = setOf(
         "script", "foreignobject", "use", "iframe", "object", "embed", "a",
-        "audio", "video", "animate", "set", "animatetransform", "animatemotion",
+        "image", "audio", "video", "animate", "set", "animatetransform", "animatemotion",
         "animatecolor", "handler", "listener", "feimage", "cursor", "font-face-uri",
     )
 
     /** A `url(...)` that points anywhere but a same-document `#fragment`. */
-    private val EXTERNAL_URL = Regex("url\\(\\s*['\"]?\\s*(?!#)", RegexOption.IGNORE_CASE)
+    private val EXTERNAL_URL = Regex("url\\(\\s*(?!\\s*['\"]?\\s*#)", RegexOption.IGNORE_CASE)
     private val CSS_IMPORT = Regex("@import", RegexOption.IGNORE_CASE)
-    private val EMBEDDED_RASTER = Regex("^data:image/(png|jpeg|webp|gif);base64,", RegexOption.IGNORE_CASE)
 
     /** Returns null when the SVG may be rasterized, otherwise the reason it must not be. */
     fun check(bytes: ByteArray): LogoRejection? {
@@ -44,7 +44,7 @@ internal object SvgActiveContentGuard {
                         }
                         if (name in FORBIDDEN_ELEMENTS) return LogoRejection.ActiveContent
                         inStyle = name == "style"
-                        if (!attributesAreSafe(parser, name)) return LogoRejection.ActiveContent
+                        if (!attributesAreSafe(parser)) return LogoRejection.ActiveContent
                     }
                     XmlPullParser.END_TAG -> inStyle = false
                     XmlPullParser.TEXT, XmlPullParser.CDSECT -> if (inStyle && cssIsUnsafe(parser.text)) {
@@ -61,7 +61,7 @@ internal object SvgActiveContentGuard {
         }
     }
 
-    private fun attributesAreSafe(parser: XmlPullParser, element: String): Boolean {
+    private fun attributesAreSafe(parser: XmlPullParser): Boolean {
         for (i in 0 until parser.attributeCount) {
             val attr = localName(parser.getAttributeName(i))
             val value = parser.getAttributeValue(i)
@@ -69,8 +69,7 @@ internal object SvgActiveContentGuard {
             if (value.contains("javascript:", ignoreCase = true)) return false
             if (cssIsUnsafe(value)) return false
             if (attr == "href" || attr == "src") {
-                val ok = if (element == "image") EMBEDDED_RASTER.containsMatchIn(value.trim()) else value.trim().startsWith("#")
-                if (!ok) return false
+                if (!value.trim().startsWith("#")) return false
             }
         }
         return true

@@ -27,6 +27,9 @@ internal object SvgRasterizer {
             w = box.width()
             h = box.height()
         }
+        // Without a viewBox, resizing the viewport would not scale absolute
+        // artwork coordinates; pin the original coordinate space first.
+        if (svg.documentViewBox == null) svg.setDocumentViewBox(0f, 0f, w, h)
         val scale = LogoSanitizer.SVG_RENDER_EDGE_PIXELS / maxOf(w, h)
         val pw = (w * scale).toInt().coerceIn(1, LogoSanitizer.SVG_RENDER_EDGE_PIXELS)
         val ph = (h * scale).toInt().coerceIn(1, LogoSanitizer.SVG_RENDER_EDGE_PIXELS)

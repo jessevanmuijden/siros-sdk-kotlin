@@ -239,9 +239,9 @@ The entries below are the detailed changes that make up this release.
   decoded; rasters are decoded by `BitmapFactory` (max 2048 px per edge,
   declared type must match the bytes) and re-encoded to a clean PNG, so
   metadata and trailing payloads are dropped. SVG is refused if it contains
-  script, foreignObject, `use`, animation, event handlers, external
+  script, foreignObject, `image`, `use`, animation, event handlers, external
   references, DOCTYPE or entities, and otherwise rasterized with AndroidSVG
-  to PNG; it is never handed on as XML. `https:` stays allowed, `http:` and
+  to PNG; it is never handed on as XML. Embedded `<image>` is refused. `https:` stays allowed, `http:` and
   everything else is rejected. The sample app uses it for every logo and now
   falls back to the issuer initial when an accepted https logo fails to load.
 - **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`

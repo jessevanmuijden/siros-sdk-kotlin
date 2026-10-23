@@ -1167,7 +1167,12 @@ internal fun IssuerLogo(
     initialColor: Color = Color.Unspecified,
     initialStyle: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.labelMedium,
 ) {
-    val source = remember(uri) { logoSourceFor(uri) }
+    // Sanitizing decodes and re-encodes images: off the UI thread, initial until done.
+    var source by remember(uri) { mutableStateOf<LogoSource>(LogoSource.Fallback) }
+    LaunchedEffect(uri) {
+        source = withContext(Dispatchers.Default) { logoSourceFor(uri) }
+    }
+    val current: LogoSource = source
     val initialText = logoInitial(initial)
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         val badge = @Composable {
@@ -1178,11 +1183,11 @@ internal fun IssuerLogo(
                 fontWeight = FontWeight.Bold,
             )
         }
-        when (source) {
+        when (current) {
             LogoSource.Fallback -> badge()
-            is LogoSource.Png -> LogoLayer(source.bytes, contentDescription, contentScale, badge)
+            is LogoSource.Png -> LogoLayer(current.bytes, contentDescription, contentScale, badge)
             is LogoSource.Remote -> {
-                val logo = rememberNormalizedLogoModel(source.url)
+                val logo = rememberNormalizedLogoModel(current.url)
                 logo.backgroundImageBytes?.let { backgroundBytes ->
                     coil.compose.AsyncImage(
                         model = backgroundBytes,
