@@ -64,6 +64,8 @@ internal class BlindIssuance(
     private val clock: () -> Long = System::currentTimeMillis,
     /** Runs at the start of [offer], before it claims anything; lets a test pause a caller between its own liveness check and the claim. */
     private val beforeClaim: () -> Unit = {},
+    /** Runs inside [drop]'s critical section, between removing the marker and removing the state; lets a test prove the two are one step. */
+    private val duringDrop: () -> Unit = {},
 ) {
     private class FlowState(val generation: Int) {
         @Volatile var key: CredentialResponseKey? = null
@@ -73,6 +75,16 @@ internal class BlindIssuance(
     }
 
     private val flows = ConcurrentHashMap<String, FlowState>()
+
+    /**
+     * The flows a response key was OFFERED for, as a fact of its own: it outlives the key, which a socket replacement clears
+     * ([markStaleBefore]) while a completion buffered before the replacement can still arrive, and it is what tells a plaintext
+     * completion apart from an encrypted one. Removed only when the flow ends or is dropped ([drop], [take]) or everything is
+     * ([clear]) - never by [markStaleBefore] or [purgeStale]. Bounded FAIL-CLOSED: at [MAX_OFFERED_MARKERS] a NEW offer is refused
+     * ([offer] throws) and no existing marker is ever evicted, because an evicted flow would lose the plaintext-completion
+     * guard while its key and buffered completion are still alive. Guarded by [lock].
+     */
+    private val offeredFlows = HashSet<String>()
 
     /** Guards the claim of a flow's state and the insertion of its key against [clear], which ends every flow at once. */
     private val lock = Any()
@@ -105,6 +117,9 @@ internal class BlindIssuance(
         // instead of resurrecting the flow (a handler can outlive the teardown that cancelled its scope).
         val state = synchronized(lock) {
             if (epoch != null && epoch != this.epoch) throw BlindIssuanceException("The session ended before its response key was requested")
+            if (flowId !in offeredFlows && offeredFlows.size >= MAX_OFFERED_MARKERS) {
+                throw BlindIssuanceException("Too many issuances are in flight to start another")
+            }
             flows.compute(flowId) { _, old -> if (old == null || old.staleAt != NOT_STALE) FlowState(generation) else old }!!
         }
         val key = keyFactory(request.alg, request.enc)
@@ -121,6 +136,7 @@ internal class BlindIssuance(
             if (flows[flowId] !== state) throw BlindIssuanceException("The issuance ended while its response key was being generated")
             // (A teardown after this is a teardown right after the offer returned: the state is out of the map and so is the key.)
             state.key = key
+            offeredFlows.add(flowId)
         }
         return key.publicJwk
     }
@@ -169,9 +185,15 @@ internal class BlindIssuance(
         // notification_id kept so the issuer can still be told.
         CredentialMetadataShape.violation(plaintext)?.let { throw BlindIssuanceException(it, notificationIdEarly) }
         val credentials = buildList {
-            // OpenID4VCI 1.0 returns `credentials`; an earlier draft returned one `credential`. Same order as before.
-            body["credential"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let { add(credentialString(it)) }
-            (body["credentials"] as? JsonArray)?.forEach { add(credentialString(it)) }
+            // OpenID4VCI 1.0 section 8.3: every `credentials` entry is an object whose `credential` member holds the credential. The
+            // INNER string is stored; anything else (a bare string, an object or other non-string inner value) is refused. The one
+            // pre-1.0 draft shape still accepted is a top-level `credential` that is itself a string.
+            body["credential"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let {
+                val legacy = it as? JsonPrimitive
+                if (legacy == null || !legacy.isString || legacy.content.isEmpty()) throw BlindIssuanceException("The credential is not a string", notificationIdEarly)
+                add(legacy.content)
+            }
+            (body["credentials"] as? JsonArray)?.forEach { add(credentialValue(it, notificationIdEarly)) }
         }
         val metadata = body["credential_metadata"]?.takeIf { it !is kotlinx.serialization.json.JsonNull }?.let {
             (it as? JsonObject)?.let { obj -> ResponseCredentialMetadata(obj) } ?: ResponseCredentialMetadata(malformed = true)
@@ -190,9 +212,12 @@ internal class BlindIssuance(
         if (credentials.size > BlindIssuanceControl.MAX_CREDENTIAL_COUNT) {
             throw BlindIssuanceException("The credential response carries more than ${BlindIssuanceControl.MAX_CREDENTIAL_COUNT} credentials", notificationId)
         }
-        // A deferred issuance cannot deliver a secret (privatedata-spec 5A.2). A PENDING response is never handed to the receipt
-        // check (its metadata is dropped below), so a seed it carries is refused here, with the notification_id so the issuer is told.
-        if (transactionId != null && metadata != null && !metadata.malformed && metadata.members.containsKey(org.siros.sdk.credentials.SecretSeedDelivery.MEMBER)) {
+        // A deferred issuance cannot deliver a secret (privatedata-spec 5A.2): neither a PENDING response (never handed to the receipt
+        // check, its metadata is dropped below) nor the response to a Deferred Credential Request, so a seed in either is refused HERE,
+        // the one place that sees the plaintext, with the notification_id so the issuer is told.
+        if ((transactionId != null || deferred) && metadata != null && !metadata.malformed &&
+            metadata.members.containsKey(org.siros.sdk.credentials.SecretSeedDelivery.MEMBER)
+        ) {
             throw BlindIssuanceException(DeliveredMetadataRefusal.DEFERRED_SEED.text, notificationId)
         }
         // Only a response that carries credentials is retained: a pending one (a transaction_id) is validated and answered but
@@ -215,7 +240,11 @@ internal class BlindIssuance(
      * Null when nothing was opened for the flow.
      */
     fun take(flowId: String): OpenedIssuance? {
-        val state = flows.remove(flowId) ?: return null
+        // The marker and the state go in ONE step under the lock that also validates a late key installation (see offer).
+        val state = synchronized(lock) {
+            offeredFlows.remove(flowId)
+            flows.remove(flowId)
+        } ?: return null
         val opened = synchronized(state.opened) { state.opened.toList() }
         if (opened.isEmpty()) return null
         val carriers = opened.filter { it.credentials.isNotEmpty() }
@@ -230,29 +259,48 @@ internal class BlindIssuance(
 
     /** Forgets one flow's key and everything opened for it. */
     fun drop(flowId: String) {
-        flows.remove(flowId)
+        // One critical section: a key installation checks the flow's state and sets the marker under this same lock, so it can never
+        // land between the two removals and leave a marker (a slot of the capacity) with no flow behind it.
+        synchronized(lock) {
+            offeredFlows.remove(flowId)
+            duringDrop()
+            flows.remove(flowId)
+        }
     }
+
+    /** How many flows are marked as offered (for tests: an orphaned marker would consume capacity). */
+    internal fun offeredCount(): Int = synchronized(lock) { offeredFlows.size }
 
     /** Forgets every flow's key and everything opened (cancel, logout, a new connection). */
     fun clear() {
         synchronized(lock) {
             epoch++
             flows.clear()
+            offeredFlows.clear()
         }
     }
 
     /** Whether a key is currently held for [flowId]. */
     fun holdsKey(flowId: String): Boolean = flows[flowId]?.key != null
 
+    /**
+     * Whether a response key was offered for [flowId] and the flow has not ended since, whatever became of the key itself (a socket
+     * replacement drops it). A completion for such a flow that is not encrypted is a downgrade.
+     */
+    fun wasOffered(flowId: String): Boolean = synchronized(lock) { flowId in offeredFlows }
+
     companion object {
         /** A flow not tied to a connection generation (WMP) is never made stale by a socket replacement. */
         const val NO_GENERATION = Int.MAX_VALUE
         private const val NOT_STALE = Long.MIN_VALUE
+
+        /** How many flows may have a response key offered at once; far above normal use. A further offer is refused (never an eviction). */
+        const val MAX_OFFERED_MARKERS = 1024
     }
 
-    private fun credentialString(value: JsonElement): String = when {
-        value is JsonPrimitive && value.isString -> value.content
-        value is JsonObject && (value["credential"] as? JsonPrimitive)?.isString == true -> (value["credential"] as JsonPrimitive).content
-        else -> value.toString()
+    private fun credentialValue(entry: JsonElement, notificationId: String?): String {
+        val inner = ((entry as? JsonObject) ?: throw BlindIssuanceException("A credentials entry is not an object", notificationId))["credential"] as? JsonPrimitive
+        if (inner == null || !inner.isString || inner.content.isEmpty()) throw BlindIssuanceException("A credentials entry has no credential string", notificationId)
+        return inner.content
     }
 }

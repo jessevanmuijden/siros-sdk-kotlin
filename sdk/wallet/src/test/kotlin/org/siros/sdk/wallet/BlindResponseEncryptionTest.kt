@@ -139,7 +139,8 @@ class BlindResponseEncryptionTest {
         assertEquals("ECDH-ES", header.algorithm.name)
         assertEquals("A128GCM", header.encryptionMethod.name)
         assertEquals("verifier-key-1", header.keyID)
-        assertEquals("JWT", header.contentType)
+        // The plaintext is plain JSON claims, not a nested JWT: no cty (RFC 7519 section 5.2).
+        assertNull(header.contentType)
         assertEquals("https://self-issued.me/v2", claims["iss"]!!.jsonPrimitive.content)
         assertEquals("x509_san_dns:verifier.example", claims["aud"]!!.jsonPrimitive.content)
         assertEquals(1_700_000_000L, claims["iat"]!!.jsonPrimitive.content.toLong())

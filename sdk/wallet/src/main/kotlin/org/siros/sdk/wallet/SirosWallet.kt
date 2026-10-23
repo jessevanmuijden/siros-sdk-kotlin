@@ -5890,6 +5890,10 @@ class SirosWallet private constructor(
             null
         }
         val engineCreds = decoded.credentials.orEmpty()
+        // A key was offered for this flow: a plain completion carrying credentials is an error, never accepted (the caller drops the key after).
+        if (opened == null && engineCreds.isNotEmpty() && blindIssuance.wasOffered(flowId)) {
+            return DeliveredMetadataRefusal.PLAIN_RESPONSE to engineCreds.mapNotNull { it.notificationId }
+        }
         if (opened != null && opened.credentials.size != engineCreds.size) {
             return DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE to listOfNotNull(opened.notificationId)
         }
@@ -5910,13 +5914,31 @@ class SirosWallet private constructor(
         return (verdict as? DeliveredMetadataVerdict.Refuse)?.let { it.reason to creds.mapNotNull { c -> c.notificationId } }
     }
 
+    /**
+     * The verifier-key thumbprint of an OpenID4VP session transcript. For `direct_post.jwt` there is ONE source: the key the response is
+     * encrypted to (`response_encryption.jwk`); an engine-supplied `verifier_jwk_thumbprint` that differs is refused, never preferred.
+     * Without response encryption the engine's value is used as before.
+     */
+    internal fun transcriptThumbprint(params: org.siros.sdk.transport.engine.SignRequestParams): String? {
+        val encryption = params.responseEncryption ?: return params.verifierJwkThumbprint
+        val own = AuthorizationResponseEncryption.jwkThumbprint(encryption.jwk)
+        val engines = params.verifierJwkThumbprint
+        if (!engines.isNullOrEmpty() && engines != own) {
+            throw WalletException("The verifier key thumbprint the engine sent is not the one of the key the response is encrypted to")
+        }
+        return own
+    }
+
     /** What an engine completion becomes once the credentials it left empty are filled from the wallet's own response. */
     private sealed class EncryptedCompletion {
         /** [message] carries every credential; [opened] is the decrypted response, null for a plain (unencrypted) issuance. */
         class Filled(val message: FlowCompleteMessage, val opened: OpenedIssuance?) : EncryptedCompletion()
 
         /** The wallet holds no usable decrypted response for an encrypted completion: nothing is invented. */
-        class Unavailable(val notificationIds: List<String>) : EncryptedCompletion()
+        class Unavailable(
+            val notificationIds: List<String>,
+            val refusal: DeliveredMetadataRefusal = DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE,
+        ) : EncryptedCompletion()
     }
 
     /**
@@ -5936,8 +5958,13 @@ class SirosWallet private constructor(
      */
     private fun fillEncryptedCompletion(msg: FlowCompleteMessage): EncryptedCompletion {
         if (!msg.credentialResponseEncrypted) {
-            // A plain completion never reads the key an optional encryption offer may have left behind.
+            // A key was offered for this flow, so the completion must be encrypted: plaintext credentials are an ERROR, never accepted.
+            val offered = blindIssuance.wasOffered(msg.flowId)
+            // A plain completion never reads the key an optional encryption offer left behind.
             blindIssuance.drop(msg.flowId)
+            if (offered && !msg.credentials.isNullOrEmpty()) {
+                return EncryptedCompletion.Unavailable(msg.credentials.orEmpty().mapNotNull { it.notificationId }, DeliveredMetadataRefusal.PLAIN_RESPONSE)
+            }
             return EncryptedCompletion.Filled(msg, null)
         }
         val opened = blindIssuance.take(msg.flowId) ?: return EncryptedCompletion.Unavailable(emptyList())
@@ -7593,7 +7620,11 @@ class SirosWallet private constructor(
             val audience = params.audience.orEmpty()
             val nonce = params.nonce.orEmpty()
             val responseUri = params.responseUri.orEmpty()
-            val thumbprint = params.verifierJwkThumbprint.orEmpty()
+            val thumbprint = try {
+                transcriptThumbprint(params).orEmpty()
+            } catch (e: Exception) {
+                refuse("handover-thumbprint", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
+            }
             if (audience.isEmpty() || nonce.isEmpty() || responseUri.isEmpty() || thumbprint.isEmpty()) {
                 refuse("handover-inputs", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.UNSUPPORTED_REQUEST)
             }
@@ -8163,6 +8194,14 @@ class SirosWallet private constructor(
                             val nonce = params?.nonce ?: ""
                             val audience = params?.audience ?: ""
                             val credsToInclude = params?.credentialsToInclude
+                            // One source for the mdoc transcript's thumbprint over direct_post.jwt (the key the response goes to); a
+                            // mismatch with the engine's own value is answered as an error before anything is signed.
+                            val transcriptThumbprintOfRequest = try {
+                                params?.let { transcriptThumbprint(it) }
+                            } catch (e: Exception) {
+                                engine.sendSignResponse(flowId = msg.flowId, messageId = msg.messageId, error = "The verifier key thumbprint could not be established")
+                                throw e
+                            }
 
                             // (A request carrying transaction_data never reaches here: it was routed to
                             // handleScaEngineSignPresentation above.)
@@ -8230,7 +8269,7 @@ class SirosWallet private constructor(
                                             clientId = audience,
                                             nonce = nonce,
                                             responseUri = params?.responseUri ?: "",
-                                            verifierJwkThumbprint = params?.verifierJwkThumbprint,
+                                            verifierJwkThumbprint = transcriptThumbprintOfRequest,
                                         )
                                         Timber.d("sign_presentation: generating ZK proof, wantsPseudonym=$wantsPseudonym verifierIdentity=$verifierIdentity")
                                         // ZK proof generation is a multi-second native compute
@@ -8282,7 +8321,7 @@ class SirosWallet private constructor(
                                             nonce = nonce,
                                             audience = audience,
                                             responseUri = params?.responseUri ?: "",
-                                            verifierJwkThumbprint = params?.verifierJwkThumbprint,
+                                            verifierJwkThumbprint = transcriptThumbprintOfRequest,
                                             kid = cred.kid,
                                         )
                                         android.util.Base64.encodeToString(deviceResponse, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
@@ -8663,12 +8702,18 @@ class SirosWallet private constructor(
         scope.launch {
             engine.flowComplete().collect { completion ->
                 if (isAbandonedFlowEvent(engine, completion.flowId, completion.connectionGeneration)) return@collect
+                // A flow that already ended (completed, refused, failed) completes once: the transport does not de-duplicate, and a
+                // repeat would find the flow's "key offered" marker gone and be taken for an ordinary plain completion.
+                if (completion.flowId in terminatedFlowIds) {
+                    Timber.w("Ignoring a repeated completion of the already ended flow ${completion.flowId}")
+                    return@collect
+                }
                 // An issuance whose response only this wallet could open completes with empty credentials: fill them
                 // from the response the wallet decrypted, or refuse. Taken before anything else can reset the state.
                 val filled = fillEncryptedCompletion(completion)
                 if (filled is EncryptedCompletion.Unavailable) {
                     terminatedFlowIds.add(completion.flowId)
-                    rejectDeliveredMetadata(completion.flowId, filled.notificationIds, DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE)
+                    rejectDeliveredMetadata(completion.flowId, filled.notificationIds, filled.refusal)
                     return@collect
                 }
                 val msg = (filled as EncryptedCompletion.Filled).message

@@ -120,7 +120,7 @@ class BlindIssuanceTest {
         )
         assertEquals("tx-9", pending.transactionId)
         assertEquals(5, pending.interval)
-        val metadata = buildJsonObject { put("org.siros.secret_seed", buildJsonObject { put("ns", JsonPrimitive("00")) }) }
+        val metadata = buildJsonObject { put("display", JsonArray(listOf(buildJsonObject { put("name", JsonPrimitive("N")) }))) }
         b.open(
             "f",
             issuer(jwk, response("late") { mapOf("notification_id" to JsonPrimitive("n-2"), "credential_metadata" to metadata) }),
@@ -134,24 +134,76 @@ class BlindIssuanceTest {
     }
 
     @Test
-    fun theLegacySingleCredentialMemberAndOddCredentialShapesAreNormalised() {
+    fun metadataIsNeverCarriedBetweenResponses_aPendingResponsesMetadataIsNotAttachedToTheDeferredCredentials() {
         val b = BlindIssuance()
         val jwk = b.offer("f", request)!!
-        b.open(
+        // The initial pending response carries display metadata (a seed would be refused, below).
+        b.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx")); put("credential_metadata", buildJsonObject { put("display", JsonArray(listOf(buildJsonObject { put("name", JsonPrimitive("from-pending")) }))) }) }), deferred = false)
+        // The deferred response that delivers the credentials carries none.
+        b.open("f", issuer(jwk, response("late") { mapOf("notification_id" to JsonPrimitive("n")) }), deferred = true)
+        val taken = b.take("f")!!
+        assertEquals(listOf("late"), taken.credentials)
+        assertNull("nothing of the pending response is attached", taken.credentialMetadata)
+    }
+
+    @Test
+    fun aDeferredCredentialResponseCarryingASeedIsRefusedAtDecryption_withItsNotificationIdAndNothingRetained() {
+        val seed = buildJsonObject { put("org.siros.secret_seed", buildJsonObject { put("org.siros.nym_auth", JsonPrimitive("00112233445566778899aabbccddeeff")) }) }
+        val b = BlindIssuance()
+        val jwk = b.offer("f", request)!!
+        // First a pending response, then the deferred response WITH the credentials and a seed (deferred = true).
+        b.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx")) }), deferred = false)
+        val e = assertThrows(BlindIssuanceException::class.java) {
+            b.open("f", issuer(jwk, response("late") { mapOf("notification_id" to JsonPrimitive("n-seed"), "credential_metadata" to seed) }), deferred = true)
+        }
+        assertEquals("n-seed", e.notificationId)
+        assertFalse(e.message!!.contains("00112233"))
+        assertNull("nothing is retained", b.take("f"))
+        // A first (non-deferred) response with credentials may still carry a seed: that is the normal delivery.
+        val b2 = BlindIssuance()
+        val jwk2 = b2.offer("g", request)!!
+        b2.open("g", issuer(jwk2, response("c") { mapOf("notification_id" to JsonPrimitive("n"), "credential_metadata" to seed) }), deferred = false)
+        assertNotNull(b2.take("g")!!.credentialMetadata)
+    }
+
+    @Test
+    fun everyCredentialsEntryMustBeAnObjectWithAStringCredential_theInnerValueIsStored() {
+        // Accepted: wrapped entries (the inner string is stored), and the one pre-1.0 draft shape, a top-level string `credential`.
+        val ok = BlindIssuance()
+        val jwk = ok.offer("f", request)!!
+        ok.open(
             "f",
             issuer(
                 jwk,
                 buildJsonObject {
                     put("credential", JsonPrimitive("legacy"))
-                    put(
-                        "credentials",
-                        JsonArray(listOf(JsonPrimitive("plain"), buildJsonObject { put("credential", JsonPrimitive("wrapped")) }, buildJsonObject { put("x", JsonPrimitive(1)) })),
-                    )
+                    put("credentials", JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive("wrapped")) })))
                 },
             ),
             deferred = false,
         )
-        assertEquals(listOf("legacy", "plain", "wrapped", """{"x":1}"""), b.take("f")!!.credentials)
+        assertEquals(listOf("legacy", "wrapped"), ok.take("f")!!.credentials)
+        // Refused, each keeping the decrypted notification_id and retaining nothing.
+        fun refused(entries: JsonArray?, topLevel: kotlinx.serialization.json.JsonElement? = null) {
+            val b = BlindIssuance()
+            val k = b.offer("f", request)!!
+            val body = buildJsonObject {
+                put("notification_id", JsonPrimitive("n-bad"))
+                topLevel?.let { put("credential", it) }
+                entries?.let { put("credentials", it) }
+            }
+            val e = assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(k, body), deferred = false) }
+            assertEquals("n-bad", e.notificationId)
+            assertNull(b.take("f"))
+        }
+        refused(JsonArray(listOf(JsonPrimitive("bare string"))))
+        refused(JsonArray(listOf(buildJsonObject { put("credential", buildJsonObject { put("@context", JsonPrimitive("x")) }) })))
+        refused(JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive(7)) })))
+        refused(JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive("")) })))
+        refused(JsonArray(listOf(buildJsonObject { put("x", JsonPrimitive(1)) })))
+        refused(JsonArray(listOf(JsonPrimitive("ok-ish"), buildJsonObject { put("credential", JsonPrimitive("fine")) })))
+        refused(null, topLevel = buildJsonObject { put("credential", JsonPrimitive("nested")) })
+        refused(null, topLevel = JsonPrimitive(5))
     }
 
     @Test
@@ -490,6 +542,89 @@ class BlindIssuanceTest {
         assertEquals("tx", control.transactionId)
         assertEquals(5, control.interval)
         assertEquals("tx2", b.open("f", issuerRaw(jwk, """{"transaction_id":"tx2"}"""), deferred = true).transactionId)
+    }
+
+    // ---- "a key was offered" outlives the key (review of #293) ----
+
+    @Test
+    fun theOfferedMarkerSurvivesASocketReplacementAndItsGrace_andEndsOnlyWithTheFlow() {
+        val b = BlindIssuance()
+        assertFalse(b.wasOffered("f"))
+        b.offer("f", request, generation = 1)
+        assertTrue(b.wasOffered("f"))
+        b.markStaleBefore(2, now = 1_000)
+        assertFalse("the key is gone", b.holdsKey("f"))
+        assertTrue("the fact that one was offered is not", b.wasOffered("f"))
+        b.purgeStale(graceMs = 30_000, now = 99_000)
+        assertTrue("not even after the grace: the flow has not ended", b.wasOffered("f"))
+        b.drop("f")
+        assertFalse("a dropped flow is no longer offered", b.wasOffered("f"))
+    }
+
+    @Test
+    fun theOfferedMarkerEndsOnEveryTerminalPath_andIsBounded() {
+        // take (an encrypted completion), drop (error, cancel, sign failure, a plain completion), clear (logout, destroy, a new connection)
+        val b = BlindIssuance()
+        val jwk = b.offer("taken", request)!!
+        b.open("taken", issuer(jwk, response("c")), deferred = false)
+        b.offer("dropped", request)
+        b.offer("cleared", request)
+        assertTrue(b.wasOffered("taken") && b.wasOffered("dropped") && b.wasOffered("cleared"))
+        b.take("taken")
+        b.drop("dropped")
+        assertFalse(b.wasOffered("taken"))
+        assertFalse(b.wasOffered("dropped"))
+        assertTrue(b.wasOffered("cleared"))
+        b.clear()
+        assertFalse(b.wasOffered("cleared"))
+        // A declined offer (no encryption) never marks the flow, and neither does one that could not be served.
+        assertNull(b.offer("declined", null))
+        assertFalse(b.wasOffered("declined"))
+        assertNull(b.offer("unsupported", CredentialResponseEncryptionRequest("RSA-OAEP", "A128GCM", required = false)))
+        assertFalse(b.wasOffered("unsupported"))
+        // Bounded FAIL-CLOSED: at capacity a NEW offer is refused and nothing existing is evicted.
+        val many = BlindIssuance()
+        repeat(BlindIssuance.MAX_OFFERED_MARKERS) { many.offer("flow-$it", request) }
+        val refused = assertThrows(BlindIssuanceException::class.java) { many.offer("one-too-many", request) }
+        assertTrue(refused.message!!, refused.message!!.contains("Too many"))
+        assertFalse("the refused offer left no marker, state or key", many.wasOffered("one-too-many") || many.holdsKey("one-too-many"))
+        assertTrue("the oldest keeps its marker and its key", many.wasOffered("flow-0") && many.holdsKey("flow-0"))
+        assertTrue(many.wasOffered("flow-${BlindIssuance.MAX_OFFERED_MARKERS - 1}"))
+        // A re-offer for a flow that already has a marker (a c_nonce retry) is not "new" and is served.
+        assertNotNull(many.offer("flow-0", request))
+        // Freeing one makes room again.
+        many.drop("flow-5")
+        assertNotNull(many.offer("one-too-many", request))
+        assertTrue(many.wasOffered("one-too-many"))
+    }
+
+    @Test
+    fun aKeyInstalledWhileDropIsBetweenItsTwoRemovals_cannotLeaveAnOrphanedMarker() {
+        val genStarted = java.util.concurrent.CountDownLatch(1)
+        val genRelease = java.util.concurrent.CountDownLatch(1)
+        val dropPaused = java.util.concurrent.CountDownLatch(1)
+        val dropRelease = java.util.concurrent.CountDownLatch(1)
+        val holder = BlindIssuance(
+            keyFactory = { alg, enc -> genStarted.countDown(); genRelease.await(); CredentialResponseKey.generate(alg, enc) },
+            duringDrop = { dropPaused.countDown(); dropRelease.await() },
+        )
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        val offer = pool.submit<Result<JsonObject?>> { runCatching { holder.offer("f", request) } }
+        assertTrue(genStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // drop starts (the flow's state is claimed, its key being generated) and stops BETWEEN removing the marker and the state...
+        val drop = pool.submit { holder.drop("f") }
+        assertTrue(dropPaused.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // ...the key is now ready to be installed, and gets the chance to be...
+        genRelease.countDown()
+        Thread.sleep(300)
+        dropRelease.countDown()
+        drop.get(5, java.util.concurrent.TimeUnit.SECONDS)
+        val result = offer.get(5, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue("the late installation finds its flow gone and fails", result.isFailure)
+        assertFalse(holder.wasOffered("f"))
+        assertFalse(holder.holdsKey("f"))
+        assertEquals("no marker is left to consume capacity", 0, holder.offeredCount())
+        pool.shutdownNow()
     }
 }
 

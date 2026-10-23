@@ -22,6 +22,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting on the app. Unrecognised error codes decode as before. The sample app clears its pending consent when the SDK cancels the wait.
 
 ### Changed
+- **Engine-blind encryption review follow-ups (wallet-frontend review of the contract, points 3, 5, 6, 8, 9).** BEHAVIOUR CHANGES:
+  - For `direct_post.jwt` the mdoc session-transcript thumbprint is computed from `response_encryption.jwk`, the key the response is
+    encrypted to (one source). An engine-supplied `verifier_jwk_thumbprint` that differs is REFUSED (an error `sign_response` on
+    the legacy path, `handover-thumbprint` on the `zkp_req` redirect path), never preferred. Plain modes keep the engine's value.
+  - A PLAINTEXT `flow_complete` (no `credential_response_encrypted`) that carries credentials is an ERROR when a response-encryption
+    key was held for the flow, on both transports (`DeliveredMetadataRefusal.PLAIN_RESPONSE`): nothing is stored, the issuer is sent
+    `credential_failure`, the listener is told. A flow that offered no key is unaffected.
+  - A seed (`org.siros.secret_seed`) on a response to a Deferred Credential Request is refused at decryption (it used to be accepted
+    there and refused later by the receipt check), as a pending response already was, with the notification id kept so
+    `credential_failure` is sent. Metadata is not carried between responses (verified: only a credential-bearing response is kept).
+  - Every `credentials[]` entry of the decrypted response must be an object with a STRING `credential` (OID4VCI 1.0 section 8.3): the
+    inner value is stored; a bare string, a non-object entry or a non-string/empty inner value (an `ldp_vc` object) is refused. The
+    pre-1.0 draft shape, a top-level string `credential`, is still accepted.
+  - The plaintext-completion refusal keys on a separate per-flow "a response key was offered" marker (`BlindIssuance.wasOffered`) that
+    outlives the key: a socket replacement drops the key, so a plaintext completion buffered before the replacement is still
+    refused. The marker ends only with the flow (completion, error, cancel, sign failure, drop) or a session-wide clear, and is
+    bounded FAIL-CLOSED: at 1024 flows with a key offered a NEW offer is refused and no existing marker is ever evicted.
+    The marker and the flow's state are removed in ONE critical section (`drop`, `take`), the same lock under which a late key
+    installation validates its state and sets the marker, so a cancellation racing a key generation can no longer leave an orphaned
+    marker that consumes capacity.
+  - A completion for a flow that already ended is ignored (the transport does not de-duplicate): a repeated plaintext completion of a
+    refused flow can no longer be taken for an ordinary one once its marker is gone, and an accepted completion is not stored twice.
+  - The JARM JWE protected header no longer sets `cty: "JWT"` (the plaintext is plain JSON claims, RFC 7519 section 5.2): `alg`,
+    `enc` and `kid` only.
 - A `zkp_req` presentation that proves a pseudonym or an age check no longer asks the user to confirm what is shared, because it shares no
   data. New `PresentationRequest.disclosesNoClaims` is true ONLY when every matched query is a `zkp_req` query whose plan consists solely of
   the `pseudonym` and `age_check` functions. Anything else keeps every step: the legacy `zk-claim-disclosure-v1` claim disclosure (including
