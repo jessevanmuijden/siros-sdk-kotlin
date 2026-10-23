@@ -64,6 +64,13 @@ class UniFFISigner(
 
     private val ffi: FfiWscdManager = FfiWscdManager(config)
 
+    private companion object {
+        const val FIDO2_PLUGIN_ID = "fido2"
+
+        /** Plugins whose keys live on a physical token the user has to present. */
+        val TOKEN_PLUGIN_IDS = setOf(FIDO2_PLUGIN_ID)
+    }
+
     /**
      * Which plugin this instance was constructed to back by default (e.g.
      * "softkey", "fido2", "r2ps"). Every instance also self-registers a
@@ -96,12 +103,39 @@ class UniFFISigner(
         ffi.registerR2psPlugin(ffiConfig, R2psTransportBridge(transport))
     }
 
+    /**
+     * Per plugin that needs a physical token: how to tell, without prompting, whether one is
+     * reachable. The manager exposes no presence signal (a CTAP2 ceremony asks for the PIN before
+     * its first command), so the answer comes from the transport the host registered.
+     */
+    private val presenceChecks = java.util.concurrent.ConcurrentHashMap<String, suspend () -> Boolean>()
+
     override fun registerFido2Plugin(transport: Ctap2TransportProvider) {
         ffi.registerFido2Plugin(Ctap2TransportBridge(transport))
+        presenceChecks[FIDO2_PLUGIN_ID] = { transport.isAvailable() }
     }
 
     override fun registerFido2PluginWithState(transport: Ctap2TransportProvider, state: ByteArray) {
         ffi.registerFido2PluginWithState(Ctap2TransportBridge(transport), state)
+        presenceChecks[FIDO2_PLUGIN_ID] = { transport.isAvailable() }
+    }
+
+    override suspend fun isAuthenticatorPresent(): Boolean = isPluginPresent(defaultPluginId)
+
+    /**
+     * Whether [pluginId]'s token is reachable. A plugin that needs a token but has no registered
+     * transport, a transport that says no, and a transport that fails to answer are all "not
+     * present": a PIN is never asked for on a guess.
+     */
+    private suspend fun isPluginPresent(pluginId: String): Boolean {
+        val check = presenceChecks[pluginId] ?: return pluginId !in TOKEN_PLUGIN_IDS
+        return try {
+            check()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
     }
 
     override fun exportFido2State(): ByteArray = ffi.exportFido2State()
@@ -134,6 +168,8 @@ class UniFFISigner(
                 override fun capability(kid: String) = ffi.authenticationCapability(kid)
                 override fun pluginIdOf(kid: String): String? =
                     ffi.listKeys().firstOrNull { it.kid == kid }?.pluginId
+                override fun isTokenPresent(pluginId: String): Boolean =
+                    kotlinx.coroutines.runBlocking { isPluginPresent(pluginId) }
                 override fun signWithFactors(
                     kid: String,
                     data: ByteArray,

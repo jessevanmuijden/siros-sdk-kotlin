@@ -51,6 +51,7 @@ class FactorSigningTest {
         val pinBuffers = mutableListOf<ByteArray>()
         val pinsAsSeen = mutableListOf<String>()
         var capabilityThrows = false
+        var tokenPresent = true
         /** Models the native bridge, which turns an exception from a callback into its own error kind. */
         var wrapCallbackErrors = false
         override fun capability(kid: String): FfiFactorCapability {
@@ -58,6 +59,7 @@ class FactorSigningTest {
             return capability
         }
         override fun pluginIdOf(kid: String) = plugin
+        override fun isTokenPresent(pluginId: String) = tokenPresent
         override fun signWithFactors(kid: String, data: ByteArray, options: FfiSignOptions, auth: FfiAuthCallback): FfiSignOutcome {
             seenOptions = options
             seenData = data
@@ -119,6 +121,27 @@ class FactorSigningTest {
         assertNull(FactorSigning.classifySecret(byteArrayOf(0xC3.toByte(), 0x28)))
         // a truncated multi-byte sequence at the end is malformed too
         assertNull(FactorSigning.classifySecret(byteArrayOf('1'.code.toByte(), 0xE2.toByte(), 0x82.toByte())))
+    }
+
+    // ── token presence ──
+
+    @Test
+    fun `an absent token refuses before any PIN is requested`() {
+        val b = FakeBackend(plugin = "fido2") { outcome() }
+        b.tokenPresent = false
+        val prompts = Prompts("123456")
+        val e = refused { FactorSigning(b, prompts).begin("kid") }
+        assertTrue(e.message, e.message!!.contains("No applicable WSCD"))
+        assertEquals(0, prompts.asked)
+        assertNull(b.seenData)
+    }
+
+    @Test
+    fun `a present token still gets its PIN prompt`() {
+        val b = FakeBackend(plugin = "fido2") { outcome() }
+        val prompts = Prompts("123456")
+        FactorSigning(b, prompts).begin("kid").close()
+        assertEquals(1, prompts.asked)
     }
 
     // ── capability ──

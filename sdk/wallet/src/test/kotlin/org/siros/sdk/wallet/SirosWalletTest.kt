@@ -3098,6 +3098,7 @@ class SirosWalletTest {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val defaultKeystore = mockk<KeystoreManager>()
         val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isAuthenticatorPresent() } returns true
         val keypairs = listOf(KeypairInfo(keyId = "fido2-key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
         coEvery { fido2Keystore.generateKeypairs(1) } returns keypairs
         coEvery { fido2Keystore.attestationChain(any()) } returns null
@@ -3178,6 +3179,7 @@ class SirosWalletTest {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val defaultKeystore = mockk<KeystoreManager>(relaxed = true)
         val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isAuthenticatorPresent() } returns true
         coEvery { fido2Keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) } returns "fido2-signed-proof-jwt"
         val engine = mockEngineConstructor(signRequests = signFlow)
         val config = WalletConfig(
@@ -3298,6 +3300,71 @@ class SirosWalletTest {
     }
 
     /**
+     * The resolved plugin (fido2) is tier-sufficient but no token is present: issuance must fail with
+     * [WscdAuthenticatorNotPresentException] before any key is generated (and so before any PIN is
+     * requested), with no fallback to the default keystore and no sign response.
+     */
+    @Test
+    fun requestBackendKeyAttestation_refusesBeforeAnyKeyOrPin_whenResolvedAuthenticatorAbsent() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val defaultKeystore = mockk<KeystoreManager>(relaxed = true)
+        val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isAuthenticatorPresent() } returns false
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        val config = WalletConfig(
+            backendUrl = "https://wallet.example.com",
+            availableKeystores = mapOf("softkey" to defaultKeystore, "fido2" to fido2Keystore),
+        )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to config,
+            "keystore" to defaultKeystore,
+            "wscdSelectionPolicy" to WscdSelectionPolicy(tofuStore = InMemoryWscdTofuStore()),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+        )
+        setField(
+            wallet,
+            "activeOffer",
+            org.siros.sdk.credentials.CredentialOffer(
+                credentialConfigurationId = "pid",
+                credentialIssuerIdentifier = "https://issuer.example.com",
+                credentialName = "PID",
+                issuerName = "Issuer",
+            ),
+        )
+        setField(
+            wallet,
+            "activeVctm",
+            org.siros.sdk.credentials.Vctm(vct = "urn:eu.europa.ec.eudi:pid:1", requiredKeyStorage = "iso_18045_high"),
+        )
+
+        invokeConnectEngine(wallet, "app-token")
+        setField(wallet, "apiClient", apiClient)
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-sign",
+                action = "generate_proof",
+                params = SignRequestParams(
+                    audience = "https://issuer.example.com",
+                    nonce = "nonce-1",
+                    count = 1,
+                    proofTypesSupported = buildJsonObject { putJsonObject("attestation") {} },
+                ),
+            )
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { fido2Keystore.isAuthenticatorPresent() }
+        coVerify(exactly = 0) { fido2Keystore.generateKeypairs(any()) }
+        coVerify(exactly = 0) { fido2Keystore.generateKeyAttestation(any(), any()) }
+        coVerify(exactly = 0) { defaultKeystore.generateKeypairs(any()) }
+        coVerify(exactly = 0) { engine.sendSignResponse(any(), any(), any(), any()) }
+    }
+
+    /**
      * Regression (PR #85 review, bug 1): `resolveEffectiveKeystoreForIssuance`
      * must key [WscdSelectionPolicy] lookups (TOFU/defaultMapping) by the
      * credential type's real `vct`/`doctype` identifier, NOT
@@ -3315,6 +3382,7 @@ class SirosWalletTest {
     fun resolveEffectiveKeystoreForIssuance_keysWscdLookupByVct_notCredentialConfigurationId() = runTest(dispatcher) {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isAuthenticatorPresent() } returns true
         val r2psKeystore = mockk<KeystoreManager>(relaxed = true)
         val keypairs = listOf(KeypairInfo(keyId = "fido2-key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
         coEvery { fido2Keystore.generateKeypairs(1) } returns keypairs
@@ -3398,6 +3466,7 @@ class SirosWalletTest {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         val defaultKeystore = mockk<KeystoreManager>(relaxed = true)
         val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isAuthenticatorPresent() } returns true
         val keypairs = listOf(KeypairInfo(keyId = "fido2-key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
         coEvery { fido2Keystore.generateKeypairs(1) } returns keypairs
         coEvery { fido2Keystore.attestationChain(any()) } returns null

@@ -42,6 +42,16 @@ interface Signer {
     suspend fun beginScaSign(keyId: String): ScaSignSession =
         throw ScaSignSession.insufficient("This signer does not report the authentication it applies")
 
+    /**
+     * Whether the authenticator this signer needs is reachable right now, answered WITHOUT
+     * prompting the user. A signer backed by a physical token (FIDO2) must say `false` when no
+     * token can be reached, so the caller can refuse before asking for a PIN that nothing could
+     * use. Anything that cannot be determined is `false` (fail closed). The default is `true`: a
+     * signer with no external authenticator (software keys, a remote service) has nothing to
+     * be absent.
+     */
+    suspend fun isAuthenticatorPresent(): Boolean = true
+
     /** List all keys managed by this signer. */
     suspend fun listKeys(): List<SignerKeyInfo>
 

@@ -7040,6 +7040,17 @@ class SirosWallet private constructor(
         if (pluginId == null) return keystore
 
         val resolved = available[pluginId] ?: keystore
+        // The static tier table says fido2 is sufficient; it cannot say a token is plugged in. Ask the
+        // keystore (no prompt) before anything can ask for a PIN; "cannot tell" is "not present".
+        val present = try {
+            resolved.isAuthenticatorPresent()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "resolveEffectiveKeystoreForIssuance: could not determine authenticator presence for $pluginId")
+            false
+        }
+        if (!present) throw WscdAuthenticatorNotPresentException(issuer, credentialType, pluginId)
         config.onWscdOperationStart?.invoke(pluginId)
         return resolved
     }

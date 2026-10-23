@@ -17,6 +17,9 @@ import java.nio.charset.CodingErrorAction
 internal interface FactorSigningBackend {
     fun capability(kid: String): FfiFactorCapability
     fun pluginIdOf(kid: String): String?
+
+    /** Whether the token behind [pluginId] is reachable now, answered without prompting; false when unknown. */
+    fun isTokenPresent(pluginId: String): Boolean
     fun signWithFactors(kid: String, data: ByteArray, options: FfiSignOptions, auth: FfiAuthCallback): FfiSignOutcome
 }
 
@@ -64,6 +67,10 @@ internal class FactorSigning(
         }
         val pluginId = backend.pluginIdOf(kid)
             ?: throw ScaSignSession.insufficient("The plugin holding the key is unknown")
+        // Before any PIN is asked for: a PIN with no token to use it on is a wasted, misleading prompt.
+        if (!backend.isTokenPresent(pluginId)) {
+            throw ScaSignSession.insufficient("No applicable WSCD is available: the '$pluginId' authenticator is not present")
+        }
         val possession = when (pluginId) {
             "r2ps" -> AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_remote_wscd")
             "fido2" -> AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_local_external_wscd")

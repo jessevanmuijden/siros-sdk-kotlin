@@ -1159,6 +1159,13 @@ public final class org/siros/sdk/wallet/WalletState$Ready : org/siros/sdk/wallet
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class org/siros/sdk/wallet/WscdAuthenticatorNotPresentException : org/siros/sdk/wallet/WscdSelectionException {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun getCredentialType ()Ljava/lang/String;
+	public final fun getIssuer ()Ljava/lang/String;
+	public final fun getPluginId ()Ljava/lang/String;
+}
+
 public abstract interface class org/siros/sdk/wallet/WscdChoiceResult {
 }
 
