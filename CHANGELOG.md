@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   known flow is ignored: it neither tells the app twice nor resets a newer flow); any other `flow_error` now also cancels a selection still
   waiting on the app. Unrecognised error codes decode as before. The sample app clears its pending consent when the SDK cancels the wait.
 
+## [0.21.1] - 2026-10-23
+
+Patch release on 0.21.0: review follow-ups to the engine-blind encryption contract (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/293) and a consent-step change for ZK pseudonym/age proofs (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/292). Not included: https://github.com/sirosfoundation/siros-sdk-kotlin/pull/294, https://github.com/sirosfoundation/siros-sdk-kotlin/pull/298 and https://github.com/sirosfoundation/siros-sdk-kotlin/pull/285 (still open).
+
 ### Changed
 - **Engine-blind encryption review follow-ups (wallet-frontend review of the contract, points 3, 5, 6, 8, 9).** BEHAVIOUR CHANGES:
   - For `direct_post.jwt` the mdoc session-transcript thumbprint is computed from `response_encryption.jwk`, the key the response is
