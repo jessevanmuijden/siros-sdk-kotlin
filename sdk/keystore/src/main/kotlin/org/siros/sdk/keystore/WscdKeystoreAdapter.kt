@@ -236,8 +236,22 @@ class WscdKeystoreAdapter private constructor(
         freshKey: Boolean,
         holderBinding: HolderBinding?,
         extraClaims: Map<String, String>,
+    ): String = generateProofWithJsonClaims(audience, nonce, freshKey, holderBinding, extraClaims.mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) })
+
+    /**
+     * The proof with claims of any JSON type (the v0.1 `auxiliary_data` array), signed by the WSCD with the rest. The conversion is
+     * [ProofClaims], shared with the software keystore, so the claim is byte-identical either way; a claim it cannot carry is refused.
+     */
+    override suspend fun generateProofWithJsonClaims(
+        audience: String,
+        nonce: String,
+        freshKey: Boolean,
+        holderBinding: HolderBinding?,
+        extraJsonClaims: Map<String, kotlinx.serialization.json.JsonElement>,
     ): String {
         checkUnlocked()
+        // Converted (and refused) BEFORE any key is generated or used.
+        val converted = ProofClaims.toJava(extraJsonClaims)
         var keys = signer.listKeys()
         if (keys.isEmpty() || freshKey) {
             // Auto-generate a key for VCI proof-of-possession
@@ -276,7 +290,7 @@ class WscdKeystoreAdapter private constructor(
             .issueTime(Date())
             .claim("nonce", nonce)
         did?.let { claimsBuilder.issuer(it) }
-        extraClaims.forEach { (k, v) -> claimsBuilder.claim(k, v) }
+        converted.forEach { (k, v) -> claimsBuilder.claim(k, v) }
         val claims = claimsBuilder.build()
 
         val signingInput = "${base64Url(header.toJSONObject())}.${base64Url(claims.toJSONObject())}"

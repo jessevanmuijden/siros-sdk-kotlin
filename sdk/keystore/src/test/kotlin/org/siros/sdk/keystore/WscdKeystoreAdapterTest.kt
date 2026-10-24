@@ -4,6 +4,8 @@ import com.upokecenter.cbor.CBORObject
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import io.mockk.slot
+import org.siros.sdk.credentials.KeystoreException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -742,6 +744,75 @@ class WscdKeystoreAdapterTest {
         kotlinx.serialization.json.Json.parseToJsonElement(
             String(java.util.Base64.getUrlDecoder().decode(jwt.split('.')[1]), Charsets.UTF_8),
         ) as kotlinx.serialization.json.JsonObject
+
+    private val auxiliaryClaim = kotlinx.serialization.json.Json.parseToJsonElement(
+        """[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"commitment":"JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0"},{"type":"hash_commitment","alg":"sha-256","path":["a","b"],"commitment":"AAAA"}]""",
+    )
+
+    private suspend fun wscdAdapter(signer: Signer = createMockSigner()): WscdKeystoreAdapter {
+        val jwk = com.nimbusds.jose.jwk.gen.ECKeyGenerator(com.nimbusds.jose.jwk.Curve.P_256).generate().toPublicJWK().toJSONString()
+        coEvery { signer.exportPublicKey(any()) } returns jwk.toByteArray()
+        return WscdKeystoreAdapter(signer).also { it.unlock(ByteArray(0), ByteArray(0), ByteArray(0), ByteArray(0)) }
+    }
+
+    @Test
+    fun generateProofWithJsonClaimsSignsTheAuxiliaryDataClaimByTheWscd() = runTest {
+        val signer = createMockSigner()
+        val adapter = wscdAdapter(signer)
+        val jwt = adapter.generateProofWithJsonClaims("aud-1", "n-1", false, null, mapOf("auxiliary_data" to auxiliaryClaim))
+        val claims = jwtClaims(jwt)
+        assertEquals(auxiliaryClaim, claims["auxiliary_data"])
+        assertEquals("n-1", (claims["nonce"] as kotlinx.serialization.json.JsonPrimitive).content)
+        // The claim is inside the bytes the WSCD signed.
+        val signedInput = slot<ByteArray>()
+        coVerify(exactly = 1) { signer.sign(any(), capture(signedInput)) }
+        assertEquals(jwt.substringBeforeLast('.'), String(signedInput.captured, Charsets.UTF_8))
+    }
+
+    @Test
+    fun theAuxiliaryDataClaimIsByteIdenticalToTheSoftwareKeystoresClaim() = runTest {
+        val wscd = wscdAdapter().generateProofWithJsonClaims("aud-1", "n-1", false, null, mapOf("auxiliary_data" to auxiliaryClaim))
+        val jwe = JweKeystore()
+        jwe.unlock(ByteArray(32) { it.toByte() }, ByteArray(0), ByteArray(32) { (it + 0x10).toByte() }, "info".toByteArray())
+        jwe.generateKey()
+        val soft = jwe.generateProofWithJsonClaims("aud-1", "n-1", false, null, mapOf("auxiliary_data" to auxiliaryClaim))
+        // The serialised member, character for character (key order, escaping, number form), not merely equal after parsing.
+        fun member(jwt: String): String {
+            val payload = String(java.util.Base64.getUrlDecoder().decode(jwt.split('.')[1]), Charsets.UTF_8)
+            val start = payload.indexOf("\"auxiliary_data\":") + "\"auxiliary_data\":".length
+            var depth = 0; var end = start
+            while (end < payload.length) {
+                when (payload[end]) { '[', '{' -> depth++; ']', '}' -> { depth--; if (depth == 0) { end++; break } } }
+                end++
+            }
+            return payload.substring(start, end)
+        }
+        assertEquals(member(soft), member(wscd))
+        assertTrue(member(wscd).startsWith("[{"))
+    }
+
+    @Test
+    fun aClaimTheWscdSignerCannotRepresentIsRefusedBeforeAnyKeyIsUsed() = runTest {
+        val signer = createMockSigner()
+        val adapter = wscdAdapter(signer)
+        val bad = listOf(
+            mapOf("x" to kotlinx.serialization.json.JsonNull),
+            mapOf("x" to kotlinx.serialization.json.JsonPrimitive(1.5)),
+            mapOf("x" to kotlinx.serialization.json.JsonArray(listOf(kotlinx.serialization.json.JsonNull))),
+            mapOf("aud" to kotlinx.serialization.json.JsonPrimitive("other")), // would replace the keystore's own claim
+            mapOf("nonce" to kotlinx.serialization.json.JsonPrimitive("other")),
+            mapOf("x" to (1..20).fold<Int, kotlinx.serialization.json.JsonElement>(kotlinx.serialization.json.JsonPrimitive("leaf")) { acc, _ -> kotlinx.serialization.json.JsonArray(listOf(acc)) }),
+        )
+        for (claims in bad) {
+            try {
+                adapter.generateProofWithJsonClaims("aud-1", "n-1", true, null, claims)
+                org.junit.Assert.fail("signed a claim it cannot represent: $claims")
+            } catch (_: KeystoreException) {
+            }
+        }
+        coVerify(exactly = 0) { signer.generateKey(any()) }
+        coVerify(exactly = 0) { signer.sign(any(), any()) }
+    }
 
     @Test
     fun generateProofCarriesTheSignedExtraClaims() = runTest {

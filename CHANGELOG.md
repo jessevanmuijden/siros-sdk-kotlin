@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **`WscdKeystoreAdapter` answers a Credential Auxiliary Data v0.1 `to_issuer` request.** It overrides `generateProofWithJsonClaims`, so a WSCD-backed wallet signs the `auxiliary_data` claim (an array) into every key proof instead of refusing. The JSON-to-claim conversion is shared with `JweKeystore` (`ProofClaims`), so the signed claim is byte-identical whichever keystore signs it (tested). Fail closed, before any key is generated or used: a JSON null, a non-integer number, nesting deeper than 8 levels, or a claim named like one the keystore sets itself (`aud`, `iat`, `nonce`, `iss`, `exp`, `jti`, `nbf`, `sub`) is refused. This also applies to the software keystore's JSON claims.
+
+### Changed
 - **Auxiliary data now goes through an adapter seam (`AuxiliaryDataShape`), with two adapters.** The wire shape of "secrets to the wallet, commitments to
   the issuer" is isolated behind one interface working on a normalised model (`SecretDelivery(path, alg, bytes)`, `HolderCommitment(path, alg, required,
   commitment)`); the adapter is chosen by what the issuer ADVERTISES for the configuration (`AuxiliaryDataShapes.select`), never sniffed from a response:

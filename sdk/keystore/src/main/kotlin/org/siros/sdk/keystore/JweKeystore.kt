@@ -803,7 +803,7 @@ class JweKeystore(
             .issueTime(Date())
             .claim("nonce", nonce)
         did?.let { claimsBuilder.issuer(it) }
-        extraJsonClaims.forEach { (k, v) -> claimsBuilder.claim(k, jsonToJava(v)) }
+        ProofClaims.toJava(extraJsonClaims).forEach { (k, v) -> claimsBuilder.claim(k, v) }
         val claims = claimsBuilder.build()
 
         val headerBuilder = JWSHeader.Builder(JWSAlgorithm.ES256)
@@ -1838,17 +1838,3 @@ internal fun dpopClaims(htm: String, htu: String, nonce: String?, accessTokenHas
     accessTokenHash?.takeIf { it.isNotEmpty() }?.let { b.claim("ath", it) }
     return b.build()
 }
-
-/** A JSON claim value as the plain Java object nimbus serialises it from. */
-private fun jsonToJava(v: kotlinx.serialization.json.JsonElement): Any? = when (v) {
-    is kotlinx.serialization.json.JsonNull -> null
-    is kotlinx.serialization.json.JsonPrimitive -> when {
-        v.isString -> v.content
-        v.content == "true" || v.content == "false" -> v.content.toBoolean()
-        v.content.toLongOrNull() != null -> v.content.toLong()
-        else -> v.content.toDouble()
-    }
-    is kotlinx.serialization.json.JsonArray -> v.map { jsonToJava(it) }
-    is kotlinx.serialization.json.JsonObject -> v.mapValues { jsonToJava(it.value) }
-}
-
