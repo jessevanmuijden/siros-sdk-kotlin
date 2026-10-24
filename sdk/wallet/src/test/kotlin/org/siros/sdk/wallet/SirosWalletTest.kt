@@ -3503,6 +3503,78 @@ class SirosWalletTest {
     }
 
     /**
+     * The credential declares NO tier, but a global user override names fido2, which is not onboarded:
+     * the policy returns the override, and the gate must still refuse before any key generation / PIN.
+     */
+    @Test
+    fun requestBackendKeyAttestation_refusesBeforeAnyKeyOrPin_whenOverrideNamesNonOnboardedPlugin_evenWithNoRequiredTier() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val defaultKeystore = mockk<KeystoreManager>(relaxed = true)
+        val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isWscdOnboarded() } returns false
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        val config = WalletConfig(
+            backendUrl = "https://wallet.example.com",
+            availableKeystores = mapOf("softkey" to defaultKeystore, "fido2" to fido2Keystore),
+        )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to config,
+            "keystore" to defaultKeystore,
+            "wscdSelectionPolicy" to WscdSelectionPolicy(
+                tofuStore = InMemoryWscdTofuStore(),
+                userOverrideStore = object : WscdUserOverrideStore {
+                    override fun get(issuer: String, credentialType: String): String? = null
+                    override fun put(issuer: String, credentialType: String, pluginId: String) {}
+                    override fun getGlobal(): String? = "fido2"
+                    override fun setGlobal(pluginId: String) {}
+                },
+            ),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+        )
+        setField(
+            wallet,
+            "activeOffer",
+            org.siros.sdk.credentials.CredentialOffer(
+                credentialConfigurationId = "pid",
+                credentialIssuerIdentifier = "https://issuer.example.com",
+                credentialName = "PID",
+                issuerName = "Issuer",
+            ),
+        )
+        setField(
+            wallet,
+            "activeVctm",
+            org.siros.sdk.credentials.Vctm(vct = "urn:eu.europa.ec.eudi:pid:1", requiredKeyStorage = null),
+        )
+
+        invokeConnectEngine(wallet, "app-token")
+        setField(wallet, "apiClient", apiClient)
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-sign",
+                action = "generate_proof",
+                params = SignRequestParams(
+                    audience = "https://issuer.example.com",
+                    nonce = "nonce-1",
+                    count = 1,
+                    proofTypesSupported = buildJsonObject { putJsonObject("attestation") {} },
+                ),
+            )
+        )
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { fido2Keystore.isWscdOnboarded() }
+        coVerify(exactly = 0) { fido2Keystore.generateKeypairs(any()) }
+        coVerify(exactly = 0) { fido2Keystore.generateKeyAttestation(any(), any()) }
+        coVerify(exactly = 0) { defaultKeystore.generateKeypairs(any()) }
+        coVerify(exactly = 0) { engine.sendSignResponse(any(), any(), any(), any()) }
+    }
+
+    /**
      * Regression (PR #85 review, bug 1): `resolveEffectiveKeystoreForIssuance`
      * must key [WscdSelectionPolicy] lookups (TOFU/defaultMapping) by the
      * credential type's real `vct`/`doctype` identifier, NOT

@@ -7083,6 +7083,12 @@ class SirosWallet private constructor(
         }
 
         val resolved = available[pluginId] ?: keystore
+        // Whatever the policy chose (override, TOFU, default mapping, auto-pick), regardless of
+        // requiredTier: an override or mapping can name a plugin that was never onboarded (the tier
+        // filter above only runs when a tier is required), and it must not reach a PIN prompt.
+        if (!isOnboarded(resolved, pluginId)) {
+            throw NoOnboardedWscdException(issuer, credentialType, requiredTier, listOf(pluginId))
+        }
         config.onWscdOperationStart?.invoke(pluginId)
         return resolved
     }
