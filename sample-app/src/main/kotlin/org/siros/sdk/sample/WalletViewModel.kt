@@ -1050,6 +1050,13 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
                     presentationContinuation = cont
                     _pendingPresentationRequest.value = request
+                    // The SDK cancels this wait when the flow is lost (its engine connection ended): the consent screen goes with it.
+                    cont.invokeOnCancellation {
+                        if (presentationContinuation === cont) {
+                            presentationContinuation = null
+                            _pendingPresentationRequest.value = null
+                        }
+                    }
                 }
             }
 

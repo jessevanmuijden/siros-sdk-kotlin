@@ -570,12 +570,6 @@ data class SignRequestParams(
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
     /**
-     * Credential Auxiliary Data v0.1 (`generate_proof`): the issuer's advertised `to_issuer` entries VERBATIM (`type`, `alg`, `path`,
-     * `required`, ...); omitted when none. The wallet puts `{type, alg, path, commitment}` for them in the signed part of every
-     * key proof, and MUST answer every entry with `required: true`.
-     */
-    @SerialName("auxiliary_data_to_issuer") val auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
-    /**
      * `generate_proof`: the response-encryption pair the engine negotiated with the issuer. When present the wallet
      * generates a fresh key per request and returns its public JWK in
      * [SignResponseMessage.credentialResponseEncryptionJwk].
@@ -597,6 +591,12 @@ data class SignRequestParams(
     // Appended last: a data class's property order is part of its binary API (componentN, copy, constructor).
     /** The verifier's `client_metadata` as in [MatchRequestMessage.clientMetadata], when the engine sends it. */
     @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
+    /**
+     * Credential Auxiliary Data v0.1 (`generate_proof`): the issuer's advertised `to_issuer` entries VERBATIM (`type`, `alg`, `path`,
+     * `required`, ...); omitted when none. The wallet puts `{type, alg, path, commitment}` for them in the signed part of every
+     * key proof, and MUST answer every entry with `required: true`. Appended last: a data class's property order is binary API.
+     */
+    @SerialName("auxiliary_data_to_issuer") val auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
 )
 
 @Serializable
@@ -618,7 +618,11 @@ data class MatchRequestMessage(
      * a request that offered nothing cannot be answered.
      */
     @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
-)
+) {
+    /** Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]); stamped on receipt, never on the wire. */
+    @kotlinx.serialization.Transient
+    var connectionGeneration: Int = 0
+}
 
 @Serializable
 data class PushMessage(

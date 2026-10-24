@@ -53,6 +53,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     private fun entries(e: JsonElement?, allowRequired: Boolean): List<AuxiliaryAdvertisement.Slot>? {
         if (e == null) return emptyList()
         val arr = e as? JsonArray ?: return null
+        // A direction that is present must carry entries: an explicitly empty one is a configuration the engine rejects too.
+        if (arr.isEmpty()) return null
         if (arr.size > MAX_ENTRIES) return null
         val out = ArrayList<AuxiliaryAdvertisement.Slot>()
         for (item in arr) {
@@ -120,10 +122,13 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         return if (got == want && deliveries.isNotEmpty()) deliveries else null
     }
 
-    override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = try {
+    override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = claimAt(format, credential, delivery.path)
+
+    /** The 32-byte commitment claim at [path] of an issued credential (see [commitmentOf]); null when absent, ambiguous or malformed. */
+    fun claimAt(format: String, credential: String, path: List<String>): ByteArray? = try {
         when {
-            format.equals("mso_mdoc", ignoreCase = true) -> mdocClaim(credential, delivery.path)
-            format.contains("sd-jwt", ignoreCase = true) -> sdJwtClaim(credential, delivery.path)
+            format.equals("mso_mdoc", ignoreCase = true) -> mdocClaim(credential, path)
+            format.contains("sd-jwt", ignoreCase = true) -> sdJwtClaim(credential, path)
             else -> null
         }
     } catch (e: Exception) {
