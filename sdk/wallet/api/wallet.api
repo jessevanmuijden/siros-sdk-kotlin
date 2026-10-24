@@ -30,6 +30,20 @@ public final class org/siros/sdk/wallet/AuthZENSource : org/siros/sdk/wallet/Ver
 	public fun resolve (Lorg/siros/sdk/wallet/VerifierIdContext;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
 }
 
+public final class org/siros/sdk/wallet/AuxiliaryDataConflictException : org/siros/sdk/credentials/SirosException {
+	public static final field Companion Lorg/siros/sdk/wallet/AuxiliaryDataConflictException$Companion;
+	public static final field DETAIL_ERROR Ljava/lang/String;
+	public static final field ERROR_CODE Ljava/lang/String;
+	public static final field FLOW_ERROR_CODE Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;)V
+	public final fun getIssuerMessage ()Ljava/lang/String;
+	public final fun getRetryable ()Z
+	public final fun getUserMessageRes ()I
+}
+
+public final class org/siros/sdk/wallet/AuxiliaryDataConflictException$Companion {
+}
+
 public final class org/siros/sdk/wallet/CachedAccount {
 	public static final field Companion Lorg/siros/sdk/wallet/CachedAccount$Companion;
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)V
@@ -981,6 +995,7 @@ public final class org/siros/sdk/wallet/WalletConfig$Companion {
 
 public abstract interface class org/siros/sdk/wallet/WalletEventListener {
 	public abstract fun onAuthorizationRequired (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public abstract fun onAuxiliaryDataConflict (Ljava/lang/String;Lorg/siros/sdk/wallet/AuxiliaryDataConflictException;)V
 	public abstract fun onCredentialNearExpiry (Lorg/siros/sdk/credentials/StoredCredential;II)V
 	public abstract fun onCredentialReceived (Lorg/siros/sdk/credentials/StoredCredential;)V
 	public abstract fun onCredentialRenewedWithAttributeDiff (Lorg/siros/sdk/credentials/StoredCredential;Lorg/siros/sdk/credentials/CredentialAttributeDiff;)V
@@ -997,6 +1012,7 @@ public abstract interface class org/siros/sdk/wallet/WalletEventListener {
 
 public final class org/siros/sdk/wallet/WalletEventListener$DefaultImpls {
 	public static fun onAuthorizationRequired (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public static fun onAuxiliaryDataConflict (Lorg/siros/sdk/wallet/WalletEventListener;Ljava/lang/String;Lorg/siros/sdk/wallet/AuxiliaryDataConflictException;)V
 	public static fun onCredentialNearExpiry (Lorg/siros/sdk/wallet/WalletEventListener;Lorg/siros/sdk/credentials/StoredCredential;II)V
 	public static fun onCredentialReceived (Lorg/siros/sdk/wallet/WalletEventListener;Lorg/siros/sdk/credentials/StoredCredential;)V
 	public static fun onCredentialRenewedWithAttributeDiff (Lorg/siros/sdk/wallet/WalletEventListener;Lorg/siros/sdk/credentials/StoredCredential;Lorg/siros/sdk/credentials/CredentialAttributeDiff;)V

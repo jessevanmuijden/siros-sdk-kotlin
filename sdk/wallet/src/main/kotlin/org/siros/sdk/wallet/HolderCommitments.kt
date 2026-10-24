@@ -98,3 +98,26 @@ class PseudonymCommitmentConflictException(
         const val ERROR_CODE = "psc_conflict"
     }
 }
+
+/**
+ * The issuer refused the auxiliary data (commitment) the wallet sent: it holds a conflicting one (flow error code
+ * `AUXILIARY_DATA_CONFLICT`, `error.details.error == "auxiliary_data_conflict"`). Retrying never helps, the conflict is
+ * resolved out of band with the issuer, so there is no retry affordance; [userMessageRes] is the localised sentence.
+ */
+class AuxiliaryDataConflictException(
+    val issuerMessage: String,
+) : org.siros.sdk.credentials.SirosException(
+    "The issuer reports a conflict with the auxiliary data the wallet sent",
+    errorCode = ERROR_CODE,
+) {
+    /** Always false: the same request would be refused again. */
+    val retryable: Boolean get() = false
+
+    val userMessageRes: Int get() = R.string.siros_auxiliary_data_conflict
+
+    companion object {
+        const val FLOW_ERROR_CODE = "AUXILIARY_DATA_CONFLICT"
+        const val DETAIL_ERROR = "auxiliary_data_conflict"
+        const val ERROR_CODE = "auxiliary_data_conflict"
+    }
+}

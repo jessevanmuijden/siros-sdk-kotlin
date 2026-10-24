@@ -122,6 +122,11 @@ data class CredentialConfiguration(
      */
     @SerialName("cryptographic_binding_methods_supported")
     val cryptographicBindingMethodsSupported: List<String>? = null,
+    /**
+     * Credential Auxiliary Data v0.1 advertisement (`{"to_wallet": [...], "to_issuer": [...]}`), kept raw so a value that must
+     * not be there can be told from a slot list; read by [AuxiliaryDataV01.advertisement]. Appended: binary API of a data class.
+     */
+    @SerialName("auxiliary_data_supported") val auxiliaryDataSupported: JsonElement? = null,
 )
 
 /**

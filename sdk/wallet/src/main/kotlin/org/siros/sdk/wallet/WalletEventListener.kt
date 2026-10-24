@@ -154,6 +154,15 @@ interface WalletEventListener {
     }
 
     /**
+     * The issuer refused the auxiliary data the wallet sent because it holds a conflicting one (`AUXILIARY_DATA_CONFLICT`). Terminal
+     * and NOT retryable ([AuxiliaryDataConflictException.retryable] is false): show [AuxiliaryDataConflictException.userMessageRes]
+     * without a retry button. The default forwards the issuer's text to [onFlowError].
+     */
+    fun onAuxiliaryDataConflict(flowId: String, error: AuxiliaryDataConflictException) {
+        onFlowError(flowId, error.issuerMessage)
+    }
+
+    /**
      * An issuance was refused because the issuer's trust could not be
      * established (remote evaluation negative or rejected, backend unreachable
      * with no positive local validation, or an unverifiable mdoc `issuerAuth`).

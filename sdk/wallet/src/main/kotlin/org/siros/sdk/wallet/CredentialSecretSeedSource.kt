@@ -35,6 +35,17 @@ internal class KeystoreSecretSeedSource(
     private val metadataOf: suspend (Long) -> kotlinx.serialization.json.JsonArray?,
 ) : CredentialSecretSeedSource {
     override suspend fun secretSeed(credentialId: Long): ByteArray? {
+        val entries = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
+        // Credential Auxiliary Data v0.1: exactly one delivered opening is the credential's seed; more or fewer fail closed.
+        val v01 = entries.filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER }
+        if (v01.isNotEmpty()) {
+            val member = v01.singleOrNull()?.get("value") ?: return null
+            val parsed = org.siros.sdk.credentials.AuxiliaryDataV01.parseDeliveries(
+                kotlinx.serialization.json.JsonObject(mapOf(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER to member)),
+            ) as? org.siros.sdk.credentials.AuxiliaryParse.Parsed ?: return null
+            val only = parsed.deliveries.singleOrNull() ?: run { parsed.deliveries.forEach { it.bytes.fill(0) }; return null }
+            return only.bytes
+        }
         val matching = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
             .filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.SecretSeedDelivery.MEMBER }
         val seeds = matching.singleOrNull()?.get("value") as? kotlinx.serialization.json.JsonObject ?: return null

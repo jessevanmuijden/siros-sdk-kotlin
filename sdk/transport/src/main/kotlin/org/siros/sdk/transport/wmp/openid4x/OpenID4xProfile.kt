@@ -284,6 +284,12 @@ data class SignSubFlowParams(
     @SerialName("holder_commitments") val holderCommitments: List<String>? = null,
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
+    /**
+     * Credential Auxiliary Data v0.1 (`generate_proof`): the issuer's advertised `to_issuer` entries VERBATIM (`type`, `alg`, `path`,
+     * `required`, ...); omitted when none. The wallet puts `{type, alg, path, commitment}` for them in the signed part of every
+     * key proof, and MUST answer every entry with `required: true`.
+     */
+    @SerialName("auxiliary_data_to_issuer") val auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
     /** Same members, same meaning as the legacy transport's [org.siros.sdk.transport.engine.SignRequestParams]. */
     @SerialName("credential_response_encryption")
     val credentialResponseEncryption: org.siros.sdk.transport.CredentialResponseEncryptionRequest? = null,

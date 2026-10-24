@@ -86,7 +86,7 @@ interface AuxiliaryDataShape {
 /** The registry of adapters and the rule for choosing one. */
 object AuxiliaryDataShapes {
     /** Every adapter this SDK knows, in no priority: a configuration may advertise exactly one of them. */
-    val all: List<AuxiliaryDataShape> get() = listOf(LegacyOrgSirosShape)
+    val all: List<AuxiliaryDataShape> get() = listOf(LegacyOrgSirosShape, AuxiliaryDataV01)
 
     /**
      * The adapter for [config]: the one whose advertisement it carries. A configuration that advertises more than one shape,

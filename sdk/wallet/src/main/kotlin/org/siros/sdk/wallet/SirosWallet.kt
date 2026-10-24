@@ -3471,11 +3471,7 @@ class SirosWallet private constructor(
         // metadata carries anything else under that member (a seed value, say) is malformed: not offered.
         when (val selection = org.siros.sdk.credentials.AuxiliaryDataShapes.select(config)) {
             org.siros.sdk.credentials.AuxiliarySelection.Malformed -> return null
-            is org.siros.sdk.credentials.AuxiliarySelection.Selected -> if (selection.advertisement.toWallet.isNotEmpty()) {
-                secretSeedAdvertised?.add(issuerUrl to configId)
-            } else {
-                secretSeedAdvertised?.remove(issuerUrl to configId)
-            }
+            is org.siros.sdk.credentials.AuxiliarySelection.Selected -> secretSeedAdvertised?.put(issuerUrl to configId, selection)
             org.siros.sdk.credentials.AuxiliarySelection.None -> secretSeedAdvertised?.remove(issuerUrl to configId)
         }
         val issuerDisplay = metadata.display?.firstOrNull()
@@ -5795,10 +5791,15 @@ class SirosWallet private constructor(
         get() = org.siros.sdk.keystore.DEFAULT_CIRCUIT_ZK_HANDLERS.associateBy { it.functionId }
 
     /** (issuer, configuration) pairs whose issuer metadata advertised a seed: their response must be encrypted. */
-    private val secretSeedAdvertised: MutableSet<Pair<String, String>>? = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val secretSeedAdvertised: MutableMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>? =
+        java.util.concurrent.ConcurrentHashMap()
+
+    /** What the issuer advertised for the configuration: the adapter to read its response with, never one sniffed from the response. */
+    private fun auxiliarySelection(issuer: String?, configurationId: String?): org.siros.sdk.credentials.AuxiliarySelection.Selected? =
+        if (issuer == null || configurationId == null) null else secretSeedAdvertised?.get(issuer to configurationId)
 
     private fun isSecretSeedAdvertised(issuer: String?, configurationId: String?): Boolean =
-        issuer != null && configurationId != null && secretSeedAdvertised?.contains(issuer to configurationId) == true
+        auxiliarySelection(issuer, configurationId)?.advertisement?.toWallet?.isNotEmpty() == true
 
     /**
      * Stores [entries] (verbatim) as credential [id]'s delivered metadata. True when there was nothing to
@@ -5914,6 +5915,8 @@ class SirosWallet private constructor(
             secretNamespace = config.secretSeedNamespace,
             canStoreSecret = keystoreCanHoldCredentialMetadata(),
             advertised = isSecretSeedAdvertised(decoded.credentialIssuer, null),
+            shape = auxiliarySelection(decoded.credentialIssuer, null)?.shape ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+            advertisement = auxiliarySelection(decoded.credentialIssuer, null)?.advertisement,
         )
         return (verdict as? DeliveredMetadataVerdict.Refuse)?.let { it.reason to creds.mapNotNull { c -> c.notificationId } }
     }
@@ -6805,6 +6808,7 @@ class SirosWallet private constructor(
         holderCommitments: List<String>? = null,
         credentialType: String? = null,
         credentialIssuer: String? = null,
+        auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
     ): List<GeneratedProofData> {
         val chosen = when {
             !proofTypesSupported.isNullOrEmpty() ->
@@ -6813,7 +6817,16 @@ class SirosWallet private constructor(
             !proofTypeHint.isNullOrBlank() -> proofTypeHint
             else -> "jwt"
         }
-        if (chosen == "attestation" && !holderCommitments.isNullOrEmpty()) {
+        val auxiliarySlots = if (auxiliaryDataToIssuer.isNullOrEmpty()) emptyList() else {
+            if (!holderCommitments.isNullOrEmpty()) {
+                throw WalletException(
+                    "The request asks for holder commitments in two shapes at once",
+                    errorCode = "holder_commitment_unsupported",
+                )
+            }
+            org.siros.sdk.credentials.AuxiliaryDataV01.slotsToAnswer(auxiliaryDataToIssuer)
+        }
+        if (chosen == "attestation" && (!holderCommitments.isNullOrEmpty() || auxiliarySlots.isNotEmpty())) {
             // An attestation proof has no payload to carry the claim; answering
             // without it would be refused by the issuer after the user has waited.
             throw WalletException(
@@ -6835,11 +6848,41 @@ class SirosWallet private constructor(
                 // also runs onWscdOperationEnd (resolveEffectiveKeystoreForIssuance
                 // may have started a hardware operation). Never logged.
                 val witness = effectiveKeystore as? org.siros.sdk.keystore.HolderWitnessSource
-                val commitmentClaims = HolderCommitments.proofClaims(
-                    holderCommitments, credentialType, credentialIssuer,
-                    witness?.let { w -> { type: String, issuer: String -> w.privateSeedCommitment(type, issuer) } },
-                )
+                val derive = witness?.let { w -> { type: String, issuer: String -> w.privateSeedCommitment(type, issuer) } }
+                val commitmentClaims = HolderCommitments.proofClaims(holderCommitments, credentialType, credentialIssuer, derive)
+                // Credential Auxiliary Data v0.1: ONE value, computed once, goes into every proof of the request.
+                val auxiliaryClaims = if (auxiliarySlots.isEmpty()) emptyMap() else {
+                    // The request's credential type and issuer string when it carries them; the offer's otherwise.
+                    val type = credentialType?.takeIf { it.isNotEmpty() }
+                        ?: (activeVctm?.vct ?: activeMddlSchema?.doctype ?: activeOffer?.credentialConfigurationId)
+                    val issuer = credentialIssuer?.takeIf { it.isNotEmpty() } ?: activeOffer?.credentialIssuerIdentifier
+                    if (type.isNullOrEmpty() || issuer.isNullOrEmpty() || derive == null) {
+                        throw WalletException(
+                            "The issuer asked for a holder commitment this wallet cannot derive here",
+                            errorCode = "holder_commitment_unavailable",
+                        )
+                    }
+                    val value = derive(type, issuer)
+                    try {
+                        org.siros.sdk.credentials.AuxiliaryDataV01.placeInProof(
+                            auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value) },
+                        )
+                    } finally {
+                        value.fill(0)
+                    }
+                }
                 (1..count).map {
+                    if (auxiliaryClaims.isNotEmpty()) {
+                        val proofJwt = effectiveKeystore.generateProofWithJsonClaims(
+                            audience = audience,
+                            nonce = nonce,
+                            freshKey = count > 1,
+                            holderBinding = holderBindingFor(audience),
+                            extraJsonClaims = auxiliaryClaims,
+                        )
+                        val keyId = extractProofKeyId(proofJwt)
+                        return@map GeneratedProofData(proofType = "jwt", jwt = proofJwt, attestedKeyIds = keyId?.let { listOf(it) })
+                    }
                     // The four-argument form when there is nothing to add: a keystore
                     // that predates extra claims keeps working for every issuer that
                     // asked for none.
@@ -7328,6 +7371,7 @@ class SirosWallet private constructor(
                     holderCommitments = params.holderCommitments,
                     credentialType = params.credentialType,
                     credentialIssuer = params.credentialIssuer,
+                    auxiliaryDataToIssuer = params.auxiliaryDataToIssuer,
                 )
                 // The "attestation" proof type returns a single GeneratedProofData
                 // whose attestedKeyIds already covers the whole batch in order; the
@@ -8101,6 +8145,7 @@ class SirosWallet private constructor(
                                 holderCommitments = params?.holderCommitments,
                                 credentialType = params?.credentialType,
                                 credentialIssuer = params?.credentialIssuer,
+                                auxiliaryDataToIssuer = params?.auxiliaryDataToIssuer,
                             )
                             // The "attestation" proof type returns a single GeneratedProofData
                 // whose attestedKeyIds already covers the whole batch in order; the
@@ -8110,8 +8155,8 @@ class SirosWallet private constructor(
                 // the first entry's list (as this used to) silently dropped every
                 // index past 0 for a "jwt" batch of more than one credential.
                 activeAttestedKeyIds = generated.flatMap { it.attestedKeyIds.orEmpty() }.ifEmpty { null }
-                            if (!params?.holderCommitments.isNullOrEmpty()) {
-                                params?.credentialIssuer?.let { pscIssuerByFlow[msg.flowId] = it }
+                            if (!params?.holderCommitments.isNullOrEmpty() || !params?.auxiliaryDataToIssuer.isNullOrEmpty()) {
+                                (params?.credentialIssuer ?: activeOffer?.credentialIssuerIdentifier)?.let { pscIssuerByFlow[msg.flowId] = it }
                             }
                             val proofs = generated.map {
                                 ProofObject(proofType = it.proofType, jwt = it.jwt, attestation = it.attestation)
@@ -8673,6 +8718,9 @@ class SirosWallet private constructor(
                     secretNamespace = config.secretSeedNamespace,
                     canStoreSecret = canStoreDelivered,
                     advertised = isSecretSeedAdvertised(msg.credentialIssuer, msg.selectedCredentialConfigurationId),
+                    shape = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.shape
+                        ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+                    advertisement = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.advertisement,
                 )
                 when (deliveredVerdict) {
                     DeliveredMetadataVerdict.None -> Unit
@@ -10549,6 +10597,10 @@ class SirosWallet private constructor(
      * Nothing was issued, so there is nothing to roll back.
      */
     internal fun reportPseudonymCommitmentConflict(flowId: String, code: String?, message: String?): Boolean {
+        if (code == AuxiliaryDataConflictException.FLOW_ERROR_CODE) {
+            eventListener?.onAuxiliaryDataConflict(flowId, AuxiliaryDataConflictException(message.orEmpty()))
+            return true
+        }
         if (code != PseudonymCommitmentConflictException.FLOW_ERROR_CODE) return false
         eventListener?.onPseudonymCommitmentConflict(flowId, PseudonymCommitmentConflictException(message.orEmpty()))
         return true

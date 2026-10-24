@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Auxiliary data now goes through an adapter seam (`AuxiliaryDataShape`), with two adapters.** The wire shape of "secrets to the wallet, commitments to
+  the issuer" is isolated behind one interface working on a normalised model (`SecretDelivery(path, alg, bytes)`, `HolderCommitment(path, alg, required,
+  commitment)`); the adapter is chosen by what the issuer ADVERTISES for the configuration (`AuxiliaryDataShapes.select`), never sniffed from a response:
+  a configuration that advertises two shapes, or a malformed advertisement, is not offered, and a secret in a shape that was not advertised is refused
+  instead of being stored uninterpreted. `LegacyOrgSirosShape` is today's behaviour unchanged (privatedata-spec 5A: `org.siros.secret_seed`, claim
+  `org.siros.psc`), with the existing tests passing as they were. `AuxiliaryDataV01` is Credential Auxiliary Data v0.1 (nym_auth rulebook PR 12): advertisement
+  `auxiliary_data_supported.{to_wallet,to_issuer}` (new raw field `CredentialConfiguration.auxiliaryDataSupported`), response `credential_metadata.auxiliary_data[]`
+  with a 16-byte base64url opening checked as `SHA-256(opening) ==` the claim at `path` of every credential (SD-JWT top-level claim, mdoc `[namespace, element]`
+  bstr), the delivery must equal the advertised `to_wallet` slots exactly, the member is stripped before display, and the holder commitment is the signed
+  `auxiliary_data` proof claim, identical in every proof (`placeInProof`). Tested with the spec vector (opening `8f3b2c9e41d07a65b1e2f4c3d9a08176` ->
+  `JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0`). New `KeystoreManager.generateProofWithJsonClaims` signs a claim of any JSON type (an array) into the proof JWT;
+  a keystore that cannot place it throws. Engine wire (go-wallet-backend pull 480, go-wmp pull 39): the `generate_proof` sign request param
+  `auxiliary_data_to_issuer` (the issuer's advertised `to_issuer` entries verbatim, new field on `SignRequestParams` and the WMP params) is answered with ONE
+  `auxiliary_data` claim (`{type, alg, path, commitment}`, derived once for the request's `credential_issuer`/`credential_type`, falling back to the offer's)
+  signed into every key proof; a `required` entry the wallet cannot answer refuses the proof, and the request is refused if it also names the legacy
+  `holder_commitments`. The flow error `AUXILIARY_DATA_CONFLICT` (`details.error == "auxiliary_data_conflict"`) is delivered once through the new
+  `WalletEventListener.onAuxiliaryDataConflict(flowId, AuxiliaryDataConflictException)` (never retryable, localised sentence, default forwards to `onFlowError`)
+
 ## [0.21.1] - 2026-10-23
 
 Patch release on 0.21.0: review follow-ups to the engine-blind encryption contract (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/293) and a consent-step change for ZK pseudonym/age proofs (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/292). Not included: https://github.com/sirosfoundation/siros-sdk-kotlin/pull/294, https://github.com/sirosfoundation/siros-sdk-kotlin/pull/298 and https://github.com/sirosfoundation/siros-sdk-kotlin/pull/285 (still open).

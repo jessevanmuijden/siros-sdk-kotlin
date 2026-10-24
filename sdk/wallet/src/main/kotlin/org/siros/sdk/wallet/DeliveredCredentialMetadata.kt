@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.siros.sdk.credentials.AuxiliaryDataShape
+import org.siros.sdk.credentials.AuxiliaryDataShapes
 import org.siros.sdk.credentials.AuxiliaryParse
 import org.siros.sdk.credentials.LegacyOrgSirosShape
 import org.siros.sdk.credentials.SecretDelivery
@@ -123,6 +124,10 @@ internal object DeliveredCredentialMetadata {
         // The entries as received: one per member, member values verbatim.
         val all = JsonArray(metadata.members.map { (member, value) -> JsonObject(mapOf("type" to JsonPrimitive(member), "value" to value)) })
         val members = JsonObject(metadata.members)
+        // A secret in a shape the issuer did not advertise is never stored uninterpreted, and no other adapter is guessed from it.
+        if (!advertised && AuxiliaryDataShapes.all.any { it.id != shape.id && it.carriesSecret(members) }) {
+            return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
+        }
         if (!shape.carriesSecret(members)) return when {
             advertised -> DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.SEED_UNAVAILABLE)
             metadata.members.isEmpty() -> DeliveredMetadataVerdict.None

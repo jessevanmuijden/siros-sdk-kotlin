@@ -288,4 +288,65 @@ class DeliveredCredentialMetadataTest {
         }
         assertNotNull(cases("delivered-secret-advertise-001"))
     }
+
+    // ---- Credential Auxiliary Data v0.1 (the spec vector) through the receipt check ----
+
+    private val v01Opening = "8f3b2c9e41d07a65b1e2f4c3d9a08176".chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    private val v01OpeningB64 = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(v01Opening)
+    private val v01Commitment = "JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0"
+    private val v01Advertisement = org.siros.sdk.credentials.AuxiliaryAdvertisement(
+        toWallet = listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("ssc"), "sha-256")),
+        toIssuer = emptyList(),
+    )
+
+    private fun v01Cred(commitment: String = v01Commitment): DeliveredCredential {
+        val b64 = { t: String -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(t.toByteArray()) }
+        val disclosure = b64("""["salt","ssc","$commitment"]""")
+        val digest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(disclosure.toByteArray(Charsets.US_ASCII)))
+        val jwt = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"sha-256","_sd":["$digest"]}""") + ".sig~$disclosure~"
+        return DeliveredCredential("dc+sd-jwt", jwt, "n1")
+    }
+
+    private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(
+        mapOf("auxiliary_data" to Json.parseToJsonElement("""[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$opening"}]""")),
+        encrypted,
+    )
+
+    private fun checkV01(response: Response = v01Response(), credentials: List<DeliveredCredential> = listOf(v01Cred()), advertised: Boolean = true) =
+        DeliveredCredentialMetadata.check(
+            response, credentials, ns, true, advertised,
+            shape = org.siros.sdk.credentials.AuxiliaryDataV01,
+            advertisement = v01Advertisement,
+        )
+
+    @Test
+    fun v01_theOpeningOfTheCommitmentInTheCredentialIsAccepted() {
+        assertTrue(checkV01() is DeliveredMetadataVerdict.Accept)
+    }
+
+    @Test
+    fun v01_aWrongOpeningOrAWrongCommitmentIsRefused_andAPlainResponseNeverCarriesASecret() {
+        val wrong = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(16))
+        assertRefused(DeliveredMetadataRefusal.MISMATCH, checkV01(response = v01Response(opening = wrong)))
+        assertRefused(DeliveredMetadataRefusal.MISMATCH, checkV01(credentials = listOf(v01Cred(commitment = "A".repeat(43)))))
+        assertRefused(DeliveredMetadataRefusal.NOT_ENCRYPTED, checkV01(response = v01Response(encrypted = false)))
+        assertRefused(DeliveredMetadataRefusal.MALFORMED, checkV01(response = v01Response(opening = "AAAA")))
+    }
+
+    @Test
+    fun v01_everyCredentialOfTheBatchMustOpen() {
+        assertRefused(DeliveredMetadataRefusal.MISMATCH, checkV01(credentials = listOf(v01Cred(), v01Cred(commitment = "A".repeat(43)))))
+    }
+
+    @Test
+    fun v01_aSecretInAShapeTheIssuerDidNotAdvertiseIsNeverStoredUninterpreted() {
+        // Not advertised: the default (legacy) adapter is in force and the v0.1 member is refused, not stored and not guessed at.
+        val v = DeliveredCredentialMetadata.check(v01Response(), listOf(v01Cred()), ns, true, advertised = false)
+        assertRefused(DeliveredMetadataRefusal.MALFORMED, v)
+    }
+
+    @Test
+    fun v01_anAdvertisedSecretThatDidNotArriveIsUnavailable() {
+        assertRefused(DeliveredMetadataRefusal.SEED_UNAVAILABLE, checkV01(response = response(members = mapOf("display" to JsonArray(emptyList())))))
+    }
 }

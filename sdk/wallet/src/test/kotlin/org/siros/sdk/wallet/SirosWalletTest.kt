@@ -5002,6 +5002,80 @@ class SirosWalletTest {
         assertTrue(captured.all { it == mapOf("org.siros.psc" to pscClaimFor("eu.europa.ec.eudi.nym_auth.1", "https://issuer.example")) })
     }
 
+    private fun auxEntry(path: String = """["psc"]""", required: Boolean = true, type: String = "hash_commitment", alg: String = "sha-256") =
+        Json.parseToJsonElement("""{"type":"$type","alg":"$alg","path":$path,"required":$required,"extra":"kept-verbatim"}""").jsonObject
+
+    @Test
+    fun generateProof_withAuxiliaryDataToIssuer_signsOneAuxiliaryDataClaimIdenticalInEveryProof() = runTest(dispatcher) {
+        val asked = mutableListOf<Pair<String, String>>()
+        val keystore = pscKeystore(asked)
+        val captured = mutableListOf<Map<String, kotlinx.serialization.json.JsonElement>>()
+        coEvery { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), capture(captured)) } returns "proof-jwt"
+        generateProofWithCommitments(
+            keystore,
+            SignRequestParams(
+                audience = "aud-1", nonce = "n-1", count = 3, credentialType = "urn:t", credentialIssuer = "https://issuer.example/",
+                auxiliaryDataToIssuer = listOf(auxEntry()),
+            ),
+        )
+        assertEquals(3, captured.size)
+        assertEquals("one value for every proof", 1, captured.toSet().size)
+        assertEquals(setOf("auxiliary_data"), captured.first().keys)
+        val e = (captured.first().getValue("auxiliary_data") as JsonArray).single().jsonObject
+        assertEquals(listOf("psc"), e["path"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(pscClaimFor("urn:t", "https://issuer.example/"), e["commitment"]!!.jsonPrimitive.content)
+        assertEquals("derived once, for the exact issuer string", listOf("urn:t" to "https://issuer.example/"), asked)
+    }
+
+    @Test
+    fun generateProof_withARequiredAuxiliaryEntryItCannotAnswer_isRefusedAndNoProofIsMade() = runTest(dispatcher) {
+        val keystore = pscKeystore(mutableListOf())
+        // A keystore that WOULD make a proof (without the claim): the refusal must come from the wallet, not from a missing stub.
+        coEvery { keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) } returns "proof-jwt"
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        generateProofWithCommitments(
+            keystore,
+            SignRequestParams(
+                audience = "aud-1", nonce = "n-1", credentialType = "urn:t", credentialIssuer = "https://issuer.example/",
+                auxiliaryDataToIssuer = listOf(auxEntry(alg = "sha-512")),
+            ),
+            listener,
+        )
+        verify(exactly = 1) { listener.onFlowError("flow-psc", any(), any()) }
+        coVerify(exactly = 0) { keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) }
+        coVerify(exactly = 0) { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun auxiliaryDataConflict_isTypedNonRetryableAndNotAlsoAGenericError() = runTest(dispatcher) {
+        val errorFlow = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        mockEngineConstructor(flowErrors = errorFlow)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        errorFlow.emit(
+            FlowErrorMessage(
+                flowId = "flow-c",
+                error = org.siros.sdk.transport.engine.FlowError(
+                    code = "AUXILIARY_DATA_CONFLICT", message = "conflict",
+                    details = buildJsonObject { put("error", JsonPrimitive("auxiliary_data_conflict")) },
+                ),
+            )
+        )
+        advanceUntilIdle()
+        val err = slot<AuxiliaryDataConflictException>()
+        verify(exactly = 1) { listener.onAuxiliaryDataConflict("flow-c", capture(err)) }
+        assertFalse(err.captured.retryable)
+        verify(exactly = 0) { listener.onFlowError("flow-c", any(), any()) }
+    }
+
     @Test
     fun freshRegistration_unlocksTheOtherKeystoresFromTheContainerItExported() = runTest(dispatcher) {
         val container = "exported-container".toByteArray()
@@ -11406,6 +11480,17 @@ class SirosWalletTest {
         return wallet
     }
 
+    /** What the wallet's advertisement record holds: the legacy adapter for the one configuration, or nothing. */
+    private fun advertisedSelections(advertised: Boolean): java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected> =
+        java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>().also {
+            if (advertised) it["https://issuer.example" to "nym"] = org.siros.sdk.credentials.AuxiliarySelection.Selected(
+                org.siros.sdk.credentials.LegacyOrgSirosShape,
+                org.siros.sdk.credentials.AuxiliaryAdvertisement(
+                    listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("org.siros.nym_auth"), "sha-256")), emptyList(),
+                ),
+            )
+        }
+
     private fun setField(target: Any, fieldName: String, value: Any?) {
         val field = target.javaClass.getDeclaredField(fieldName)
         field.isAccessible = true
@@ -12515,9 +12600,7 @@ class SirosWalletTest {
             "sessionStore" to sessionStore,
             "apiClient" to apiClient,
             "eventListener" to listener,
-            "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>().also {
-                if (advertised) it.add("https://issuer.example" to "nym")
-            },
+            "secretSeedAdvertised" to advertisedSelections(advertised),
         )
         if (renewalSourceBatchId != null) fields += "pendingRenewalSourceBatchId" to renewalSourceBatchId
         if (withOffer) {
@@ -12809,9 +12892,7 @@ class SirosWalletTest {
                 "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
                 "keystore" to org.siros.sdk.keystore.JweKeystore(),
                 "blindIssuance" to blind,
-                "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>().also {
-                    if (advertised) it.add("https://issuer.example" to "nym")
-                },
+                "secretSeedAdvertised" to advertisedSelections(advertised),
             )
         }
         val encrypted = Json.parseToJsonElement(
@@ -12865,7 +12946,7 @@ class SirosWalletTest {
     fun anAdvertisementWithAValueInPublicIssuerMetadata_makesTheConfigurationNotOffered() = runTest(dispatcher) {
         val wallet = newWallet(
             "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
-            "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>(),
+            "secretSeedAdvertised" to advertisedSelections(false),
         )
         fun offer(secretSeed: String?): Any? {
             val member = if (secretSeed != null) ""","org.siros.secret_seed":$secretSeed""" else ""
@@ -12910,7 +12991,7 @@ class SirosWalletTest {
             "sessionStore" to sessionStore,
             "apiClient" to apiClient,
             "eventListener" to listener,
-            "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>(),
+            "secretSeedAdvertised" to advertisedSelections(false),
         )
         invokeConnectEngine(wallet, "app-token")
         advanceUntilIdle()

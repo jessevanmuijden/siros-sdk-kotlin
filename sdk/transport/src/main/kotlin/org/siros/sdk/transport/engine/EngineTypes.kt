@@ -570,6 +570,12 @@ data class SignRequestParams(
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
     /**
+     * Credential Auxiliary Data v0.1 (`generate_proof`): the issuer's advertised `to_issuer` entries VERBATIM (`type`, `alg`, `path`,
+     * `required`, ...); omitted when none. The wallet puts `{type, alg, path, commitment}` for them in the signed part of every
+     * key proof, and MUST answer every entry with `required: true`.
+     */
+    @SerialName("auxiliary_data_to_issuer") val auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
+    /**
      * `generate_proof`: the response-encryption pair the engine negotiated with the issuer. When present the wallet
      * generates a fresh key per request and returns its public JWK in
      * [SignResponseMessage.credentialResponseEncryptionJwk].
