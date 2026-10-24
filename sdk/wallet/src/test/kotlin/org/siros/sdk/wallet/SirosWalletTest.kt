@@ -7037,11 +7037,19 @@ class SirosWalletTest {
     }
 
     /** A listener whose selection callback waits for [answer]; it reports what it saw. */
-    private class WaitingSelectionListener(val answer: kotlinx.coroutines.CompletableDeferred<List<Long>>, val ignoreCancellation: Boolean = false) : WalletEventListener {
+    private class WaitingSelectionListener(
+        val answer: kotlinx.coroutines.CompletableDeferred<List<Long>>,
+        val ignoreCancellation: Boolean = false,
+        val failAfterAnswer: Boolean = false,
+    ) : WalletEventListener {
         var cancelled = false
+        var asked = 0
         val errors = mutableListOf<Pair<String, String>>()
         override suspend fun onCredentialSelectionRequired(request: PresentationRequest): List<Long> = try {
-            if (ignoreCancellation) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { answer.await() } else answer.await()
+            asked++
+            val r = if (ignoreCancellation) kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { answer.await() } else answer.await()
+            if (failAfterAnswer) throw IllegalStateException("the app failed after the flow was lost")
+            r
         } catch (e: kotlinx.coroutines.CancellationException) {
             cancelled = true
             throw e
@@ -7274,10 +7282,47 @@ class SirosWalletTest {
         verify(exactly = 0) { e.engine.sendMatchResponse(any(), any(), any()) }
         // The shared collector is alive: a new flow on the new connection is served.
         listener.cancelled = false
-        e.match.emit(MatchRequestMessage(flowId = "f9", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+        val askedBefore = listener.asked
+        // Stamped with the current connection, as the session stamps a frame it receives on the new socket.
+        e.match.emit(MatchRequestMessage(flowId = "f9", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata).also { it.connectionGeneration = engineGeneration.get() })
         runCurrent()
-        assertTrue(e.currentWalletState() !is WalletState.Disconnected)
+        assertEquals("the new flow's selection wait was registered and the app was asked", askedBefore + 1, listener.asked)
+        assertFalse("and it is still waiting, not cancelled", listener.cancelled)
         assertEquals(1, listener.errors.size)
+    }
+
+    @Test
+    fun flowLost_aBufferedSignPresentationOfALostZkpReqFlowIsNeverSignedOrAnswered() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.matchOnce()
+        runCurrent()
+        e.replaceSocket()
+        runCurrent()
+        assertEquals(1, listener.errors.size)
+        // Buffered on the old connection (stamped 0), consumed after the loss swept the flow's match state.
+        var dispatched = 0
+        e.s.wallet.signDispatchHook = { dispatched++ } // reached only by a request that passed the admission guards
+        e.sign.emit(redirectSign())
+        advanceUntilIdle()
+        assertEquals("the request was rejected before dispatch", 0, dispatched)
+        // Every answer shape, whatever its arguments: nothing was signed and nothing was sent for the dead flow.
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
+    }
+
+    @Test
+    fun flowLost_aSelectionCallbackThatFailsAfterTheLossSendsNoDecline() = runTest(dispatcher) {
+        val e = engineCzk()
+        val answer = kotlinx.coroutines.CompletableDeferred<List<Long>>()
+        e.s.wallet.setEventListener(WaitingSelectionListener(answer, ignoreCancellation = true, failAfterAnswer = true))
+        e.matchOnce()
+        runCurrent()
+        e.replaceSocket()
+        runCurrent()
+        answer.complete(emptyList()) // the app answers (and then fails) well after the flow was lost
+        runCurrent()
+        verify(exactly = 0) { e.engine.sendFlowAction(any(), "decline", any()) }
+        verify(exactly = 0) { e.engine.sendFlowAction(any(), "consent", any()) }
     }
 
     @Test

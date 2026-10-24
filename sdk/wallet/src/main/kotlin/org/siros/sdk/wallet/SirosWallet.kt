@@ -8139,6 +8139,14 @@ class SirosWallet private constructor(
                     Timber.w("Ignoring a ${msg.action} request of a replaced socket (flow ${msg.flowId})")
                     return@collect
                 }
+                // A presentation signing request for a flow that was lost, or that arrived on a replaced connection, never reaches
+                // ordinary credential signing (its dedicated handler's state was dropped with the flow).
+                if (msg.action == "sign_presentation" &&
+                    (msg.flowId in lostFlowIds || msg.connectionGeneration < engine.connectionGeneration)
+                ) {
+                    Timber.w("Ignoring a sign_presentation request of a lost flow or replaced socket (flow ${msg.flowId})")
+                    return@collect
+                }
                 signDispatchHook?.invoke()
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
                 noteFlowId(msg.flowId)
@@ -10673,6 +10681,11 @@ class SirosWallet private constructor(
                 // answer, leaving the flow (and the app's spinner) waiting for a reply that never comes.
                 if (e is VirtualMachineError || e is kotlinx.coroutines.CancellationException) throw e
                 Timber.e(e, "Error handling credential selection (code=credential_selection_failed, flow $flowId)")
+                // A callback that ignored the cancellation and failed later must not decline into a session that does not know the flow.
+                if (isFlowLost(engine, flowId)) {
+                    endFlowLost(flowId)
+                    return@launch
+                }
                 val declinePayload = kotlinx.serialization.json.buildJsonObject {
                     put("reason", kotlinx.serialization.json.JsonPrimitive("error: ${e.message}"))
                 }
