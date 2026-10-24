@@ -5048,7 +5048,7 @@ class SirosWalletTest {
         )
         assertEquals(listOf("urn:real:vct" to "https://offer-issuer.example"), asked)
         @Suppress("UNCHECKED_CAST")
-        assertEquals("https://offer-issuer.example", (getField(wallet, "pscIssuerByFlow") as Map<String, String>)["flow-psc"])
+        assertEquals(mapOf("flow-psc" to "https://offer-issuer.example"), getField(wallet, "pscIssuerByFlow") as Map<String, String>)
     }
 
     @Test

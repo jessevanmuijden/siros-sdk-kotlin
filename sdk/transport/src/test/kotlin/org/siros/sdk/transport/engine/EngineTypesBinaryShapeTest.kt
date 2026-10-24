@@ -24,8 +24,10 @@ class EngineTypesBinaryShapeTest {
     fun `sign request params appends client_metadata last`() {
         val c = components(SignRequestParams(clientMetadata = JsonPrimitive("CM"), credentialIssuer = "CI"))
         // After everything main already had (including the engine-blind encryption members); credential_issuer keeps its position.
-        assertEquals(JsonPrimitive("CM"), c.last())
+        // Everything appended after client_metadata (the auxiliary-data field) comes last; client_metadata keeps its position before it.
+        assertEquals(null, c.last())
+        assertEquals(JsonPrimitive("CM"), c[c.size - 2])
         assertEquals("CI", c[c.indexOfFirst { it == "CI" }])
-        assertEquals(null, c[c.size - 2])
+        assertEquals(null, c[c.size - 3])
     }
 }
