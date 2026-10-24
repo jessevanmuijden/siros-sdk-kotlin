@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A flow whose engine connection is lost or replaced is ended instead of leaving a spinner.** The engine keeps a flow only for the life of
+  its session: when it closed the socket (read timeout) and the wallet reconnected, the consent screen stayed up, a later Decline went to the
+  new session ("action for unknown flow"), nothing came back, and the app sat on "selecting credentials" until the user cancelled.
+  The wallet now ends such a flow locally when the engine session goes `RECONNECTING`, `FAILED` or `REAUTH_REQUIRED`, or its socket is
+  replaced: `WalletEventListener.onFlowError` is called once with a "connection lost, start it again" message, a credential selection still
+  waiting on the app is cancelled (so `onCredentialSelectionRequired` unwinds and the consent UI can dismiss), the per-flow state (match
+  results, pending zkp_req signing, issuance preparation, blind-issuance keys via their existing drop) is dropped and the wallet returns to
+  Ready. An answer that reaches the wallet afterwards (an app that ignores the cancellation, a Decline tapped later) is not sent: it would
+  reach a session that does not know the flow. Flows started on the new connection are not affected. The engine's own answer to an action for a flow it does not
+  know, `flow_error` with code `UNKNOWN_FLOW`, ends a flow the wallet believes live the same way (and a frame for an already ended or never
+  known flow is ignored: it neither tells the app twice nor resets a newer flow); any other `flow_error` now also cancels a selection still
+  waiting on the app. Unrecognised error codes decode as before. The sample app clears its pending consent when the SDK cancels the wait.
+
 ## [0.21.1] - 2026-10-23
 
 Patch release on 0.21.0: review follow-ups to the engine-blind encryption contract (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/293) and a consent-step change for ZK pseudonym/age proofs (https://github.com/sirosfoundation/siros-sdk-kotlin/pull/292). Not included: https://github.com/sirosfoundation/siros-sdk-kotlin/pull/294, https://github.com/sirosfoundation/siros-sdk-kotlin/pull/298 and https://github.com/sirosfoundation/siros-sdk-kotlin/pull/285 (still open).
