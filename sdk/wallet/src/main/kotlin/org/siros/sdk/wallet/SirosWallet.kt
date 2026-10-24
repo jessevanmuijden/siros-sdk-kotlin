@@ -6919,6 +6919,7 @@ class SirosWallet private constructor(
                     securityProperties = securityProps,
                     credentialIssuer = audience,
                     walletInstanceId = currentWalletInstanceId(),
+                    plugin = config.wscdPluginClaim,
                 )
                 // keypairs[i]'s key is exactly attested_keys[i] in the JWT just
                 // built (jwks preserves list order) - the issuer is expected to

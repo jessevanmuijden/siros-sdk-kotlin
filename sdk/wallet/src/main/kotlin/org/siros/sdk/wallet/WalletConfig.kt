@@ -443,8 +443,18 @@ data class WalletConfig(
      * disables the cache. Default 5 minutes.
      */
     val trustDecisionCacheTtl: java.time.Duration = java.time.Duration.ofMinutes(5),
+    /**
+     * Optional name of the keystore/WSCD plugin type this wallet's keys live in (e.g. `"soft"`, `"fido2"`), sent as
+     * `security_properties.plugin` in the key attestation request. It is a CLAIM: the wallet provider backend records it as
+     * unverified evidence and alone decides what assurance, if any, it earns; the wallet never overrides or asserts a tier
+     * because of it. Lower-case letters, digits, `_` and `-`, at most 64 characters. Null (the default) sends nothing.
+     */
+    val wscdPluginClaim: String? = null,
 ) {
     init {
+        require(wscdPluginClaim == null || Regex("[a-z0-9_-]{1,64}").matches(wscdPluginClaim)) {
+            "wscdPluginClaim must be 1-64 characters of [a-z0-9_-]"
+        }
         require(secretSeedNamespace.isNotBlank()) { "secretSeedNamespace must not be blank" }
         VerifierIdTypeOrder.require(circuitZkVerifierIdTypes)
     }

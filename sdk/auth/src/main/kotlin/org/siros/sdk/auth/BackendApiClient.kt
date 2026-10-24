@@ -224,6 +224,9 @@ class BackendApiClient(
      *   instance, sent as `wallet_instance_id` - lets the backend's KA trust gate look up this
      *   instance's recorded `attestation_source` and lift its `security_properties` clamp when
      *   it's genuinely native-attested. Omitted when null/blank.
+     * @param plugin optional name of the keystore/WSCD plugin type holding the keys (e.g. `soft`), sent as
+     *   `security_properties.plugin`. A CLAIM only: the backend treats it as unverified evidence and owns every
+     *   assurance decision; it never changes what this wallet attests about itself.
      * @return key attestation JWT string
      */
     suspend fun requestKeyAttestation(
@@ -232,6 +235,7 @@ class BackendApiClient(
         securityProperties: SignerSecurityProperties? = null,
         credentialIssuer: String? = null,
         walletInstanceId: String? = null,
+        plugin: String? = null,
     ): String {
         val body = kotlinx.serialization.json.buildJsonObject {
             put("jwks", kotlinx.serialization.json.JsonArray(jwks))
@@ -251,8 +255,10 @@ class BackendApiClient(
             if (!walletInstanceId.isNullOrBlank()) {
                 put("wallet_instance_id", kotlinx.serialization.json.JsonPrimitive(walletInstanceId))
             }
-            if (securityProperties != null) {
+            if (securityProperties != null || !plugin.isNullOrBlank()) {
                 put("security_properties", kotlinx.serialization.json.buildJsonObject {
+                    if (!plugin.isNullOrBlank()) put("plugin", kotlinx.serialization.json.JsonPrimitive(plugin))
+                    if (securityProperties == null) return@buildJsonObject
                     put("key_storage", kotlinx.serialization.json.JsonArray(
                         securityProperties.keyStorage.map { kotlinx.serialization.json.JsonPrimitive(it) }
                     ))

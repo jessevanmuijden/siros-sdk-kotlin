@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`WalletConfig.wscdPluginClaim`: the wallet can name its keystore/WSCD plugin type in the key attestation request.** When set (for example `"soft"`), `security_properties.plugin` is sent to `POST /wallet-provider/key-attestation/generate`; with no keystore properties the member is sent alone. It is a claim only: the wallet provider backend records it as unverified evidence and owns every assurance decision, so the wallet never overrides a `key_storage` / `user_authentication` tier or the plugin tier its selection policy assumes. Off by default (nothing is sent); the value must be 1-64 characters of `[a-z0-9_-]` (anything else is refused when the configuration is built). This replaces the earlier test-only tier override proposal (https://github.com/sirosfoundation/siros-sdk-kotlin/issues/306, https://github.com/sirosfoundation/siros-sdk-kotlin/pull/309).
+
 ### Fixed
 - **A flow whose engine connection is lost or replaced is ended instead of leaving a spinner.** The engine keeps a flow only for the life of
   its session: when it closed the socket (read timeout) and the wallet reconnected, the consent screen stayed up, a later Decline went to the
