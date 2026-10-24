@@ -49,6 +49,9 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
      */
     RESPONSE_UNAVAILABLE("the encrypted credential response is not available in this wallet"),
 
+    /** The credential does not carry, at the path the issuer asked for, the commitment this wallet sent in the proofs. */
+    HOLDER_COMMITMENT_MISSING("the credential does not hold the holder commitment that was sent"),
+
     /** A response key was offered for the flow but the completion is plain: an encrypted response is never silently downgraded. */
     PLAIN_RESPONSE("the issuer answered in clear although an encrypted response was requested"),
 }
@@ -110,7 +113,12 @@ internal object DeliveredCredentialMetadata {
         shape: AuxiliaryDataShape = LegacyOrgSirosShape,
         /** What the issuer advertised for the configuration (slots), when known: a shape may require the delivery to match it. */
         advertisement: org.siros.sdk.credentials.AuxiliaryAdvertisement? = null,
+        /** The commitments this wallet put in the key proofs of the request (Auxiliary Data v0.1): the credentials must hold them. */
+        holderCommitments: List<org.siros.sdk.credentials.HolderCommitment> = emptyList(),
     ): DeliveredMetadataVerdict {
+        if (!holdsHolderCommitments(credentials, holderCommitments)) {
+            return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING)
+        }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         }
@@ -125,7 +133,8 @@ internal object DeliveredCredentialMetadata {
         val all = JsonArray(metadata.members.map { (member, value) -> JsonObject(mapOf("type" to JsonPrimitive(member), "value" to value)) })
         val members = JsonObject(metadata.members)
         // A secret in a shape the issuer did not advertise is never stored uninterpreted, and no other adapter is guessed from it.
-        if (!advertised && AuxiliaryDataShapes.all.any { it.id != shape.id && it.carriesSecret(members) }) {
+        // (Also when another shape WAS advertised: a response may carry only the advertised shape's secret.)
+        if (AuxiliaryDataShapes.all.any { it.id != shape.id && it.carriesSecret(members) }) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         }
         if (!shape.carriesSecret(members)) return when {
@@ -147,6 +156,25 @@ internal object DeliveredCredentialMetadata {
         } finally {
             deliveries.forEach { it.bytes.fill(0) }
         }
+    }
+
+    /**
+     * Spec: after issuance the wallet MUST check that the claim at each `to_issuer` path holds the commitment it sent. A claim that is
+     * absent or different on any credential refuses the response (an optional entry the issuer left out entirely is allowed).
+     */
+    private fun holdsHolderCommitments(credentials: List<DeliveredCredential>, sent: List<org.siros.sdk.credentials.HolderCommitment>): Boolean {
+        for (h in sent) {
+            for (c in credentials) {
+                val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimAt(c.format, c.credential, h.path)
+                if (claim == null) {
+                    if (h.required) return false else continue
+                }
+                val same = java.security.MessageDigest.isEqual(claim, h.commitment)
+                claim.fill(0)
+                if (!same) return false
+            }
+        }
+        return true
     }
 
     private fun verifyAll(

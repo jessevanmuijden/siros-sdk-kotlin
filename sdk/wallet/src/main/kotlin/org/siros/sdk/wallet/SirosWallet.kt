@@ -5538,6 +5538,16 @@ class SirosWallet private constructor(
      */
     private val pscIssuerByFlow = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    /** The Auxiliary Data v0.1 commitments sent in a flow's key proofs, until its completion is checked against them (then zeroed). */
+    private val holderCommitmentsByFlow = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+
+    private fun takeHolderCommitments(flowId: String?): List<org.siros.sdk.credentials.HolderCommitment> =
+        flowId?.let { holderCommitmentsByFlow.remove(it) }.orEmpty()
+
+    private fun dropHolderCommitments(flowId: String) {
+        holderCommitmentsByFlow.remove(flowId)?.forEach { it.commitment.fill(0) }
+    }
+
     /**
      * The response-encryption keys of in-flight issuances and what the wallet opened with them. The engine never
      * holds a credential, a delivered seed or a `vp_token`: this wallet generates the key the issuer encrypts to,
@@ -5909,15 +5919,20 @@ class SirosWallet private constructor(
             // the engine never saw it, and a frame-supplied id must not stand in for a missing one.
             engineCreds.mapIndexed { i, c -> c.copy(credential = opened.credentials[i], notificationId = opened.notificationId) }
         }
+        // The WMP completion names no configuration: the one of the offer this wallet started for that very issuer.
+        val wmpConfigurationId = activeOffer?.takeIf { it.credentialIssuerIdentifier == decoded.credentialIssuer }?.credentialConfigurationId
+        val sentCommitments = takeHolderCommitments(flowId)
         val verdict = DeliveredCredentialMetadata.check(
             response = opened ?: PlainDeliveredResponse(decoded.credentialMetadata),
             credentials = creds.map { DeliveredCredential(it.format, it.credential, it.notificationId) },
             secretNamespace = config.secretSeedNamespace,
             canStoreSecret = keystoreCanHoldCredentialMetadata(),
-            advertised = isSecretSeedAdvertised(decoded.credentialIssuer, null),
-            shape = auxiliarySelection(decoded.credentialIssuer, null)?.shape ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
-            advertisement = auxiliarySelection(decoded.credentialIssuer, null)?.advertisement,
+            advertised = isSecretSeedAdvertised(decoded.credentialIssuer, wmpConfigurationId),
+            shape = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.shape ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+            advertisement = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.advertisement,
+            holderCommitments = sentCommitments,
         )
+        sentCommitments.forEach { it.commitment.fill(0) }
         return (verdict as? DeliveredMetadataVerdict.Refuse)?.let { it.reason to creds.mapNotNull { c -> c.notificationId } }
     }
 
@@ -6809,6 +6824,8 @@ class SirosWallet private constructor(
         credentialType: String? = null,
         credentialIssuer: String? = null,
         auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
+        /** Receives the commitments put in the proofs (Auxiliary Data v0.1), to be checked against the issued credentials. */
+        onHolderCommitments: ((List<org.siros.sdk.credentials.HolderCommitment>) -> Unit)? = null,
     ): List<GeneratedProofData> {
         val chosen = when {
             !proofTypesSupported.isNullOrEmpty() ->
@@ -6854,7 +6871,7 @@ class SirosWallet private constructor(
                 val auxiliaryClaims = if (auxiliarySlots.isEmpty()) emptyMap() else {
                     // The request's credential type and issuer string when it carries them; the offer's otherwise.
                     val type = credentialType?.takeIf { it.isNotEmpty() }
-                        ?: (activeVctm?.vct ?: activeMddlSchema?.doctype ?: activeOffer?.credentialConfigurationId)
+                        ?: (activeVctm?.vct ?: activeMddlSchema?.doctype ?: activeOffer?.vct ?: activeOffer?.doctype ?: activeOffer?.credentialConfigurationId)
                     val issuer = credentialIssuer?.takeIf { it.isNotEmpty() } ?: activeOffer?.credentialIssuerIdentifier
                     if (type.isNullOrEmpty() || issuer.isNullOrEmpty() || derive == null) {
                         throw WalletException(
@@ -6864,6 +6881,9 @@ class SirosWallet private constructor(
                     }
                     val value = derive(type, issuer)
                     try {
+                        onHolderCommitments?.invoke(
+                            auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value.copyOf()) },
+                        )
                         org.siros.sdk.credentials.AuxiliaryDataV01.placeInProof(
                             auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value) },
                         )
@@ -7372,6 +7392,7 @@ class SirosWallet private constructor(
                     credentialType = params.credentialType,
                     credentialIssuer = params.credentialIssuer,
                     auxiliaryDataToIssuer = params.auxiliaryDataToIssuer,
+                    onHolderCommitments = { holderCommitmentsByFlow[flowId] = it },
                 )
                 // The "attestation" proof type returns a single GeneratedProofData
                 // whose attestedKeyIds already covers the whole batch in order; the
@@ -8146,6 +8167,7 @@ class SirosWallet private constructor(
                                 credentialType = params?.credentialType,
                                 credentialIssuer = params?.credentialIssuer,
                                 auxiliaryDataToIssuer = params?.auxiliaryDataToIssuer,
+                                onHolderCommitments = { holderCommitmentsByFlow[msg.flowId] = it },
                             )
                             // The "attestation" proof type returns a single GeneratedProofData
                 // whose attestedKeyIds already covers the whole batch in order; the
@@ -8156,7 +8178,7 @@ class SirosWallet private constructor(
                 // index past 0 for a "jwt" batch of more than one credential.
                 activeAttestedKeyIds = generated.flatMap { it.attestedKeyIds.orEmpty() }.ifEmpty { null }
                             if (!params?.holderCommitments.isNullOrEmpty() || !params?.auxiliaryDataToIssuer.isNullOrEmpty()) {
-                                (params?.credentialIssuer ?: activeOffer?.credentialIssuerIdentifier)?.let { pscIssuerByFlow[msg.flowId] = it }
+                                (params?.credentialIssuer?.takeIf { it.isNotEmpty() } ?: activeOffer?.credentialIssuerIdentifier)?.let { pscIssuerByFlow[msg.flowId] = it }
                             }
                             val proofs = generated.map {
                                 ProofObject(proofType = it.proofType, jwt = it.jwt, attestation = it.attestation)
@@ -8712,6 +8734,7 @@ class SirosWallet private constructor(
                 // supersedes the old batch with nothing. The same entries are stored with every credential.
                 val canStoreDelivered = keystoreCanHoldCredentialMetadata()
                 var deliveredEntries: kotlinx.serialization.json.JsonArray? = null
+                val sentCommitments = takeHolderCommitments(msg.flowId)
                 val deliveredVerdict = DeliveredCredentialMetadata.check(
                     response = openedResponse,
                     credentials = msg.credentials.orEmpty().map { DeliveredCredential(it.format, it.credential, it.notificationId) },
@@ -8721,7 +8744,9 @@ class SirosWallet private constructor(
                     shape = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.shape
                         ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
                     advertisement = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.advertisement,
+                    holderCommitments = sentCommitments,
                 )
+                sentCommitments.forEach { it.commitment.fill(0) }
                 when (deliveredVerdict) {
                     DeliveredMetadataVerdict.None -> Unit
                     is DeliveredMetadataVerdict.Accept -> if (canStoreDelivered) deliveredEntries = deliveredVerdict.entries
@@ -9167,6 +9192,7 @@ class SirosWallet private constructor(
                 stopZkSigning(fid, refuse = false)
                 clearFlowMatchState(fid)
                 pscIssuerByFlow.remove(fid)
+                dropHolderCommitments(fid)
                 blindIssuance.drop(fid)
                 val redirectUri = msg.error.details?.get("redirect_uri")?.jsonPrimitive?.contentOrNull
                 if (!reportPseudonymCommitmentConflict(fid, msg.error.code, msg.error.message)) {

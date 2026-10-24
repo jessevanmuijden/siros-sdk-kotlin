@@ -312,12 +312,44 @@ class DeliveredCredentialMetadataTest {
         encrypted,
     )
 
-    private fun checkV01(response: Response = v01Response(), credentials: List<DeliveredCredential> = listOf(v01Cred()), advertised: Boolean = true) =
-        DeliveredCredentialMetadata.check(
-            response, credentials, ns, true, advertised,
-            shape = org.siros.sdk.credentials.AuxiliaryDataV01,
-            advertisement = v01Advertisement,
+    private fun checkV01(
+        response: Response = v01Response(),
+        credentials: List<DeliveredCredential> = listOf(v01Cred()),
+        advertised: Boolean = true,
+        holderCommitments: List<org.siros.sdk.credentials.HolderCommitment> = emptyList(),
+    ) = DeliveredCredentialMetadata.check(
+        response, credentials, ns, true, advertised,
+        shape = org.siros.sdk.credentials.AuxiliaryDataV01,
+        advertisement = v01Advertisement,
+        holderCommitments = holderCommitments,
+    )
+
+    private fun sent(path: List<String> = listOf("ssc"), required: Boolean = true, value: ByteArray = java.util.Base64.getUrlDecoder().decode(v01Commitment)) =
+        org.siros.sdk.credentials.HolderCommitment(path, "sha-256", required, value)
+
+    @Test
+    fun v01_theCredentialMustHoldTheCommitmentTheWalletSent_afterIssuance() {
+        // The claim at the to_issuer path holds exactly what was sent: accepted.
+        assertTrue(checkV01(holderCommitments = listOf(sent())) is DeliveredMetadataVerdict.Accept)
+        // A different value, or an absent REQUIRED claim: refused.
+        assertRefused(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING, checkV01(holderCommitments = listOf(sent(value = ByteArray(32)))))
+        assertRefused(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING, checkV01(holderCommitments = listOf(sent(path = listOf("psc")))))
+        // An optional claim the issuer left out is allowed; a present-but-different optional one is not.
+        assertTrue(checkV01(holderCommitments = listOf(sent(path = listOf("psc"), required = false))) is DeliveredMetadataVerdict.Accept)
+        assertRefused(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING, checkV01(holderCommitments = listOf(sent(required = false, value = ByteArray(32)))))
+        // Every credential of a batch.
+        assertRefused(
+            DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING,
+            checkV01(credentials = listOf(v01Cred(), v01Cred(commitment = "A".repeat(43))), holderCommitments = listOf(sent())),
         )
+    }
+
+    @Test
+    fun v01_aV01SecretIsRefusedEvenWhenTheLegacyShapeWasTheAdvertisedOne() {
+        // Advertised = true with the legacy adapter in force: the v0.1 member is a foreign shape and must not be stored uninterpreted.
+        val v = DeliveredCredentialMetadata.check(v01Response(), listOf(v01Cred()), ns, true, advertised = true)
+        assertRefused(DeliveredMetadataRefusal.MALFORMED, v)
+    }
 
     @Test
     fun v01_theOpeningOfTheCommitmentInTheCredentialIsAccepted() {

@@ -4935,7 +4935,8 @@ class SirosWalletTest {
         params: SignRequestParams,
         listener: WalletEventListener? = null,
         config: WalletConfig = WalletConfig(backendUrl = "https://wallet.example.com"),
-    ) {
+        extraFields: Array<Pair<String, Any?>> = emptyArray(),
+    ): SirosWallet {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         mockEngineConstructor(signRequests = signFlow)
         val wallet = newWallet(
@@ -4945,11 +4946,13 @@ class SirosWalletTest {
             "keystore" to keystore,
             "credentialStore" to FakeCredentialStore(mutableListOf()),
             "eventListener" to listener,
+            *extraFields,
         )
         invokeConnectEngine(wallet, "app-token")
         advanceUntilIdle()
         signFlow.emit(SignRequestMessage(flowId = "flow-psc", action = "generate_proof", params = params))
         advanceUntilIdle()
+        return wallet
     }
 
     @Test
@@ -5025,6 +5028,75 @@ class SirosWalletTest {
         assertEquals(listOf("psc"), e["path"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals(pscClaimFor("urn:t", "https://issuer.example/"), e["commitment"]!!.jsonPrimitive.content)
         assertEquals("derived once, for the exact issuer string", listOf("urn:t" to "https://issuer.example/"), asked)
+    }
+
+    private val offerWithVct = org.siros.sdk.credentials.CredentialOffer(
+        credentialConfigurationId = "cfg-id", credentialIssuerIdentifier = "https://offer-issuer.example", credentialName = "n",
+        issuerName = "i", vct = "urn:real:vct",
+    )
+
+    @Test
+    fun generateProof_auxiliaryData_derivesFromTheOffersVctAndIssuerWhenTheRequestOmitsThem_andRecordsThatIssuer() = runTest(dispatcher) {
+        val asked = mutableListOf<Pair<String, String>>()
+        val keystore = pscKeystore(asked)
+        coEvery { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) } returns "proof-jwt"
+        val wallet = generateProofWithCommitments(
+            keystore,
+            // An EMPTY issuer counts as absent for the derivation, and the flow must record the string that was used.
+            SignRequestParams(audience = "aud", nonce = "n", credentialType = null, credentialIssuer = "", auxiliaryDataToIssuer = listOf(auxEntry())),
+            extraFields = arrayOf("activeOffer" to offerWithVct),
+        )
+        assertEquals(listOf("urn:real:vct" to "https://offer-issuer.example"), asked)
+        @Suppress("UNCHECKED_CAST")
+        assertEquals("https://offer-issuer.example", (getField(wallet, "pscIssuerByFlow") as Map<String, String>)["flow-psc"])
+    }
+
+    @Test
+    fun generateProof_auxiliaryData_rememberTheCommitmentsSoTheCompletionCanBeCheckedAgainstThem() = runTest(dispatcher) {
+        val keystore = pscKeystore(mutableListOf())
+        coEvery { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) } returns "proof-jwt"
+        val wallet = generateProofWithCommitments(
+            keystore,
+            SignRequestParams(audience = "aud", nonce = "n", credentialType = "urn:t", credentialIssuer = "https://i.example", auxiliaryDataToIssuer = listOf(auxEntry())),
+        )
+        @Suppress("UNCHECKED_CAST")
+        val kept = (getField(wallet, "holderCommitmentsByFlow") as Map<String, List<org.siros.sdk.credentials.HolderCommitment>>)["flow-psc"]!!
+        assertEquals(listOf(listOf("psc")), kept.map { it.path })
+        assertEquals(pscClaimFor("urn:t", "https://i.example"), java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(kept.single().commitment))
+    }
+
+    @Test
+    fun wmpCompletion_ofAV01IssuanceIsCheckedWithTheOffersConfigurationId_notAsUnadvertised() = runTest(dispatcher) {
+        val flowId = "flow-wmp-v01"
+        val opening = "8f3b2c9e41d07a65b1e2f4c3d9a08176".chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val b64 = { x: String -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(x.toByteArray()) }
+        val disclosure = b64("""["salt","ssc","JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0"]""")
+        val digest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(disclosure.toByteArray(Charsets.US_ASCII)))
+        val credential = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"sha-256","_sd":["$digest"]}""") + ".sig~$disclosure~"
+        val blind = BlindIssuance()
+        val jwk = blind.offer(flowId, org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A128GCM", false))!!
+        val body = buildJsonObject {
+            put("credentials", kotlinx.serialization.json.JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive(credential)) })))
+            put("notification_id", JsonPrimitive("n9"))
+            put("credential_metadata", Json.parseToJsonElement("""{"auxiliary_data":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"${java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(opening)}"}]}"""))
+        }
+        blind.open(flowId, issuerEncrypt(jwk, "ECDH-ES", "A128GCM", body.toString()), deferred = false)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        selections["https://issuer.example" to "pid"] = org.siros.sdk.credentials.AuxiliarySelection.Selected(
+            org.siros.sdk.credentials.AuxiliaryDataV01,
+            org.siros.sdk.credentials.AuxiliaryAdvertisement(listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("ssc"), "sha-256")), emptyList()),
+        )
+        val wallet = newWallet(
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to org.siros.sdk.keystore.JweKeystore(),
+            "blindIssuance" to blind,
+            "secretSeedAdvertised" to selections,
+            "activeOffer" to org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example", "n", issuerName = "i"),
+        )
+        val result = Json.parseToJsonElement(
+            """{"credentials":[{"format":"dc+sd-jwt"}],"credential_response_encrypted":true,"credential_issuer":"https://issuer.example"}""",
+        ).jsonObject
+        assertEquals(null, wallet.wmpDeliveredMetadataRefusal(flowId, result))
     }
 
     @Test
@@ -11378,6 +11450,9 @@ class SirosWalletTest {
         val stateFlow = values["_state"] as? MutableStateFlow<WalletState>
         if (stateFlow != null && "state" !in values) {
             values["state"] = stateFlow.asStateFlow()
+        }
+        if ("holderCommitmentsByFlow" !in values) {
+            values["holderCommitmentsByFlow"] = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
         }
         if ("pscIssuerByFlow" !in values) {
             values["pscIssuerByFlow"] = java.util.concurrent.ConcurrentHashMap<String, String>()

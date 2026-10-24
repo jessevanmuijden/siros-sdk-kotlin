@@ -63,6 +63,8 @@ class AuxiliaryDataV01Test {
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"opening":"AAAA"}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"required":true}]}""",
             """{"to_wallet":[],"to_issuer":[]}""",
+            """{"to_wallet":[],"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"]}]}""",
+            """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}],"to_issuer":[]}""",
             """{"surprise":[]}""",
             "[]",
         )
