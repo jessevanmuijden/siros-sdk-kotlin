@@ -1846,7 +1846,8 @@ private fun jsonToJava(v: kotlinx.serialization.json.JsonElement): Any? = when (
         v.isString -> v.content
         v.content == "true" || v.content == "false" -> v.content.toBoolean()
         v.content.toLongOrNull() != null -> v.content.toLong()
-        else -> v.content.toDouble()
+        // Outside Long: the exact decimal, never a rounded Double (a signed claim must carry what the issuer sent).
+        else -> java.math.BigDecimal(v.content)
     }
     is kotlinx.serialization.json.JsonArray -> v.map { jsonToJava(it) }
     is kotlinx.serialization.json.JsonObject -> v.mapValues { jsonToJava(it.value) }

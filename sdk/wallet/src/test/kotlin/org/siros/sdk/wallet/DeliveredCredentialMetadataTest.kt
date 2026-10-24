@@ -307,6 +307,31 @@ class DeliveredCredentialMetadataTest {
         return DeliveredCredential("dc+sd-jwt", jwt, "n1")
     }
 
+    private fun v01CredWithClaim(name: String, value: String): DeliveredCredential {
+        val b64 = { t: String -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(t.toByteArray()) }
+        val ssc = b64("""["salt","ssc","$v01Commitment"]""")
+        val extra = b64("""["salt2","$name","$value"]""")
+        fun d(x: String) = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(x.toByteArray(Charsets.US_ASCII)))
+        val jwt = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"sha-256","_sd":["${d(ssc)}","${d(extra)}"]}""") + ".sig~$ssc~$extra~"
+        return DeliveredCredential("dc+sd-jwt", jwt, "n1")
+    }
+
+    @Test
+    fun v01_anOptionalCommitmentThatIsPresentButWrongOrMalformedIsRefused_onlyAnAbsentOneIsSkipped() {
+        val good = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 5 })
+        val sentPsc = sent(path = listOf("psc"), required = false, value = ByteArray(32) { 5 })
+        assertTrue(checkV01(credentials = listOf(v01CredWithClaim("psc", good)), holderCommitments = listOf(sentPsc)) is DeliveredMetadataVerdict.Accept)
+        // Present but not exactly the wallet's value, or not a 32-byte value at all: refused although optional.
+        for (bad in listOf(java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 6 }), "AAAA", "not*base64")) {
+            assertRefused(
+                DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING,
+                checkV01(credentials = listOf(v01CredWithClaim("psc", bad)), holderCommitments = listOf(sentPsc)),
+            )
+        }
+        // Genuinely absent and optional: skipped.
+        assertTrue(checkV01(holderCommitments = listOf(sentPsc)) is DeliveredMetadataVerdict.Accept)
+    }
+
     private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(
         mapOf("auxiliary_data" to Json.parseToJsonElement("""[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$opening"}]""")),
         encrypted,

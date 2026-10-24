@@ -63,6 +63,8 @@ class AuxiliaryDataV01Test {
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"opening":"AAAA"}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"required":true}]}""",
             """{"to_wallet":[],"to_issuer":[]}""",
+            """{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":"true"}]}""",
+            """{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":"false"}]}""",
             """{"to_wallet":[],"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"]}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}],"to_issuer":[]}""",
             """{"surprise":[]}""",
@@ -171,5 +173,20 @@ class AuxiliaryDataV01Test {
         val md = response(entry())
         assertEquals(setOf("display"), AuxiliaryDataV01.stripFromMetadata(md).keys)
         assertEquals(JsonObject(emptyMap()), AuxiliaryDataV01.stripFromMetadata(Json.parseToJsonElement("""{"auxiliary_data":[]}""").jsonObject))
+    }
+
+    @Test
+    fun theForbiddenAuxiliaryDataMemberInPublicMetadataMakesTheConfigurationMalformed_evenWithoutAnAdvertisement() {
+        val withMember = Json { ignoreUnknownKeys = true }.decodeFromString(
+            CredentialConfiguration.serializer(),
+            """{"format":"dc+sd-jwt","credential_metadata":{"auxiliary_data":[{"type":"hash_commitment"}]}}""",
+        )
+        assertTrue(AuxiliaryDataShapes.select(withMember) is AuxiliarySelection.Malformed)
+        val withBoth = Json { ignoreUnknownKeys = true }.decodeFromString(
+            CredentialConfiguration.serializer(),
+            """{"format":"dc+sd-jwt","credential_metadata":{"auxiliary_data":[]},"auxiliary_data_supported":$goodAdvert}""",
+        )
+        assertTrue(AuxiliaryDataShapes.select(withBoth) is AuxiliarySelection.Malformed)
+        assertTrue(AuxiliaryDataShapes.select(config(null)) is AuxiliarySelection.None)
     }
 }

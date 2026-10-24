@@ -13892,6 +13892,43 @@ class SirosWalletTest {
         assertBlindEmpty(blind)
     }
 
+    private fun recordedCommitment() = listOf(org.siros.sdk.credentials.HolderCommitment(listOf("psc"), "sha-256", true, ByteArray(32) { 7 }))
+
+    @Test
+    fun logout_dropsAndZeroesEveryRecordedHolderCommitment() = runTest(dispatcher) {
+        val recorded = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+        val c = recordedCommitment()
+        recorded["f1"] = c
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "sessionStore" to mockk<SessionStore>(relaxed = true),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "holderCommitmentsByFlow" to recorded,
+        )
+        wallet.logout()
+        assertTrue(recorded.isEmpty())
+        assertTrue("zeroed, not merely forgotten", c.single().commitment.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun cancellingAnIssuanceDropsAndZeroesItsRecordedHolderCommitments() = runTest(dispatcher) {
+        val recorded = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+        val c = recordedCommitment()
+        recorded["flow-x"] = c
+        recorded["other"] = recordedCommitment()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.FlowActive(userId = "user-1", displayName = "Alice", flowId = "flow-x", flowType = "issuance", status = "s")),
+            "engineSession" to mockk<WalletEngineSession>(relaxed = true),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "holderCommitmentsByFlow" to recorded,
+        )
+        wallet.cancelCurrentFlow()
+        assertEquals(setOf("other"), recorded.keys)
+        assertTrue(c.single().commitment.all { it == 0.toByte() })
+    }
+
     @Test
     fun destroy_clearsTheResponseKeysAndTheOpenedResponses() = runTest(dispatcher) {
         val blind = heldBlindIssuance()
