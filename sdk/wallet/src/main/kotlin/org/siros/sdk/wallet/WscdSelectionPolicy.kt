@@ -94,20 +94,25 @@ class NoEligibleWscdPluginException(
 )
 
 /**
- * Thrown by `SirosWallet` when the plugin [WscdSelectionPolicy.resolve] chose needs a physical
- * authenticator (e.g. a FIDO2 token) and none is reachable - or presence could not be determined,
- * which is treated the same. Raised BEFORE any PIN request, so the user is never asked for a PIN
- * nothing can use. Distinct from [NoEligibleWscdPluginException] (no registered plugin has a
- * sufficient tier): here the plugin is sufficient but has no token to run on. The message is
- * suitable to show the user.
+ * Thrown by `SirosWallet` when no WSCD able to serve the credential has been ONBOARDED (enrolled: a
+ * token-backed plugin such as FIDO2 holds no enrolled key), or onboarding could not be determined,
+ * which is treated the same. Raised BEFORE any PIN request: a PIN for a token nobody onboarded is
+ * meaningless. Distinct from [NoEligibleWscdPluginException] (no registered plugin has a sufficient
+ * tier): here a plugin of sufficient tier exists but none is onboarded. The message is suitable to
+ * show the user.
+ *
+ * @param issuer null when the wallet was using its default keystore with no credential type in scope.
+ * @param requiredTier null when the credential type declared no tier requirement.
+ * @param pluginIds the plugins that were candidates and are not onboarded.
  */
-class WscdAuthenticatorNotPresentException(
-    /** Null when the wallet was using its default keystore with no credential type in scope. */
+class NoOnboardedWscdException(
     val issuer: String?,
     val credentialType: String?,
-    val pluginId: String,
+    val requiredTier: String?,
+    val pluginIds: List<String>,
 ) : WscdSelectionException(
-    "No applicable WSCD is available: the '$pluginId' authenticator is not present" +
+    "No applicable WSCD is available: none of $pluginIds has been onboarded" +
+        (if (requiredTier != null) " for required key-storage tier '$requiredTier'" else "") +
         (if (issuer != null) " (issuer=$issuer credentialType=$credentialType)" else "")
 )
 

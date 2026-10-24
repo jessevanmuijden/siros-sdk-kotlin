@@ -19,12 +19,13 @@ interface KeystoreManager {
     val isUnlocked: Boolean
 
     /**
-     * Whether the external authenticator (e.g. a FIDO2 token) backing this keystore is reachable
-     * now, answered without prompting. Callers use it to fail with a clear error BEFORE asking
-     * the user for a PIN. `false` also means "could not be determined". The default is `true`:
-     * a keystore with no external authenticator has nothing to be absent.
+     * Whether this keystore's WSCD has been ONBOARDED: a token-backed plugin (FIDO2) holds at least
+     * one enrolled key. Callers use it to fail with a clear error BEFORE asking the user for a PIN,
+     * which is meaningless when no token has been onboarded. `false` also means "could not be
+     * determined" (fail closed). The default is `true`: a keystore whose keys need no onboarding
+     * (software keys) has nothing to onboard.
      */
-    suspend fun isAuthenticatorPresent(): Boolean = true
+    suspend fun isWscdOnboarded(): Boolean = true
 
     /**
      * Unlock the keystore using PRF-derived key material.

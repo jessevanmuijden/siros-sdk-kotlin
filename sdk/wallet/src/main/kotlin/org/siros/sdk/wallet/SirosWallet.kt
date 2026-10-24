@@ -109,6 +109,7 @@ import org.siros.sdk.keystore.mdoc.MdocCose
 import org.siros.sdk.credentials.VctmFetcher
 import org.siros.sdk.credentials.MddlSchema
 import org.siros.sdk.credentials.MddlSchemaFetcher
+import org.siros.sdk.keystore.WscdPluginCapabilities
 import org.siros.sdk.keystore.BbsHolderStateVault
 import org.siros.sdk.keystore.CredentialRefreshTokenEntry
 import org.siros.sdk.keystore.DCAPIResponseEncryption
@@ -6985,39 +6986,41 @@ class SirosWallet private constructor(
         }
     }
 
+    /** Whether [manager]'s WSCD is onboarded; "cannot tell" is not onboarded (fail closed). */
+    private suspend fun isOnboarded(manager: KeystoreManager, pluginId: String): Boolean = try {
+        manager.isWscdOnboarded()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Timber.w(e, "could not determine whether the '$pluginId' WSCD is onboarded")
+        false
+    }
+
     /**
-     * Returns [effective] only if its external authenticator (if it has one) is reachable. The static
-     * tier table cannot say a token is plugged in; this asks the keystore, without prompting, before
-     * anything can ask for a PIN. "Cannot tell" counts as not present. Applied to EVERY path that
-     * yields a keystore, including the wallet's default one.
+     * Returns the wallet's own default keystore only if its WSCD is onboarded, so a PIN is never
+     * asked for when no token has been onboarded.
      */
-    private suspend fun requireAuthenticatorPresent(
-        effective: KeystoreManager,
+    private suspend fun requireDefaultKeystoreOnboarded(
         pluginId: String,
         issuer: String?,
         credentialType: String?,
+        requiredTier: String?,
     ): KeystoreManager {
-        val present = try {
-            effective.isAuthenticatorPresent()
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Timber.w(e, "could not determine authenticator presence for $pluginId")
-            false
+        if (!isOnboarded(keystore, pluginId)) {
+            throw NoOnboardedWscdException(issuer, credentialType, requiredTier, listOf(pluginId))
         }
-        if (!present) throw WscdAuthenticatorNotPresentException(issuer, credentialType, pluginId)
-        return effective
+        return keystore
     }
 
     private suspend fun resolveEffectiveKeystoreForIssuance(): KeystoreManager {
         val available = config.availableKeystores
         if (available.isNullOrEmpty()) {
             Timber.i("resolveEffectiveKeystoreForIssuance: no availableKeystores configured, using default keystore")
-            return requireAuthenticatorPresent(keystore, "default", null, null)
+            return requireDefaultKeystoreOnboarded("default", null, null, null)
         }
         val offer = activeOffer ?: run {
             Timber.i("resolveEffectiveKeystoreForIssuance: no activeOffer, using default keystore")
-            return requireAuthenticatorPresent(keystore, available.entries.firstOrNull { it.value === keystore }?.key ?: "default", null, null)
+            return requireDefaultKeystoreOnboarded(available.entries.firstOrNull { it.value === keystore }?.key ?: "default", null, null, null)
         }
         val issuer = offer.credentialIssuerIdentifier
 
@@ -7053,20 +7056,33 @@ class SirosWallet private constructor(
                 "globalOverride=${wscdSelectionPolicy.currentGlobalUserOverride()} " +
                 "userOverrides=${wscdSelectionPolicy.currentUserOverrides()}",
         )
+        // Only an ONBOARDED plugin can serve a tier requirement: a PIN for a token nobody enrolled is
+        // meaningless. Statically eligible plugins that are not onboarded are withheld from the policy
+        // (so it falls over to another onboarded one); if none is onboarded, refuse before any prompt.
+        var selectable: Set<String> = available.keys
+        if (requiredTier != null) {
+            val eligible = available.keys.filter {
+                WscdPluginCapabilities.tierOf(it)?.let { tier -> WscdPluginCapabilities.meets(tier, requiredTier) } == true
+            }
+            val onboarded = eligible.filter { id -> available[id]?.let { isOnboarded(it, id) } == true }
+            if (eligible.isNotEmpty() && onboarded.isEmpty()) {
+                throw NoOnboardedWscdException(issuer, credentialType, requiredTier, eligible)
+            }
+            selectable = available.keys - (eligible - onboarded.toSet())
+        }
         val pluginId = wscdSelectionPolicy.resolve(
             issuer = issuer,
             credentialType = credentialType,
             requiredTier = requiredTier,
-            availablePluginIds = available.keys,
+            availablePluginIds = selectable,
             currentDefaultPluginId = currentDefaultPluginId,
         )
         Timber.i("resolveEffectiveKeystoreForIssuance: resolve() returned pluginId=$pluginId")
         if (pluginId == null) {
-            return requireAuthenticatorPresent(keystore, currentDefaultPluginId ?: "default", issuer, credentialType)
+            return requireDefaultKeystoreOnboarded(currentDefaultPluginId ?: "default", issuer, credentialType, requiredTier)
         }
 
         val resolved = available[pluginId] ?: keystore
-        requireAuthenticatorPresent(resolved, pluginId, issuer, credentialType)
         config.onWscdOperationStart?.invoke(pluginId)
         return resolved
     }
