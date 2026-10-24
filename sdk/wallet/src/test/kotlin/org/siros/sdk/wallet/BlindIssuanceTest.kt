@@ -501,7 +501,9 @@ class BlindIssuanceTest {
         val b = BlindIssuance()
         val jwk = b.offer("f", request, generation = 1)!!
         b.open("f", issuer(jwk, response("kept")), deferred = false)
+        assertTrue(b.hasOpened("f"))
         b.retire("f", now = 1_000)
+        assertTrue("a retired flow still has its opened response for a buffered completion", b.hasOpened("f"))
         assertFalse(b.holdsKey("f"))
         assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(jwk, response("x")), deferred = false) }
         b.purgeStale(graceMs = 30_000, now = 20_000)

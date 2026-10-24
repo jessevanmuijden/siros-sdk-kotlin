@@ -7257,7 +7257,27 @@ class SirosWallet private constructor(
     }
 
     /** The active flow (and any other known one) lost its connection: the state of the engine session says so. */
+    /**
+     * An issuance whose `flow_start` was sent but whose first progress has not arrived is still pending: no flow id yet, so neither
+     * sweep can find it. When its connection is gone it can never be answered: retired like a cancelled start (a newer attempt, which
+     * bumps the epoch and clears [issuanceStartSent], is untouched), the app is told once, no spinner, no stranded in-flight guard.
+     */
+    private fun endSentPendingStartLost(newGeneration: Int?) {
+        if (!issuanceStartSent) return
+        val sentOn = issuanceStartGeneration
+        if (newGeneration != null && sentOn >= newGeneration) return
+        val pending = (_state.value as? WalletState.FlowActive)?.takeIf { it.isPending } ?: return
+        Timber.w("Issuance start sent on connection $sentOn lost before its first progress; ending it locally")
+        issuanceStartEpoch.incrementAndGet()
+        issuanceStartSession?.let { abandonedStarts.add(AbandonedStart(System.currentTimeMillis(), it, sentOn)) }
+        issuanceStartSent = false
+        resetIssuanceGuards()
+        eventListener?.onFlowError(pending.flowId, FLOW_LOST_MESSAGE)
+        _state.value = readyState(pending.userId, pending.displayName, pending.credentials)
+    }
+
     private fun endFlowsOnConnectionLoss() {
+        endSentPendingStartLost(null)
         val active = (_state.value as? WalletState.FlowActive)?.takeIf { !it.isPending }?.flowId
         val ids = LinkedHashSet<String>()
         active?.let { ids.add(it) }
@@ -7278,6 +7298,7 @@ class SirosWallet private constructor(
     private fun onEngineSocketReplaced(generation: Int) {
         // The engine keeps a flow only as long as its session: the flows of an older socket can never complete.
         endFlowsOfOlderConnections(generation)
+        endSentPendingStartLost(generation)
         blindIssuance.markStaleBefore(generation)
         scope.launch {
             kotlinx.coroutines.delay(BLIND_STALE_GRACE_MS)
@@ -8430,7 +8451,14 @@ class SirosWallet private constructor(
         // Observe match requests → DCQL-filtered credential matching
         scope.launch {
             engine.matchRequests().collect { msg ->
+                // Stamped on receipt: a request that came in on a replaced connection, or for a flow already lost, is never asked
+                // about and never answered (the engine session that wanted the answer is gone).
+                if (msg.flowId in lostFlowIds || msg.connectionGeneration < engine.connectionGeneration) {
+                    Timber.i("Ignoring match request for flow ${msg.flowId}: its connection is gone")
+                    return@collect
+                }
                 noteFlowId(msg.flowId)
+                flowConnectionGeneration.putIfAbsent(msg.flowId, msg.connectionGeneration)
                 try {
                     Timber.d("Match request for flow ${msg.flowId}")
                     val allCreds = credentialStore.getAll()
@@ -8514,7 +8542,6 @@ class SirosWallet private constructor(
                         val trustResultForFlow = lastTrustResults[msg.flowId]
                         // The wait is registered like the progress route's, so a lost connection stops THIS wait (and only it: the
                         // shared match collector keeps serving new flows) and the answer is not sent to a session that does not know it.
-                        flowConnectionGeneration.putIfAbsent(msg.flowId, engine.connectionGeneration)
                         val selection = scope.async {
                             listener.onCredentialSelectionRequired(
                                 PresentationRequest(
@@ -8757,7 +8784,10 @@ class SirosWallet private constructor(
                 if (isAbandonedFlowEvent(engine, completion.flowId, completion.connectionGeneration)) return@collect
                 // A flow that already ended (completed, refused, failed) completes once: the transport does not de-duplicate, and a
                 // repeat would find the flow's "key offered" marker gone and be taken for an ordinary plain completion.
-                if (completion.flowId in terminatedFlowIds) {
+                // A flow ended locally as LOST whose response the wallet had already decrypted is the exception: its buffered
+                // completion is still processed (once; the response is consumed), so credentials the issuer delivered are not dropped.
+                val lostButOpened = completion.flowId in lostFlowIds && blindIssuance.hasOpened(completion.flowId)
+                if (completion.flowId in terminatedFlowIds && !lostButOpened) {
                     Timber.w("Ignoring a repeated completion of the already ended flow ${completion.flowId}")
                     return@collect
                 }

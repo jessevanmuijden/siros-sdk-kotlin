@@ -298,6 +298,9 @@ internal class BlindIssuance(
         }
     }
 
+    /** Whether something was opened for [flowId] and is still retained (a buffered completion can still be filled from it). */
+    fun hasOpened(flowId: String): Boolean = flows[flowId]?.let { synchronized(it.opened) { it.opened.isNotEmpty() } } == true
+
     /** Whether a key is currently held for [flowId]. */
     fun holdsKey(flowId: String): Boolean = flows[flowId]?.key != null
 

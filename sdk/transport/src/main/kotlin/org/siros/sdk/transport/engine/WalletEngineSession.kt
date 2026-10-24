@@ -474,6 +474,7 @@ class WalletEngineSession(
                 }
                 MessageTypes.MATCH_REQUEST -> {
                     val msg = json.decodeFromString(MatchRequestMessage.serializer(), text)
+                        .also { it.connectionGeneration = generation }
                     matchRequestChannel.trySend(msg)
                 }
                 MessageTypes.PUSH -> {

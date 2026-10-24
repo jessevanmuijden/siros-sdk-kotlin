@@ -7182,6 +7182,20 @@ class SirosWalletTest {
         assertEquals("f2", (e.currentWalletState() as WalletState.FlowActive).flowId)
     }
 
+    @Test
+    fun flowLost_aMatchRequestQueuedOnTheOldConnectionIsNeitherAskedNorAnswered() = runTest(dispatcher) {
+        val (e, listener) = lostFlowSetup()
+        e.replaceSocket()
+        runCurrent()
+        // Stamped by the session with the connection that delivered it (0), consumed after the replacement (1).
+        e.match.emit(MatchRequestMessage(flowId = "f1", dcqlQuery = redirectQuery, clientMetadata = redirectMetadata))
+        runCurrent()
+        assertFalse(listener.cancelled)
+        assertTrue(listener.errors.isEmpty())
+        verify(exactly = 0) { e.engine.sendMatchResponse(any(), any(), any()) }
+        assertTrue(e.currentWalletState() is WalletState.Ready)
+    }
+
     private fun TestScope.lostFlowSetup(ignoreCancellation: Boolean = false): Pair<EngineCzk, WaitingSelectionListener> {
         val e = engineCzk(flows = listOf("f1", "f9"))
         val listener = WaitingSelectionListener(kotlinx.coroutines.CompletableDeferred(), ignoreCancellation)
@@ -11204,6 +11218,34 @@ class SirosWalletTest {
         assertFalse(s.isPending)
         assertEquals("issuance", s.flowType)
         assertEquals("offer_parsed", s.status)
+    }
+
+    @Test
+    fun flowLost_aSentIssuanceStartWhoseConnectionIsReplacedBeforeItsFirstProgressIsRetired() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(progressFlow = progressFlow, generations = generations)
+        every { engine.startIssuance(any(), any(), any(), any(), any(), any()) } just runs
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice"))
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        wallet.startIssuanceByOffer(startOffer)
+        assertTrue((stateFlow.value as WalletState.FlowActive).isPending)
+        // The socket is replaced before any progress arrived.
+        engineGeneration.incrementAndGet()
+        generations.value = engineGeneration.get()
+        advanceUntilIdle()
+        assertTrue("no stranded spinner", stateFlow.value is WalletState.Ready)
+        verify(exactly = 1) { listener.onFlowError(any(), SirosWallet.FLOW_LOST_MESSAGE, any()) }
+        assertEquals("a new issuance can start", false, getField(wallet, "issuanceInFlight"))
     }
 
     @Test
