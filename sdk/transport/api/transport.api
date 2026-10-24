@@ -1202,11 +1202,13 @@ public final class org/siros/sdk/transport/engine/MatchRequestMessage {
 	public static synthetic fun copy$default (Lorg/siros/sdk/transport/engine/MatchRequestMessage;Ljava/lang/String;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;Ljava/lang/String;Lkotlinx/serialization/json/JsonElement;ILjava/lang/Object;)Lorg/siros/sdk/transport/engine/MatchRequestMessage;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getClientMetadata ()Lkotlinx/serialization/json/JsonElement;
+	public final fun getConnectionGeneration ()I
 	public final fun getDcqlQuery ()Lkotlinx/serialization/json/JsonElement;
 	public final fun getFlowId ()Ljava/lang/String;
 	public final fun getTimestamp ()Ljava/lang/String;
 	public final fun getType ()Ljava/lang/String;
 	public fun hashCode ()I
+	public final fun setConnectionGeneration (I)V
 	public fun toString ()Ljava/lang/String;
 }
 

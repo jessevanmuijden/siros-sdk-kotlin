@@ -618,7 +618,11 @@ data class MatchRequestMessage(
      * a request that offered nothing cannot be answered.
      */
     @SerialName("client_metadata") val clientMetadata: JsonElement? = null,
-)
+) {
+    /** Which connection delivered this frame (see [WalletEngineSession.connectionGeneration]); stamped on receipt, never on the wire. */
+    @kotlinx.serialization.Transient
+    var connectionGeneration: Int = 0
+}
 
 @Serializable
 data class PushMessage(
