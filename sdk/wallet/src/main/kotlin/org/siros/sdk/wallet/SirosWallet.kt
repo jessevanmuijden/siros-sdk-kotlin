@@ -3469,10 +3469,14 @@ class SirosWallet private constructor(
         val config = metadata.credentialConfigurationsSupported.getValue(configId)
         // A configuration that advertises a seed (names only) must have its response encrypted; one whose public
         // metadata carries anything else under that member (a seed value, say) is malformed: not offered.
-        when (org.siros.sdk.credentials.SecretSeedDelivery.classifyAdvertisement(config.credentialMetadata?.secretSeed)) {
-            is org.siros.sdk.credentials.SecretSeedDelivery.Advertisement.Malformed -> return null
-            is org.siros.sdk.credentials.SecretSeedDelivery.Advertisement.Valid -> secretSeedAdvertised?.add(issuerUrl to configId)
-            org.siros.sdk.credentials.SecretSeedDelivery.Advertisement.None -> secretSeedAdvertised?.remove(issuerUrl to configId)
+        when (val selection = org.siros.sdk.credentials.AuxiliaryDataShapes.select(config)) {
+            org.siros.sdk.credentials.AuxiliarySelection.Malformed -> return null
+            is org.siros.sdk.credentials.AuxiliarySelection.Selected -> if (selection.advertisement.toWallet.isNotEmpty()) {
+                secretSeedAdvertised?.add(issuerUrl to configId)
+            } else {
+                secretSeedAdvertised?.remove(issuerUrl to configId)
+            }
+            org.siros.sdk.credentials.AuxiliarySelection.None -> secretSeedAdvertised?.remove(issuerUrl to configId)
         }
         val issuerDisplay = metadata.display?.firstOrNull()
         val issuerName = issuerDisplay?.name

@@ -4,6 +4,10 @@ package org.siros.sdk.wallet
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import org.siros.sdk.credentials.AuxiliaryDataShape
+import org.siros.sdk.credentials.AuxiliaryParse
+import org.siros.sdk.credentials.LegacyOrgSirosShape
+import org.siros.sdk.credentials.SecretDelivery
 import org.siros.sdk.credentials.SecretSeedCommitment
 import org.siros.sdk.credentials.SecretSeedDelivery
 import org.siros.sdk.transport.DeliveredResponseMetadata
@@ -101,6 +105,10 @@ internal object DeliveredCredentialMetadata {
         canStoreSecret: Boolean,
         /** The issuer metadata of the configuration advertised a seed (`namespaces`): the response must have been encrypted. */
         advertised: Boolean = false,
+        /** The adapter the issuer's advertisement selected (never sniffed from the response). */
+        shape: AuxiliaryDataShape = LegacyOrgSirosShape,
+        /** What the issuer advertised for the configuration (slots), when known: a shape may require the delivery to match it. */
+        advertisement: org.siros.sdk.credentials.AuxiliaryAdvertisement? = null,
     ): DeliveredMetadataVerdict {
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
@@ -114,7 +122,8 @@ internal object DeliveredCredentialMetadata {
         if (metadata.malformed) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         // The entries as received: one per member, member values verbatim.
         val all = JsonArray(metadata.members.map { (member, value) -> JsonObject(mapOf("type" to JsonPrimitive(member), "value" to value)) })
-        val seedMember = metadata.members[SecretSeedDelivery.MEMBER] ?: return when {
+        val members = JsonObject(metadata.members)
+        if (!shape.carriesSecret(members)) return when {
             advertised -> DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.SEED_UNAVAILABLE)
             metadata.members.isEmpty() -> DeliveredMetadataVerdict.None
             else -> DeliveredMetadataVerdict.Accept(all)
@@ -122,25 +131,34 @@ internal object DeliveredCredentialMetadata {
         if (response.deferredResponse) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.DEFERRED_SEED)
         // Plain JSON never carries a secret: only a response this wallet decrypted itself counts as encrypted.
         if (!response.credentialMetadataEncryptedResponse) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
-        val seeds = SecretSeedDelivery.parseDelivery(seedMember) ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
-        if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
-        if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
-        val hex = seeds[secretNamespace] ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NAMESPACE_ABSENT)
-        val seed = SecretSeedCommitment.seedFromHex(hex) ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
+        val deliveries = (shape.parseDeliveries(members) as? AuxiliaryParse.Parsed)?.deliveries
+            ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         try {
+            if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
+            if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
+            val toVerify = shape.deliveriesToVerify(deliveries, secretNamespace, advertisement)
+                ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NAMESPACE_ABSENT)
+            return verifyAll(shape, toVerify, credentials, all)
+        } finally {
+            deliveries.forEach { it.bytes.fill(0) }
+        }
+    }
+
+    private fun verifyAll(
+        shape: AuxiliaryDataShape,
+        toVerify: List<SecretDelivery>,
+        credentials: List<DeliveredCredential>,
+        all: JsonArray,
+    ): DeliveredMetadataVerdict {
+        for (delivery in toVerify) {
             for (c in credentials) {
-                val ssc = when {
-                    c.format.equals("mso_mdoc", ignoreCase = true) -> SecretSeedCommitment.sscOfMdoc(c.credential)
-                    c.format.contains("sd-jwt", ignoreCase = true) -> SecretSeedCommitment.sscOfSdJwt(c.credential)
-                    else -> null
-                } ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_COMMITMENT)
-                val ok = SecretSeedCommitment.opens(seed, ssc)
-                ssc.fill(0)
+                val commitment = shape.commitmentOf(c.format, c.credential, delivery)
+                    ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_COMMITMENT)
+                val ok = SecretSeedCommitment.opens(delivery.bytes, commitment)
+                commitment.fill(0)
                 if (!ok) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MISMATCH)
             }
-            return DeliveredMetadataVerdict.Accept(all)
-        } finally {
-            seed.fill(0)
         }
+        return DeliveredMetadataVerdict.Accept(all)
     }
 }

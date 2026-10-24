@@ -23,7 +23,7 @@ internal object HolderCommitments {
     const val PSC = "psc"
 
     /** The proof JWT claim carrying the `psc`. */
-    const val PSC_CLAIM = "org.siros.psc"
+    const val PSC_CLAIM = org.siros.sdk.credentials.LegacyOrgSirosShape.PSC_CLAIM
 
     private const val PSC_BYTES = 32
 
@@ -62,7 +62,10 @@ internal object HolderCommitments {
                     errorCode = "holder_commitment_unavailable",
                 )
             }
-            return mapOf(PSC_CLAIM to java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(psc))
+            val placed = org.siros.sdk.credentials.LegacyOrgSirosShape.placeInProof(
+                listOf(org.siros.sdk.credentials.HolderCommitment(listOf(PSC), org.siros.sdk.credentials.LegacyOrgSirosShape.ALG, true, psc)),
+            )
+            return placed.mapValues { (it.value as kotlinx.serialization.json.JsonPrimitive).content }
         } finally {
             psc.fill(0)
         }
