@@ -751,6 +751,8 @@ class JweKeystore(
         extraJsonClaims: Map<String, kotlinx.serialization.json.JsonElement>,
     ): String = mutex.withLock {
         requireUnlocked()
+        // Converted (and refused) BEFORE any key is registered: a rejected request must not leave a key behind.
+        val converted = ProofClaims.toJava(extraJsonClaims)
         // `freshKey` means batch issuance: each credential in the batch must
         // be bound to its own key, or every copy shares one holder key and
         // presenting them is linkable. Honouring it also keeps the recorded
@@ -803,7 +805,7 @@ class JweKeystore(
             .issueTime(Date())
             .claim("nonce", nonce)
         did?.let { claimsBuilder.issuer(it) }
-        ProofClaims.toJava(extraJsonClaims).forEach { (k, v) -> claimsBuilder.claim(k, v) }
+        converted.forEach { (k, v) -> claimsBuilder.claim(k, v) }
         val claims = claimsBuilder.build()
 
         val headerBuilder = JWSHeader.Builder(JWSAlgorithm.ES256)

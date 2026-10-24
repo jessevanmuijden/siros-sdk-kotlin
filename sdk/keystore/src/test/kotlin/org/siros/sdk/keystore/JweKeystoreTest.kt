@@ -176,6 +176,30 @@ class JweKeystoreTest {
     }
 
     @Test
+    fun aRejectedJsonClaimRegistersNoKey_whetherTheKeystoreIsEmptyOrAFreshKeyIsAsked() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        val bad = mapOf("x" to kotlinx.serialization.json.JsonNull)
+        repeat(3) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", true, null, bad)
+                org.junit.Assert.fail("signed a claim it cannot carry")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+        assertEquals("rejected requests left no key behind (empty keystore, fresh key)", 0, keystore.listKeys().size)
+        keystore.generateKey()
+        repeat(2) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", true, null, bad)
+                org.junit.Assert.fail("signed a claim it cannot carry")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+        assertEquals(1, keystore.listKeys().size)
+    }
+
+    @Test
     fun generateProofWithoutExtraClaimsCarriesNoCommitmentClaim() = runTest {
         val keystore = JweKeystore()
         keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
