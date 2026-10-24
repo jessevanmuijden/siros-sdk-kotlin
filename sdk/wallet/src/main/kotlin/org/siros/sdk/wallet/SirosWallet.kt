@@ -1898,6 +1898,7 @@ class SirosWallet private constructor(
         // The response keys and everything opened with them are session material: gone with the session, synchronously,
         // not at the next connection (a wallet that stays logged out never makes one).
         blindIssuance.clear()
+        dropAllHolderCommitments()
         keystore.lock()
         sessionStore.clear()  // clears active account's session only
         accountRegistry.activeAccountId = null
@@ -2163,6 +2164,7 @@ class SirosWallet private constructor(
         wmpPeer = null
         credentialNotifier = null
         blindIssuance.clear()
+        dropAllHolderCommitments()
         keystore.lock()
         apiClient = null
         supervisorJob.cancel()
@@ -4879,6 +4881,7 @@ class SirosWallet private constructor(
                 // Whatever this flow still sends (typically its cancellation error)
                 // must not act on a retry that starts before the socket is replaced.
                 abandonedFlowIds.add(current.flowId)
+                dropHolderCommitments(current.flowId)
                 stopZkSigning(current.flowId, refuse = true)
                 try {
                     engineSession?.cancelFlow(current.flowId)
@@ -5546,6 +5549,11 @@ class SirosWallet private constructor(
 
     private fun dropHolderCommitments(flowId: String) {
         holderCommitmentsByFlow.remove(flowId)?.forEach { it.commitment.fill(0) }
+    }
+
+    /** Session end (logout, destroy): nothing recorded for any flow outlives it. */
+    private fun dropAllHolderCommitments() {
+        holderCommitmentsByFlow.keys.toList().forEach { dropHolderCommitments(it) }
     }
 
     /**

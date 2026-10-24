@@ -165,13 +165,16 @@ internal object DeliveredCredentialMetadata {
     private fun holdsHolderCommitments(credentials: List<DeliveredCredential>, sent: List<org.siros.sdk.credentials.HolderCommitment>): Boolean {
         for (h in sent) {
             for (c in credentials) {
-                val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimAt(c.format, c.credential, h.path)
-                if (claim == null) {
-                    if (h.required) return false else continue
+                when (val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, h.path)) {
+                    // Only a genuinely absent OPTIONAL claim is skipped; malformed or ambiguous is refused either way.
+                    org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Absent -> if (h.required) return false
+                    org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid -> return false
+                    is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Value -> {
+                        val same = java.security.MessageDigest.isEqual(claim.bytes, h.commitment)
+                        claim.bytes.fill(0)
+                        if (!same) return false
+                    }
                 }
-                val same = java.security.MessageDigest.isEqual(claim, h.commitment)
-                claim.fill(0)
-                if (!same) return false
             }
         }
         return true

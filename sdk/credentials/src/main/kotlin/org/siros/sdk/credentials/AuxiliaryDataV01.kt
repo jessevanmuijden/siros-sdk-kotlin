@@ -64,7 +64,7 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             val p = path(o["path"]) ?: return null
             val required = o["required"]?.let { r ->
                 if (!allowRequired) return null
-                (r as? JsonPrimitive)?.booleanOrNull ?: return null
+                (r as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: return null
             } ?: false
             // A value in public metadata is not an advertisement.
             if ("opening" in o || "commitment" in o) return null
@@ -75,6 +75,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     }
 
     override fun advertisement(config: CredentialConfiguration): AuxiliarySelection {
+        // `auxiliary_data` belongs to a RESPONSE only: in public issuer metadata it is forbidden, whatever else the configuration says.
+        if (config.credentialMetadata?.auxiliaryData != null) return AuxiliarySelection.Malformed
         val raw = config.auxiliaryDataSupported ?: return AuxiliarySelection.None
         val obj = raw as? JsonObject ?: return AuxiliarySelection.Malformed
         if (!obj.keys.all { it == "to_wallet" || it == "to_issuer" }) return AuxiliarySelection.Malformed
@@ -125,42 +127,62 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = claimAt(format, credential, delivery.path)
 
     /** The 32-byte commitment claim at [path] of an issued credential (see [commitmentOf]); null when absent, ambiguous or malformed. */
-    fun claimAt(format: String, credential: String, path: List<String>): ByteArray? = try {
+    fun claimAt(format: String, credential: String, path: List<String>): ByteArray? = (claimStatus(format, credential, path) as? Claim.Value)?.bytes
+
+    /** What [claimStatus] found at a path. */
+    sealed interface Claim {
+        /** There is no such claim in the credential. */
+        object Absent : Claim
+
+        /** There is something there that is not exactly one well-formed 32-byte commitment (wrong type or length, duplicated, ambiguous), or the credential cannot be read. */
+        object Invalid : Claim
+
+        /** The commitment; the caller zeroes [bytes]. */
+        class Value(val bytes: ByteArray) : Claim
+    }
+
+    /** [claimAt] that tells an absent claim from a present but malformed or ambiguous one. */
+    fun claimStatus(format: String, credential: String, path: List<String>): Claim = try {
         when {
             format.equals("mso_mdoc", ignoreCase = true) -> mdocClaim(credential, path)
             format.contains("sd-jwt", ignoreCase = true) -> sdJwtClaim(credential, path)
-            else -> null
+            else -> Claim.Invalid
         }
     } catch (e: Exception) {
-        null
+        Claim.Invalid
     }
 
     /** An mdoc claim at `[namespace, element]`: a 32-byte bstr, present exactly once. */
-    private fun mdocClaim(rawBase64Url: String, path: List<String>): ByteArray? {
-        if (path.size != 2) return null
+    private fun mdocClaim(rawBase64Url: String, path: List<String>): Claim {
+        if (path.size != 2) return Claim.Invalid
         val doc = MdocCbor.parseStoredCredential(Base64.getUrlDecoder().decode(rawBase64Url))
         val matches = doc.issuerSigned.nameSpaces[path[0]].orEmpty().filter { it.item.elementIdentifier == path[1] }
-        val v = matches.singleOrNull()?.item?.elementValue ?: return null
-        if (v.type != CBORType.ByteString) return null
-        return v.GetByteString().takeIf { it.size == COMMITMENT_BYTES }
+        if (matches.isEmpty()) return Claim.Absent
+        val v = matches.singleOrNull()?.item?.elementValue ?: return Claim.Invalid
+        if (v.type != CBORType.ByteString) return Claim.Invalid
+        return v.GetByteString().takeIf { it.size == COMMITMENT_BYTES }?.let { Claim.Value(it) } ?: Claim.Invalid
     }
 
     /** A top-level SD-JWT claim (one path segment): in the signed payload, or one disclosure bound by the payload's `_sd`; base64url of 32 bytes. */
-    private fun sdJwtClaim(credential: String, path: List<String>): ByteArray? {
-        if (path.size != 1) return null
+    private fun sdJwtClaim(credential: String, path: List<String>): Claim {
+        if (path.size != 1) return Claim.Invalid
         val name = path[0]
         val parts = credential.split('~')
-        val payload = parts[0].split('.').getOrNull(1) ?: return null
-        val obj = json.parseToJsonElement(String(Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)) as? JsonObject ?: return null
+        val payload = parts[0].split('.').getOrNull(1) ?: return Claim.Invalid
+        val obj = json.parseToJsonElement(String(Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)) as? JsonObject ?: return Claim.Invalid
         val inClear = obj[name]
+        val disclosed = disclosureValues(parts, obj, name)
         if (inClear != null) {
             // Present in the clear AND selectively disclosable is ambiguous: nothing is read.
-            if (disclosureValues(parts, obj, name).isNotEmpty()) return null
-            return decodeB64((inClear as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null, COMMITMENT_BYTES)
+            if (disclosed.isNotEmpty()) return Claim.Invalid
+            return decodeClaim(inClear)
         }
-        val found = disclosureValues(parts, obj, name).singleOrNull() ?: return null
-        return decodeB64((found as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null, COMMITMENT_BYTES)
+        if (disclosed.isEmpty()) return Claim.Absent
+        return decodeClaim(disclosed.singleOrNull() ?: return Claim.Invalid)
     }
+
+    private fun decodeClaim(v: JsonElement): Claim =
+        (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { decodeB64(it, COMMITMENT_BYTES) }?.let { Claim.Value(it) } ?: Claim.Invalid
 
     private fun disclosureValues(parts: List<String>, payload: JsonObject, name: String): List<JsonElement> {
         payload["_sd_alg"]?.let { if ((it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content != "sha-256") return emptyList() }
@@ -188,7 +210,7 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     fun slotsToAnswer(entries: List<JsonObject>): List<AuxiliaryAdvertisement.Slot> {
         val out = ArrayList<AuxiliaryAdvertisement.Slot>()
         for (o in entries.take(MAX_ENTRIES + 1)) {
-            val required = (o["required"] as? JsonPrimitive)?.booleanOrNull == true
+            val required = (o["required"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull == true
             val supported = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content == TYPE &&
                 (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content == ALG
             val p = if (supported) path(o["path"]) else null

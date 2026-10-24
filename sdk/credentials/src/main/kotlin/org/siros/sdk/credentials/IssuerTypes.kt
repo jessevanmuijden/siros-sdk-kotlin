@@ -142,6 +142,11 @@ data class CredentialDisplayMetadata(
      * must not be there can be told from a list of names.
      */
     @SerialName("org.siros.secret_seed") val secretSeed: JsonElement? = null,
+    /**
+     * The Auxiliary Data v0.1 response member as it appears in PUBLIC metadata, where it is forbidden: kept raw only so its
+     * presence can be told ([AuxiliaryDataV01.advertisement] classifies the configuration as malformed). Appended: binary API.
+     */
+    @SerialName("auxiliary_data") val auxiliaryData: JsonElement? = null,
 )
 
 @Serializable
