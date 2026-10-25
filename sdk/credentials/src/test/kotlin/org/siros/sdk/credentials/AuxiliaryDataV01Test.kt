@@ -62,6 +62,9 @@ class AuxiliaryDataV01Test {
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"required":true}]}""",
             """{"to_wallet":[],"to_issuer":[]}""",
             "{}",
+            """{"to_wallet":[{"type":"hash_commitment","alg":"sha-512","path":["y"],"opening":"AAAA"}]}""",
+            """{"to_issuer":[{"type":"hash_commitment","alg":"sha-512","path":["y"],"commitment":"AAAA"}]}""",
+            """{"to_wallet":[{"type":"hash_commitment","alg":"sha-512","path":["y"],"commitment":"AAAA"}]}""",
             """{"to_wallet":[{"path":["ssc"]}]}""",
             """{"to_wallet":[{"type":5,"alg":"sha-256","path":["ssc"]}]}""",
             """{"to_wallet":[{"type":"hash_commitment","path":["ssc"]}]}""",
@@ -240,10 +243,10 @@ class AuxiliaryDataV01Test {
         val disclosure = b64("""["salt","psc","$commitmentB64"]""")
         for (alg in listOf("sha-512", "SHA-256", "")) {
             val jwt = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"$alg","_sd":["x"]}""") + ".sig~$disclosure~"
-            assertEquals(alg, AuxiliaryDataV01.Claim.Invalid, AuxiliaryDataV01.claimStatus("dc+sd-jwt", jwt, listOf("psc")))
+            assertTrue(alg, AuxiliaryDataV01.claimStatus("dc+sd-jwt", jwt, listOf("psc")) is AuxiliaryDataV01.Claim.Invalid)
         }
         val nonString = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":5,"_sd":[]}""") + ".sig~"
-        assertEquals(AuxiliaryDataV01.Claim.Invalid, AuxiliaryDataV01.claimStatus("dc+sd-jwt", nonString, listOf("psc")))
+        assertTrue(AuxiliaryDataV01.claimStatus("dc+sd-jwt", nonString, listOf("psc")) is AuxiliaryDataV01.Claim.Invalid)
         // No _sd_alg at all (the SHA-256 default) and nothing disclosed: genuinely absent.
         val none = b64("""{"alg":"none"}""") + "." + b64("""{"_sd":[]}""") + ".sig~"
         assertEquals(AuxiliaryDataV01.Claim.Absent, AuxiliaryDataV01.claimStatus("dc+sd-jwt", none, listOf("psc")))

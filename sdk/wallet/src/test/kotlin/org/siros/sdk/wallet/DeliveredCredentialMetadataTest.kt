@@ -322,9 +322,14 @@ class DeliveredCredentialMetadataTest {
         val sentPsc = sent(path = listOf("psc"), required = false, value = ByteArray(32) { 5 })
         assertTrue(checkV01(credentials = listOf(v01CredWithClaim("psc", good)), holderCommitments = listOf(sentPsc)) is DeliveredMetadataVerdict.Accept)
         // Present but not exactly the wallet's value, or not a 32-byte value at all: refused although optional.
-        for (bad in listOf(java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 6 }), "AAAA", "not*base64")) {
+        // A value that is readable but not the wallet's: the commitment is missing. One that is not readable at all: unreadable.
+        assertRefused(
+            DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING,
+            checkV01(credentials = listOf(v01CredWithClaim("psc", java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 6 }))), holderCommitments = listOf(sentPsc)),
+        )
+        for (bad in listOf("AAAA", "not*base64")) {
             assertRefused(
-                DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING,
+                DeliveredMetadataRefusal.COMMITMENT_UNREADABLE,
                 checkV01(credentials = listOf(v01CredWithClaim("psc", bad)), holderCommitments = listOf(sentPsc)),
             )
         }
@@ -340,7 +345,7 @@ class DeliveredCredentialMetadataTest {
         val jwt = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"sha-512","_sd":["digest-under-sha512"]}""") + ".sig~$disclosure~"
         val sentPsc = sent(path = listOf("psc"), required = false, value = ByteArray(32) { 5 })
         assertRefused(
-            DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING,
+            DeliveredMetadataRefusal.COMMITMENT_UNREADABLE,
             checkV01(credentials = listOf(DeliveredCredential("dc+sd-jwt", jwt, "n1")), holderCommitments = listOf(sentPsc)),
         )
     }
@@ -418,6 +423,40 @@ class DeliveredCredentialMetadataTest {
         val both = Json.parseToJsonElement("""{"${SecretSeedDelivery.MEMBER}":{"$ns":"${N.seedHex}"},"auxiliary_data":[],"claims":[1]}""").jsonObject
         assertEquals(setOf("display", "claims"), SecretSeedDelivery.mergeDisplay(issuerPublic, both).keys)
         assertEquals(setOf("claims"), SecretSeedDelivery.stripped(both).keys)
+    }
+
+    // ---- read-time check of the commitment claim's REPRESENTATION (nothing is read from any `encoding` member: there is none on the wire) ----
+
+    private fun goodB64() = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(N.goodSsc)
+
+    private fun sscSent(path: List<String>) = listOf(org.siros.sdk.credentials.HolderCommitment(path, "sha-256", true, N.goodSsc.copyOf()))
+
+    private fun verdictFor(format: String, credential: String, path: List<String>) =
+        checkV01(credentials = listOf(DeliveredCredential(format, credential, "n1")), holderCommitments = sscSent(path), response = response(members = mapOf("display" to JsonArray(emptyList()))), advertised = false)
+
+    private fun assertUnreadable(v: DeliveredMetadataVerdict, vararg mustContain: String) {
+        assertRefused(DeliveredMetadataRefusal.COMMITMENT_UNREADABLE, v)
+        val detail = (v as DeliveredMetadataVerdict.Refuse).detail!!
+        mustContain.forEach { assertTrue("$detail should mention '$it'", detail.contains(it)) }
+        assertFalse("the value is never in the detail", detail.contains(goodB64()) || detail.contains(N.hex(N.goodSsc)))
+    }
+
+    @Test
+    fun theCommitmentClaimMustBeInTheRepresentationItsFormatDefines_otherwiseTheCredentialIsRefusedWithAShortTypedDetail() {
+        val sdPath = listOf("ssc")
+        val mdocPath = listOf(N.DOCTYPE, "ssc")
+        // SD-JWT: unpadded base64url is accepted ...
+        assertTrue(verdictFor("dc+sd-jwt", N.sdJwt(sscValues = listOf(goodB64())), sdPath) is DeliveredMetadataVerdict.Accept)
+        // ... padded base64, hex and the standard alphabet are refused, naming the path and the shape (never the value).
+        val padded = java.util.Base64.getEncoder().encodeToString(N.goodSsc)
+        assertUnreadable(verdictFor("dc+sd-jwt", N.sdJwt(sscValues = listOf(padded)), sdPath), "[ssc]", "padding")
+        assertUnreadable(verdictFor("dc+sd-jwt", N.sdJwt(sscValues = listOf(N.hex(N.goodSsc))), sdPath), "[ssc]", "hex")
+        val std = java.util.Base64.getEncoder().withoutPadding().encodeToString(ByteArray(32) { 0xFB.toByte() })
+        assertUnreadable(verdictFor("dc+sd-jwt", N.sdJwt(sscValues = listOf(std)), sdPath), "standard base64")
+        // mdoc: a byte string of 32 bytes is accepted, a text string (whatever it holds) and a short byte string are refused.
+        assertTrue(verdictFor("mso_mdoc", N.mdoc(listOf(N.bstr(N.goodSsc))), mdocPath) is DeliveredMetadataVerdict.Accept)
+        assertUnreadable(verdictFor("mso_mdoc", N.mdoc(listOf(N.text(goodB64()))), mdocPath), "text string", "byte string is required")
+        assertUnreadable(verdictFor("mso_mdoc", N.mdoc(listOf(N.bstr(ByteArray(16)))), mdocPath), "16 bytes")
     }
 
     private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(

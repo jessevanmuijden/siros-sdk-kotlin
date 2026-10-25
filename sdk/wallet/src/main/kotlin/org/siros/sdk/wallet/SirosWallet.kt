@@ -3553,6 +3553,9 @@ class SirosWallet private constructor(
             // a missing card image cannot block issuance - a place that
             // swallows exceptions cannot also be where a refusal is decided.
             val resolvedForStart = resolveIssuerMetadataForStart(offer.credentialIssuerIdentifier, offer.credentialConfigurationId)
+            // A cancelled attempt's late lookup must neither overwrite nor remove the adapter selection of a retry for the same
+            // issuer and configuration: stop BEFORE the shared record is touched.
+            advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_CHECKING_ENTITLEMENT)
             // OUTSIDE the best-effort lookup above: a malformed current advertisement is a refusal, never swallowed.
             resolvedForStart?.metadata?.credentialConfigurationsSupported?.get(offer.credentialConfigurationId)?.let { cfg ->
                 if (!recordAuxiliarySelection(offer.credentialIssuerIdentifier, offer.credentialConfigurationId, cfg)) {
@@ -5876,6 +5879,8 @@ class SirosWallet private constructor(
         refusal: DeliveredMetadataRefusal,
         /** The WMP transport reports through its peer; null uses the engine [credentialNotifier]. */
         sendFailure: (suspend (flowId: String, notificationId: String) -> Unit)? = null,
+        /** Where and what was wrong (a claim path and a shape, never a value), when the refusal has one. */
+        detail: String? = null,
     ) {
         val ids = notificationIds.distinct()
         Timber.e("Flow $flowId refused: delivered credential metadata rejected (${refusal.name})")
@@ -5894,7 +5899,7 @@ class SirosWallet private constructor(
             }
         }
         val reported = canReport && ids.isNotEmpty()
-        val reason = "The issuer's delivered credential data was rejected: ${refusal.text}" +
+        val reason = "The issuer's delivered credential data was rejected: ${refusal.text}" + (detail?.let { " ($it)" } ?: "") +
             if (reported) "" else " (the issuer could not be notified: no notification channel)"
         // The superseded batch of a renewal stays: nothing replaced it.
         pendingRenewalSourceBatchId = null
@@ -8936,7 +8941,7 @@ class SirosWallet private constructor(
                     DeliveredMetadataVerdict.None -> Unit
                     is DeliveredMetadataVerdict.Accept -> if (canStoreDelivered) deliveredEntries = deliveredVerdict.entries
                     is DeliveredMetadataVerdict.Refuse -> {
-                        rejectDeliveredMetadata(msg.flowId, msg.credentials.orEmpty().mapNotNull { it.notificationId }, deliveredVerdict.reason)
+                        rejectDeliveredMetadata(msg.flowId, msg.credentials.orEmpty().mapNotNull { it.notificationId }, deliveredVerdict.reason, detail = deliveredVerdict.detail)
                         return@collect
                     }
                 }
