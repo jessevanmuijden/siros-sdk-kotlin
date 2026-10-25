@@ -5227,6 +5227,49 @@ class SirosWalletTest {
     }
 
     @Test
+    fun aRawOfferWhoseCurrentAdvertisementIsMalformed_isRefusedAfterTheEpochCheck_andLeavesNoStaleSelection() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        val metadata = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", buildJsonObject {}) // malformed NOW
+                }
+            }
+        }
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } returns buildJsonObject { putJsonObject("context") { put("trust_metadata", metadata) } }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        // An earlier, now stale, valid selection for the same issuer/configuration.
+        selections[issuer to "pid"] = org.siros.sdk.credentials.AuxiliarySelection.Selected(
+            org.siros.sdk.credentials.AuxiliaryDataV01,
+            org.siros.sdk.credentials.AuxiliaryAdvertisement(listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("ssc"), "sha-256", false, "base64url")), emptyList()),
+        )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        try {
+            wallet.startIssuance("""{"credential_issuer":"$issuer","credential_configuration_ids":["pid"]}""")
+            org.junit.Assert.fail("issuance started although the advertisement is malformed")
+        } catch (e: WalletException) {
+            assertEquals("auxiliary_data_advertisement_malformed", e.errorCode)
+        }
+        advanceUntilIdle()
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertEquals("the stale selection was cleared", null, selections[issuer to "pid"])
+        assertEquals(false, getField(wallet, "issuanceInFlight"))
+    }
+
+    @Test
     fun generateProof_auxiliaryData_derivesFromTheOffersVctAndIssuerWhenTheRequestOmitsThem_andRecordsThatIssuer() = runTest(dispatcher) {
         val asked = mutableListOf<Pair<String, String>>()
         val keystore = pscKeystore(asked)

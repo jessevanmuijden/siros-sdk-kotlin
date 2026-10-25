@@ -3765,7 +3765,13 @@ class SirosWallet private constructor(
             // cancelled attempt must not write into a newer attempt's fields.
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_STARTING_FLOW)
             // Only now, with the epoch confirmed current, is the adapter selection published.
-            resolvedDisplay?.record?.invoke()
+            if (resolvedDisplay != null && !resolvedDisplay.record()) {
+                // The advertisement is malformed NOW: any earlier selection was cleared above, and the issuance is refused.
+                throw WalletException(
+                    "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                    errorCode = "auxiliary_data_advertisement_malformed",
+                )
+            }
             if (displayOffer != null) {
                 activeOffer = displayOffer
                 activeVctm = displayVctm
@@ -3813,7 +3819,8 @@ class SirosWallet private constructor(
      * issuer, issuer doesn't support the offered configuration) rather than
      * throwing - a missing display must never block issuance itself.
      */
-    private class ResolvedOfferForDisplay(val offer: CredentialOffer, val record: () -> Unit)
+    /** [offer] is null when the current advertisement is MALFORMED (not a lookup failure); [record] publishes (or, malformed, clears) the selection and says whether it is usable. */
+    private class ResolvedOfferForDisplay(val offer: CredentialOffer?, val record: () -> Boolean)
 
     private suspend fun resolveOfferForDisplay(offerUri: String): ResolvedOfferForDisplay? {
         return try {
@@ -3824,8 +3831,12 @@ class SirosWallet private constructor(
             val metadata = getIssuerMetadata(issuerUrl)
             // The adapter selection stays LOCAL here: the caller records it only after its own epoch check, so a lookup that completes
             // after a cancel and a retry cannot overwrite or remove the retry's selection.
+            val config = metadata.credentialConfigurationsSupported[configId] ?: return null
+            if (org.siros.sdk.credentials.AuxiliaryDataShapes.select(config) is org.siros.sdk.credentials.AuxiliarySelection.Malformed) {
+                // Kept apart from "no display metadata": issuance must be refused (after the caller's epoch check), not started.
+                return ResolvedOfferForDisplay(null) { recordAuxiliarySelection(issuerUrl, configId, config) }
+            }
             val offer = buildCredentialOfferFromMetadata(issuerUrl, configId, metadata, record = false) ?: return null
-            val config = metadata.credentialConfigurationsSupported.getValue(configId)
             ResolvedOfferForDisplay(offer) { recordAuxiliarySelection(issuerUrl, configId, config) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e

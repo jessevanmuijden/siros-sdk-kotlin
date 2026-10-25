@@ -254,8 +254,10 @@ class AuxiliaryDataV01Test {
 
     @Test
     fun theAdvertisedEncodingIsKeptPerSlot_forBothFormats_andAnUnreadableOneMeansTheConfigurationIsNotOffered() {
-        fun slot(enc: String?) = """{"type":"hash_commitment","alg":"sha-256","path":["ssc"]${enc?.let { ""","encoding":$it""" } ?: ""}}"""
         for (format in listOf("dc+sd-jwt", "mso_mdoc")) {
+            // The path the receipt reader handles in this format.
+            val path = if (format == "mso_mdoc") """["ns","ssc"]""" else """["ssc"]"""
+            fun slot(enc: String?) = """{"type":"hash_commitment","alg":"sha-256","path":$path${enc?.let { ""","encoding":$it""" } ?: ""}}"""
             for (enc in listOf("base64url", "base64", "hex")) {
                 val sel = AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot("\"$enc\"")}]}""", format = format)) as AuxiliarySelection.Selected
                 assertEquals("$format $enc", enc, sel.advertisement.toWallet.single().encoding)
@@ -270,10 +272,11 @@ class AuxiliaryDataV01Test {
             }
         }
         // An encoding that makes no sense for the format (a commitment this wallet cannot read there at all).
-        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot("\"hex\"")}]}""", format = "jwt_vc_json")) is AuxiliarySelection.Malformed)
+        fun sdSlot(enc: String) = """{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"$enc"}"""
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[${sdSlot("hex")}]}""", format = "jwt_vc_json")) is AuxiliarySelection.Malformed)
         // On the to_issuer side too, and an unknown encoding on an UNRECOGNISED entry is just an ignored extension.
-        assertTrue(AuxiliaryDataShapes.select(config("""{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"encoding":"rot13"}]}""")) is AuxiliarySelection.Malformed)
-        val ext = AuxiliaryDataShapes.select(config("""{"to_wallet":[{"type":"future_kind","alg":"sha-256","path":["x"],"encoding":"rot13"},${slot("\"hex\"")}]}"""))
+        // (An OPTIONAL to_issuer entry with an unknown encoding is skipped, spec 4.1: see the dedicated test.)
+        val ext = AuxiliaryDataShapes.select(config("""{"to_wallet":[{"type":"future_kind","alg":"sha-256","path":["x"],"encoding":"rot13"},${sdSlot("hex")}]}"""))
         assertTrue(ext is AuxiliarySelection.Selected)
     }
 
@@ -294,5 +297,46 @@ class AuxiliaryDataV01Test {
         val hc = listOf(HolderCommitment(listOf("psc"), "sha-256", true, ByteArray(32) { 1 }, "hex"))
         val entry = (AuxiliaryDataV01.placeInProof(hc).getValue("auxiliary_data") as JsonArray).single().jsonObject
         assertEquals(setOf("type", "alg", "path", "commitment"), entry.keys)
+    }
+
+    @Test
+    fun anOptionalToIssuerEntryTheWalletCannotHonourIsSkipped_everythingItMustReadOrSendMakesTheConfigurationUnusable() {
+        fun toIssuer(extra: String, required: Boolean) = """{"type":"hash_commitment","alg":"sha-256","path":["psc"],"encoding":"base64url"$extra${if (required) ""","required":true""" else ""}}"""
+        val good = """{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}"""
+        // Optional + unknown encoding string: omitted; the supported entries still select.
+        val optionalBad = """{"type":"hash_commitment","alg":"sha-256","path":["other"],"encoding":"rot13"}"""
+        val sel = AuxiliaryDataShapes.select(config("""{"to_wallet":[$good],"to_issuer":[$optionalBad,${toIssuer("", false)}]}""")) as AuxiliarySelection.Selected
+        assertEquals(listOf(listOf("psc")), sel.advertisement.toIssuer.map { it.path })
+        // Alone, it leaves nothing recognised but the shape is still selected.
+        val alone = AuxiliaryDataShapes.select(config("""{"to_issuer":[$optionalBad]}""")) as AuxiliarySelection.Selected
+        assertTrue(alone.advertisement.toIssuer.isEmpty())
+        // REQUIRED, or in to_wallet: unusable.
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["other"],"encoding":"rot13","required":true}]}""")) is AuxiliarySelection.Malformed)
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["other"],"encoding":"rot13"}]}""")) is AuxiliarySelection.Malformed)
+        // A non-string encoding is malformed even when optional.
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["other"],"encoding":5}]}""")) is AuxiliarySelection.Malformed)
+    }
+
+    @Test
+    fun aRecognisedSlotWhosePathTheReceiptReaderCannotHandleIsRefusedAtSelection() {
+        fun slot(path: String, enc: String? = "base64url") = """{"type":"hash_commitment","alg":"sha-256","path":$path${enc?.let { ""","encoding":"$it"""" } ?: ""}}"""
+        // SD-JWT reads a top-level claim only; mdoc exactly [namespace, element].
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot("""["person","ssc"]""")}]}""")) is AuxiliarySelection.Malformed)
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot("""["ssc"]""")}]}""")) is AuxiliarySelection.Selected)
+        for (path in listOf("""["ssc"]""", """["a","b","c"]""")) {
+            assertTrue(path, AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot(path, null)}]}""", format = "mso_mdoc")) is AuxiliarySelection.Malformed)
+        }
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot("""["ns","ssc"]""", null)}]}""", format = "mso_mdoc")) is AuxiliarySelection.Selected)
+        // An optional to_issuer entry at an unreadable path is skipped, not fatal.
+        val sel = AuxiliaryDataShapes.select(config("""{"to_wallet":[${slot("""["ssc"]""")}],"to_issuer":[${slot("""["person","psc"]""")}]}""")) as AuxiliarySelection.Selected
+        assertTrue(sel.advertisement.toIssuer.isEmpty())
+    }
+
+    @Test
+    fun aRecognisedResponseEntryCarryingEncodingOrCommitmentIsMalformed_beforeTheOpeningIsDecoded() {
+        for (member in listOf(""","encoding":"hex"""", ""","commitment":"AAAA"""")) {
+            val md = response("""{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$openingB64"$member}""")
+            assertTrue(member, AuxiliaryDataV01.parseDeliveries(md) is AuxiliaryParse.Malformed)
+        }
     }
 }

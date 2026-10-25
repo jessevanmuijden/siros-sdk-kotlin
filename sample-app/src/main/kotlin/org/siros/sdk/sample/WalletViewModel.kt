@@ -1122,6 +1122,22 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 openVerifierRedirect(redirectUri)
             }
 
+            override fun onAuxiliaryDataConflict(flowId: String, error: org.siros.sdk.wallet.AuxiliaryDataConflictException) {
+                showNonRetryableFlowError(flowId, activity.getString(error.userMessageRes), error.errorCode)
+            }
+
+            override fun onAuxiliaryDataRefused(flowId: String, error: org.siros.sdk.wallet.AuxiliaryDataRefusedException) {
+                showNonRetryableFlowError(flowId, activity.getString(error.userMessageRes), "${error.errorCode}:${error.reason.code}")
+            }
+
+            /** A refusal the same request would meet again: the SDK's localised sentence and NO Retry. Only the fixed code is logged. */
+            private fun showNonRetryableFlowError(flowId: String, message: String, code: String?) {
+                Log.e(TAG, "Flow $flowId refused by the issuer (non-retryable): $code")
+                if (pendingAuthFlowId == flowId) pendingAuthFlowId = null
+                receivedCredentialCount = 0
+                _flowErrorDialog.value = FlowErrorInfo(message, canRetry = false)
+            }
+
             override fun onCredentialReceived(credential: StoredCredential) {
                 receivedCredentialCount++
             }
