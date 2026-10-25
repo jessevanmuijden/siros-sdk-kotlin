@@ -18,11 +18,28 @@ internal object SvgActiveContentGuard {
         "script", "foreignobject", "use", "iframe", "object", "embed", "a",
         "image", "audio", "video", "animate", "set", "animatetransform", "animatemotion",
         "animatecolor", "handler", "listener", "feimage", "cursor", "font-face-uri",
+        // Reference-expansion constructs: a clipPath/mask/pattern/filter applied to
+        // many elements made AndroidSVG run for over a minute (measured), so they
+        // are refused rather than budgeted. Same for symbol/marker/textPath/tref.
+        "clippath", "mask", "pattern", "filter", "marker", "symbol", "textpath", "tref",
+        "fegaussianblur", "feoffset", "feblend", "fecolormatrix", "fecomposite", "feflood", "femerge",
+        "feturbulence", "fedisplacementmap", "fediffuselighting", "fespecularlighting", "fetile",
+        "femorphology", "feconvolvematrix", "fecomponenttransfer",
     )
 
+    /** Attributes that apply a refused reference-expansion construct. */
+    private val FORBIDDEN_ATTRIBUTES = setOf("clip-path", "mask", "filter")
+
+    /** Bounds on document shape, so parse and render cost stays small. */
+    const val MAX_ELEMENTS = 500
+    const val MAX_DEPTH = 24
+    const val MAX_GRADIENTS = 32
+    const val MAX_STOPS = 64
+    const val MAX_STYLE_CHARS = 32 * 1024
+
     /** A `url(...)` that points anywhere but a same-document `#fragment`. */
-    private val EXTERNAL_URL = Regex("url\\(\\s*(?!\\s*['\"]?\\s*#)", RegexOption.IGNORE_CASE)
-    private val CSS_IMPORT = Regex("@import", RegexOption.IGNORE_CASE)
+    private val EXTERNAL_URL = Regex("url\\(\\s*+(?!['\"]?\\s*+#)", RegexOption.IGNORE_CASE)
+    private val CSS_IMPORT = Regex("@(import|font-face|namespace)", RegexOption.IGNORE_CASE)
 
     /** Returns null when the SVG may be rasterized, otherwise the reason it must not be. */
     fun check(bytes: ByteArray): LogoRejection? {
@@ -32,12 +49,22 @@ internal object SvgActiveContentGuard {
             parser.setInput(ByteArrayInputStream(bytes), null)
             var inStyle = false
             var sawSvgRoot = false
+            var elements = 0
+            var depth = 0
+            var gradients = 0
+            var stops = 0
+            var styleChars = 0
             var event = parser.eventType
             while (event != XmlPullParser.END_DOCUMENT) {
                 when (event) {
                     XmlPullParser.DOCDECL, XmlPullParser.ENTITY_REF -> return LogoRejection.ActiveContent
                     XmlPullParser.START_TAG -> {
                         val name = localName(parser.name)
+                        if (++elements > MAX_ELEMENTS || ++depth > MAX_DEPTH) return LogoRejection.ActiveContent
+                        if (sawSvgRoot && name == "svg") return LogoRejection.ActiveContent
+                        if (name == "lineargradient" || name == "radialgradient") gradients++
+                        if (name == "stop") stops++
+                        if (gradients > MAX_GRADIENTS || stops > MAX_STOPS) return LogoRejection.ActiveContent
                         if (!sawSvgRoot) {
                             if (name != "svg") return LogoRejection.InvalidSvg
                             sawSvgRoot = true
@@ -46,9 +73,14 @@ internal object SvgActiveContentGuard {
                         inStyle = name == "style"
                         if (!attributesAreSafe(parser)) return LogoRejection.ActiveContent
                     }
-                    XmlPullParser.END_TAG -> inStyle = false
-                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> if (inStyle && cssIsUnsafe(parser.text)) {
-                        return LogoRejection.ActiveContent
+                    XmlPullParser.END_TAG -> {
+                        inStyle = false
+                        depth--
+                    }
+                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> if (inStyle) {
+                        val css = parser.text
+                        styleChars += css.length
+                        if (styleChars > MAX_STYLE_CHARS || cssIsUnsafe(css)) return LogoRejection.ActiveContent
                     }
                 }
                 event = parser.nextToken()
@@ -65,7 +97,7 @@ internal object SvgActiveContentGuard {
         for (i in 0 until parser.attributeCount) {
             val attr = localName(parser.getAttributeName(i))
             val value = parser.getAttributeValue(i)
-            if (attr.startsWith("on")) return false
+            if (attr.startsWith("on") || attr in FORBIDDEN_ATTRIBUTES) return false
             if (value.contains("javascript:", ignoreCase = true)) return false
             if (cssIsUnsafe(value)) return false
             if (attr == "href" || attr == "src") {

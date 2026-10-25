@@ -39,6 +39,9 @@ enum class LogoRejection {
     /** SVG contains script, foreignObject, event handlers, external references, DOCTYPE or similar. */
     ActiveContent,
 
+    /** The logo server answered with a client-error status (4xx, unexpected 3xx). */
+    FetchRejected,
+
     /** SVG is not well-formed or the SVG renderer refused it. */
     InvalidSvg,
 }
@@ -138,6 +141,44 @@ object LogoSanitizer {
         } else {
             RasterReencoder.reencode(bytes, parsed.mediaType)
         }
+    }
+
+    /**
+     * Sanitizes already-fetched [bytes]. [declaredMediaType] is the response
+     * Content-Type (parameters ignored) or null. The type only routes: when
+     * it is absent or not an allowed image type, SVG is recognised by sniffing
+     * for an `<svg` root, everything else goes to the raster decoder, and the
+     * SVG guard / decoder checks apply regardless of what the sender claimed.
+     */
+    fun sanitizeBytes(bytes: ByteArray, declaredMediaType: String?): LogoResult = try {
+        if (bytes.isEmpty()) {
+            reject(LogoRejection.UndecodableImage)
+        } else if (bytes.size > MAX_DECODED_BYTES) {
+            reject(LogoRejection.TooLarge)
+        } else {
+            val declared = declaredMediaType?.substringBefore(';')?.trim()?.lowercase()
+            val type = when {
+                declared == "image/svg+xml" -> declared
+                declared in ALLOWED_MEDIA_TYPES -> declared
+                looksLikeSvg(bytes) -> "image/svg+xml"
+                else -> null
+            }
+            when (type) {
+                "image/svg+xml" -> sanitizeSvg(bytes)
+                null -> RasterReencoder.reencode(bytes, null)
+                else -> RasterReencoder.reencode(bytes, type)
+            }
+        }
+    } catch (e: Exception) {
+        Timber.w(e, "Logo sanitizer failed closed")
+        LogoResult.Rejected(LogoRejection.UndecodableImage)
+    } catch (e: OutOfMemoryError) {
+        LogoResult.Rejected(LogoRejection.DimensionsTooLarge)
+    }
+
+    private fun looksLikeSvg(bytes: ByteArray): Boolean {
+        val head = String(bytes, 0, minOf(bytes.size, 1024), Charsets.ISO_8859_1)
+        return head.contains("<svg", ignoreCase = true)
     }
 
     private fun sanitizeSvg(bytes: ByteArray): LogoResult {

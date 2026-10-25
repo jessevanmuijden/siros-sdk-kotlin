@@ -11,13 +11,17 @@ import java.io.ByteArrayOutputStream
  * the original never reach the caller.
  */
 internal object RasterReencoder {
-    fun reencode(bytes: ByteArray, declaredMediaType: String): LogoResult {
+    /** [declaredMediaType] null means unknown: accept whichever allowed raster type the decoder finds. */
+    fun reencode(bytes: ByteArray, declaredMediaType: String?): LogoResult {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
             return LogoResult.Rejected(LogoRejection.UndecodableImage)
         }
-        if (bounds.outMimeType?.lowercase() != declaredMediaType) {
+        val sniffed = bounds.outMimeType?.lowercase()
+        if (sniffed == null || sniffed !in LogoSanitizer.ALLOWED_MEDIA_TYPES ||
+            (declaredMediaType != null && sniffed != declaredMediaType)
+        ) {
             return LogoResult.Rejected(LogoRejection.MediaTypeMismatch)
         }
         if (bounds.outWidth > LogoSanitizer.MAX_EDGE_PIXELS || bounds.outHeight > LogoSanitizer.MAX_EDGE_PIXELS) {

@@ -8,7 +8,11 @@ import io.mockk.mockk
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
+import org.siros.sdk.credentials.logo.DisplayLogo
+import org.siros.sdk.credentials.logo.LogoLoad
+import org.siros.sdk.credentials.logo.LogoRejection
 
 /** State/logic level behaviour of the issuer-logo badge. */
 class IssuerLogoTest {
@@ -44,5 +48,23 @@ class IssuerLogoTest {
         assertEquals("S", logoInitial("  siros"))
         assertEquals("", logoInitial(null))
         assertEquals("", logoInitial("  "))
+    }
+
+    @Test
+    fun `a fetched logo is drawn, every failure to fetch falls back to the initial`() = runBlocking {
+        val png = byteArrayOf(1, 2, 3)
+        val ok = resolveLogoSource("https://issuer.example/l.png") { LogoLoad.Loaded(DisplayLogo.Image(png, 1, 1)) }
+        assertTrue(ok is LogoSource.Png && ok.bytes.contentEquals(png))
+        for (failure in listOf(LogoLoad.Transient("timeout"), LogoLoad.Rejected(LogoRejection.FetchRejected))) {
+            assertEquals(LogoSource.Fallback, resolveLogoSource("https://issuer.example/l.png") { failure })
+        }
+    }
+
+    @Test
+    fun `a rejected uri is never fetched`() = runBlocking {
+        var fetched = false
+        val r = resolveLogoSource("http://issuer.example/l.png") { fetched = true; LogoLoad.Transient("x") }
+        assertEquals(LogoSource.Fallback, r)
+        assertFalse(fetched)
     }
 }

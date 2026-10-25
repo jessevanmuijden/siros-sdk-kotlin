@@ -165,6 +165,8 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.okhttp.tls)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
 }

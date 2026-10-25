@@ -191,6 +191,43 @@ class LogoSanitizerTest {
     }
 
     @Test
+    fun `svg resource exhaustion constructs are refused`() {
+        val bad = listOf(
+            svg("<defs><clipPath id='c'><rect width='1' height='1'/></clipPath></defs><rect width='9' height='9' clip-path='url(#c)'/>"),
+            svg("<defs><filter id='f'><feGaussianBlur stdDeviation='9'/></filter></defs><rect width='9' height='9' filter='url(#f)'/>"),
+            svg("<mask id='m'><rect width='1' height='1'/></mask>"),
+            svg("<pattern id='p' width='2' height='2'><rect width='1' height='1'/></pattern>"),
+            svg("<svg><rect width='1' height='1'/></svg>"),
+            svg("<g>".repeat(SvgActiveContentGuard.MAX_DEPTH + 1) + "</g>".repeat(SvgActiveContentGuard.MAX_DEPTH + 1)),
+            svg("<rect width='1' height='1'/>".repeat(SvgActiveContentGuard.MAX_ELEMENTS + 1)),
+            svg("<linearGradient id='g'>" + "<stop offset='0'/>".repeat(SvgActiveContentGuard.MAX_STOPS + 1) + "</linearGradient>"),
+            svg("<style>@font-face{font-family:x}</style>"),
+            svg("<style>" + "a{fill:red}".repeat(SvgActiveContentGuard.MAX_STYLE_CHARS / 10) + "</style>"),
+        )
+        for (s in bad) assertEquals(s.take(120), LogoRejection.ActiveContent, rejected(svgUri(s)))
+    }
+
+    @Test
+    fun `a long whitespace run in url() is linear, not catastrophic`() {
+        val s = svg("<rect width='5' height='5' fill='url(" + " ".repeat(200_000) + "x'/>")
+        val start = System.nanoTime()
+        assertEquals(LogoRejection.ActiveContent, rejected(svgUri(s)))
+        assertTrue("took ${(System.nanoTime() - start) / 1_000_000} ms", System.nanoTime() - start < 5_000_000_000L)
+    }
+
+    @Test
+    fun `sanitizeBytes routes by sniffing when the type is missing or wrong`() {
+        val ok = """<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>""".toByteArray()
+        assertTrue(LogoSanitizer.sanitizeBytes(ok, null) is LogoResult.Accepted)
+        assertTrue(LogoSanitizer.sanitizeBytes(ok, "text/plain") is LogoResult.Accepted)
+        assertTrue(LogoSanitizer.sanitizeBytes(encode(Bitmap.CompressFormat.PNG), "application/octet-stream") is LogoResult.Accepted)
+        assertEquals(
+            LogoRejection.ActiveContent,
+            (LogoSanitizer.sanitizeBytes("<svg><script/></svg>".toByteArray(), null) as LogoResult.Rejected).reason,
+        )
+    }
+
+    @Test
     fun `malformed svg is rejected`() {
         assertEquals(LogoRejection.InvalidSvg, rejected(svgUri("<svg><rect></svg>")))
         assertEquals(LogoRejection.InvalidSvg, rejected(svgUri("<html><body/></html>")))

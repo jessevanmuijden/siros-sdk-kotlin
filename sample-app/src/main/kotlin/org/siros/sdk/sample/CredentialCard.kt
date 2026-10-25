@@ -1123,14 +1123,18 @@ internal fun extractFullBleedBackgroundImage(svg: String): Pair<String, ByteArra
     return svg.replaceRange(match.range, "") to bytes
 }
 
-/** What the app may load for a logo URI after the SDK's [LogoSanitizer] has had its say. */
+/** What the app may draw for a logo URI. Only SDK-produced PNG bytes are ever drawn. */
 internal sealed interface LogoSource {
+    /** An https URL that still has to be fetched through the SDK's [LogoFetcher]. */
     data class Remote(val url: String) : LogoSource
     class Png(val bytes: ByteArray) : LogoSource
     data object Fallback : LogoSource
 }
 
-/** Fail closed: anything the SDK does not accept becomes [LogoSource.Fallback] (the issuer initial). */
+/** One hardened fetcher for the app: https-only redirects, streaming cap, wall-clock timeout, shared in-flight loads. */
+internal val logoFetcher = org.siros.sdk.credentials.logo.LogoFetcher()
+
+/** Classify [uri] with the SDK sanitizer, fail closed: anything not accepted is [LogoSource.Fallback]. */
 internal fun logoSourceFor(uri: String?): LogoSource =
     when (val r = org.siros.sdk.credentials.logo.LogoSanitizer.sanitize(uri)) {
         is org.siros.sdk.credentials.logo.LogoResult.Rejected -> LogoSource.Fallback
@@ -1139,6 +1143,23 @@ internal fun logoSourceFor(uri: String?): LogoSource =
             is org.siros.sdk.credentials.logo.DisplayLogo.Image -> LogoSource.Png(l.png)
         }
     }
+
+/**
+ * [logoSourceFor], then fetch a remote logo with [load]. A rejection, a
+ * transient failure (offline, timeout, 5xx) and a decode error are all
+ * [LogoSource.Fallback]; cancellation propagates. Nothing is remembered, so
+ * a transient failure is retried the next time the logo is shown.
+ */
+internal suspend fun resolveLogoSource(
+    uri: String?,
+    load: suspend (String) -> org.siros.sdk.credentials.logo.LogoLoad,
+): LogoSource = when (val source = logoSourceFor(uri)) {
+    is LogoSource.Remote -> when (val r = load(source.url)) {
+        is org.siros.sdk.credentials.logo.LogoLoad.Loaded -> LogoSource.Png(r.image.png)
+        else -> LogoSource.Fallback
+    }
+    else -> source
+}
 
 /** The first character shown in the issuer-initial badge; "?" is never shown, the badge is just empty. */
 internal fun logoInitial(name: String?): String = name?.trim()?.take(1)?.uppercase().orEmpty()
@@ -1167,10 +1188,11 @@ internal fun IssuerLogo(
     initialColor: Color = Color.Unspecified,
     initialStyle: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.labelMedium,
 ) {
-    // Sanitizing decodes and re-encodes images: off the UI thread, initial until done.
+    // Sanitizing (and fetching, for https) happens off the UI thread; the
+    // initial shows until it finishes and whenever it ends in anything but a PNG.
     var source by remember(uri) { mutableStateOf<LogoSource>(LogoSource.Fallback) }
     LaunchedEffect(uri) {
-        source = withContext(Dispatchers.Default) { logoSourceFor(uri) }
+        source = withContext(Dispatchers.Default) { resolveLogoSource(uri) { logoFetcher.load(it) } }
     }
     val current: LogoSource = source
     val initialText = logoInitial(initial)
@@ -1184,20 +1206,8 @@ internal fun IssuerLogo(
             )
         }
         when (current) {
-            LogoSource.Fallback -> badge()
             is LogoSource.Png -> LogoLayer(current.bytes, contentDescription, contentScale, badge)
-            is LogoSource.Remote -> {
-                val logo = rememberNormalizedLogoModel(current.url)
-                logo.backgroundImageBytes?.let { backgroundBytes ->
-                    coil.compose.AsyncImage(
-                        model = backgroundBytes,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
-                    )
-                }
-                LogoLayer(logo.model, contentDescription, contentScale, badge)
-            }
+            else -> badge()
         }
     }
 }
@@ -1224,91 +1234,6 @@ private fun LogoLayer(
             SubcomposeAsyncImageContent()
         }
     }
-}
-
-/**
- * Result of normalizing a logo/preview SVG: [model] is what a Coil
- * `AsyncImage`/`SubcomposeAsyncImage` should load as the (possibly
- * `<image>`-stripped) foreground layer; [backgroundImageBytes] is a
- * full-bleed raster `<image>` pulled out of it (see
- * [extractFullBleedBackgroundImage]) that must be drawn as a separate
- * bitmap layer *underneath* [model] - null when there was nothing to
- * extract, in which case a caller can render [model] alone exactly as
- * before this type existed.
- */
-internal data class NormalizedLogo(val model: Any, val backgroundImageBytes: ByteArray? = null)
-
-/**
- * Normalizes a remote logo/preview URI (callers pass only what
- * `LogoSanitizer` accepted, i.e. https; `data:` logos never come here).
- * Applies the same [ensureSvgViewBox]/
- * [ensureSvgImageHeight]/[extractFullBleedBackgroundImage] normalization an
- * already-stored credential's card SVG gets in [fetchAndSubstituteSvg] -
- * without it, a logo/preview URI pointing at an SVG whose `<image>` element
- * omits `height` (a real, confirmed-live issuer template:
- * demo-issuer.wwwallet.org's EHIC card) renders fully blank with no error,
- * or - if the SVG has a full-bleed embedded raster `<image>` - renders with
- * AndroidSVG's confirmed ~30%-down dark-band mis-render (see
- * [extractFullBleedBackgroundImage]'s doc comment), since the plain
- * path (used by the Add Credentials offer list and the
- * stored-credential detail screen, neither of which goes through
- * [fetchAndSubstituteSvg]'s pipeline) hands Coil the untouched SVG
- * bytes/URI.
- *
- * Falls back to [coilLogoModel]'s existing behavior (or the raw [uri]) on
- * any fetch/decode failure - never worse than what callers had before this
- * function existed.
- */
-internal suspend fun fetchAndNormalizeLogoModel(uri: String): NormalizedLogo {
-    // Only https URLs reach here (LogoSanitizer admits nothing else); data:
-    // logos are decoded and re-encoded by the SDK before the app sees them.
-    if (!uri.startsWith("http")) return NormalizedLogo(uri)
-    return try {
-        withContext(Dispatchers.IO) {
-            val request = Request.Builder().url(uri).build()
-            svgHttpClient.newCall(request).execute().use { response ->
-                val body = if (response.isSuccessful) response.body?.string() else null
-                if (body == null) {
-                    NormalizedLogo(uri)
-                } else {
-                    val contentType = response.header("Content-Type") ?: ""
-                    val looksLikeSvg = contentType.contains("svg", ignoreCase = true) ||
-                        body.trimStart().startsWith("<svg", ignoreCase = true)
-                    if (looksLikeSvg) normalizeSvgLogoOrFallback(body, uri) else NormalizedLogo(uri)
-                }
-            }
-        }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Timber.w(e, "Failed to fetch/normalize remote logo: $uri")
-        NormalizedLogo(uri)
-    }
-}
-
-private fun normalizeSvgLogoOrFallback(svgText: String, fallback: String): NormalizedLogo = try {
-    val sized = ensureSvgImageHeight(ensureSvgViewBox(svgText))
-    val (stripped, backgroundBytes) = extractFullBleedBackgroundImage(sized)
-    NormalizedLogo(stripped.toByteArray(Charsets.UTF_8), backgroundBytes)
-} catch (e: Exception) {
-    Timber.w(e, "Failed to normalize logo SVG, falling back: $fallback")
-    NormalizedLogo(fallback)
-}
-
-/**
- * Remembers a [NormalizedLogo] for [uri] via [fetchAndNormalizeLogoModel],
- * starting from [coilLogoModel]'s synchronous result so there's no
- * flash-of-nothing while the async fetch/normalize is in flight - it just
- * gets replaced once ready, identically to the synchronous behavior for any
- * URI the normalization doesn't end up touching.
- */
-@Composable
-internal fun rememberNormalizedLogoModel(uri: String): NormalizedLogo {
-    var logo by remember(uri) { mutableStateOf(NormalizedLogo(uri)) }
-    LaunchedEffect(uri) {
-        logo = fetchAndNormalizeLogoModel(uri)
-    }
-    return logo
 }
 
 /**

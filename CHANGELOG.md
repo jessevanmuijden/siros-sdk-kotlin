@@ -249,19 +249,35 @@ The entries below are the detailed changes that make up this release.
     `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
 
 ### Added
-- **`LogoSanitizer`: display logos given as `data:` URIs are supported and
-  sanitized** (sirosfoundation/siros-sdk-kotlin#300). `LogoSanitizer.sanitize(uri)`
-  returns `LogoResult.Accepted(DisplayLogo.Remote | DisplayLogo.Image)` or a
-  typed `LogoRejection`, and fails closed. `data:` URIs are parsed strictly
-  (RFC 2397, base64 only), limited to png/jpeg/webp/gif/svg+xml and 256 KiB
-  decoded; rasters are decoded by `BitmapFactory` (max 2048 px per edge,
-  declared type must match the bytes) and re-encoded to a clean PNG, so
-  metadata and trailing payloads are dropped. SVG is refused if it contains
-  script, foreignObject, `image`, `use`, animation, event handlers, external
-  references, DOCTYPE or entities, and otherwise rasterized with AndroidSVG
-  to PNG; it is never handed on as XML. Embedded `<image>` is refused. `https:` stays allowed, `http:` and
-  everything else is rejected. The sample app uses it for every logo and now
-  falls back to the issuer initial when an accepted https logo fails to load.
+- **`LogoSanitizer` and `LogoFetcher`: display logos given as `data:` URIs
+  or https URLs are loaded safely** (sirosfoundation/siros-sdk-kotlin#300).
+  `LogoSanitizer.sanitize(uri)` / `sanitizeBytes(bytes, contentType)` return
+  `LogoResult.Accepted(DisplayLogo.Remote | DisplayLogo.Image)` or a typed
+  `LogoRejection`, and fail closed. `LogoFetcher.load(url)` fetches an https
+  logo and yields `LogoLoad.Loaded` (a clean PNG), `Rejected` (permanent) or
+  `Transient` (network, timeout, 5xx: never remembered).
+  - `data:` URIs: strict RFC 2397, base64 only, png/jpeg/webp/gif/svg+xml,
+    256 KiB decoded. Rasters are decoded by `BitmapFactory` (max 2048 px per
+    edge, sniffed type must match) and re-encoded to PNG, dropping metadata
+    and trailing payloads.
+  - SVG is never handed on as XML. A pull-parser guard refuses (nothing is
+    rewritten): script, foreignObject, `image` (embedded rasters too), `use`,
+    `a`, animation, nested `svg`, `clipPath`/`mask`/`pattern`/`filter`/
+    `marker`/`symbol`/`textPath` and `clip-path`/`mask`/`filter` attributes
+    (a clipPath applied to many elements ran AndroidSVG for over a minute),
+    event handlers, non-`#fragment` hrefs, non-local `url()`, `@import`,
+    `@font-face`, DOCTYPE and entities, plus more than 500 elements, depth 24,
+    32 gradients, 64 stops or 32 KiB of CSS. What passes is rasterized by
+    AndroidSVG (no script engine) to PNG.
+  - `LogoFetcher`: https only and no userinfo on the request and on every
+    redirect hop, no http/https redirects, body read through a streaming
+    256 KiB cap, a validated wall-clock timeout (default 10 s, max 60 s),
+    one shared in-flight request per URL that is cancelled when every waiter
+    is, and content routing by Content-Type with an `<svg` sniff as fallback
+    (the guard applies either way).
+  - The sample app draws only SDK-produced PNGs (including remote logos, no
+    longer fetched by Coil), and shows the issuer initial while loading, on
+    rejection and on any failed load.
 - **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`
   `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`
   throws it, before building or storing anything, when the unlocked container has an
