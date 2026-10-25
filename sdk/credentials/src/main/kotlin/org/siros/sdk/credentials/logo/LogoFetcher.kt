@@ -8,8 +8,10 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.OkHttpClient
@@ -91,20 +93,34 @@ class LogoFetcher(
         try {
             return flight.deferred.await()
         } finally {
-            lock.withLock {
-                flight.waiters--
-                if (flight.waiters == 0) {
-                    if (inFlight[remote.url] === flight) inFlight.remove(remote.url)
-                    if (flight.deferred.isActive) flight.deferred.cancel()
+            // Must finish even when this caller is cancelled: a skipped decrement
+            // leaves a phantom waiter that keeps a completed flight (and its
+            // possibly transient result) alive for later loads.
+            withContext(NonCancellable) {
+                lock.withLock {
+                    flight.waiters--
+                    if (flight.waiters == 0) {
+                        if (inFlight[remote.url] === flight) inFlight.remove(remote.url)
+                        if (flight.deferred.isActive) flight.deferred.cancel()
+                    }
                 }
             }
         }
     }
 
-    private suspend fun fetch(url: String): LogoLoad {
+    /**
+     * Runs the blocking call inside a cancellable continuation: cancelling the
+     * flight (its last waiter left) calls [okhttp3.Call.cancel] at once, which
+     * aborts a blocked connect, header read or body read. (A completion handler
+     * on the job would only fire after the blocking call returned.)
+     */
+    private suspend fun fetch(url: String): LogoLoad = suspendCancellableCoroutine { cont ->
         val call = http.newCall(Request.Builder().url(url).build())
-        // Cancelling the (last waiter's) job must abort the blocking socket read.
-        val handle = currentCoroutineContext().job.invokeOnCompletion { if (it != null) call.cancel() }
+        cont.invokeOnCancellation { call.cancel() }
+        cont.resume(blockingFetch(call))
+    }
+
+    private fun blockingFetch(call: okhttp3.Call): LogoLoad {
         return try {
             call.execute().use { response ->
                 when {
@@ -134,8 +150,6 @@ class LogoFetcher(
             LogoLoad.Rejected(LogoRejection.InvalidUrl)
         } catch (e: IOException) {
             LogoLoad.Transient(e.javaClass.simpleName)
-        } finally {
-            handle.dispose()
         }
     }
 

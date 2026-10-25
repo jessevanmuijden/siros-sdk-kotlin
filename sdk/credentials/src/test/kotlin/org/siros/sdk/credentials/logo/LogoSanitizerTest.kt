@@ -208,6 +208,27 @@ class LogoSanitizerTest {
     }
 
     @Test
+    fun `css split across tokens is validated as one string`() {
+        val bad = listOf(
+            "<style>@im<![CDATA[port u]]><![CDATA[rl(https://example.org/x.css);]]></style>",
+            "<style><![CDATA[@import url(https://example.org/x.css);]]></style>",
+            "<style>@imp/**/ort url(https://example.org/x.css);</style>",
+            "<style>a{fill:u/**/rl(https://example.org/x)}</style>",
+            "<style>a{fill:\\75rl(https://example.org/x)}</style>",
+            "<style>@im<!-- c -->port url(https://example.org/x.css);</style>",
+            "<style>a{}<g><rect width='1' height='1'/></g>@import url(https://x/y);</style>",
+            "<style>@import&#32;url(https://example.org/x.css);</style>",
+            "<rect width='1' height='1' style='fill:u/**/rl(https://example.org/x)'/>",
+        )
+        for (b in bad) assertEquals(b, LogoRejection.ActiveContent, rejected(svgUri(svg(b))))
+    }
+
+    @Test
+    fun `a plain stylesheet is still accepted`() {
+        image(svgUri(svg("<style>.a{fill:#f00}</style><rect class='a' width='64' height='64'/>")))
+    }
+
+    @Test
     fun `a long whitespace run in url() is linear, not catastrophic`() {
         val s = svg("<rect width='5' height='5' fill='url(" + " ".repeat(200_000) + "x'/>")
         val start = System.nanoTime()

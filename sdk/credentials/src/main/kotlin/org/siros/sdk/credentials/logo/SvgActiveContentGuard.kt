@@ -47,18 +47,20 @@ internal object SvgActiveContentGuard {
         try {
             parser.setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false)
             parser.setInput(ByteArrayInputStream(bytes), null)
-            var inStyle = false
             var sawSvgRoot = false
             var elements = 0
             var depth = 0
             var gradients = 0
             var stops = 0
-            var styleChars = 0
+            var style: StringBuilder? = null
             var event = parser.eventType
             while (event != XmlPullParser.END_DOCUMENT) {
                 when (event) {
                     XmlPullParser.DOCDECL, XmlPullParser.ENTITY_REF -> return LogoRejection.ActiveContent
+                    // Comments and CDATA inside <style> can split a token (`u/**/rl(`, `@im<![CDATA[port`).
+                    XmlPullParser.COMMENT, XmlPullParser.CDSECT -> if (style != null) return LogoRejection.ActiveContent
                     XmlPullParser.START_TAG -> {
+                        if (style != null) return LogoRejection.ActiveContent
                         val name = localName(parser.name)
                         if (++elements > MAX_ELEMENTS || ++depth > MAX_DEPTH) return LogoRejection.ActiveContent
                         if (sawSvgRoot && name == "svg") return LogoRejection.ActiveContent
@@ -70,17 +72,18 @@ internal object SvgActiveContentGuard {
                             sawSvgRoot = true
                         }
                         if (name in FORBIDDEN_ELEMENTS) return LogoRejection.ActiveContent
-                        inStyle = name == "style"
+                        if (name == "style") style = StringBuilder()
                         if (!attributesAreSafe(parser)) return LogoRejection.ActiveContent
                     }
                     XmlPullParser.END_TAG -> {
-                        inStyle = false
+                        // The element's complete text is validated once, never token by token.
+                        style?.let { if (cssIsUnsafe(it.toString())) return LogoRejection.ActiveContent }
+                        style = null
                         depth--
                     }
-                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> if (inStyle) {
-                        val css = parser.text
-                        styleChars += css.length
-                        if (styleChars > MAX_STYLE_CHARS || cssIsUnsafe(css)) return LogoRejection.ActiveContent
+                    XmlPullParser.TEXT -> style?.let {
+                        it.append(parser.text)
+                        if (it.length > MAX_STYLE_CHARS) return LogoRejection.ActiveContent
                     }
                 }
                 event = parser.nextToken()
@@ -107,7 +110,10 @@ internal object SvgActiveContentGuard {
         return true
     }
 
-    private fun cssIsUnsafe(css: String): Boolean = EXTERNAL_URL.containsMatchIn(css) || CSS_IMPORT.containsMatchIn(css)
+    /** CSS comments and backslash escapes can disguise `url(` / `@import`; neither is accepted. */
+    private fun cssIsUnsafe(css: String): Boolean =
+        css.contains("/*") || css.contains('\\') ||
+            EXTERNAL_URL.containsMatchIn(css) || CSS_IMPORT.containsMatchIn(css)
 
     private fun localName(qualified: String): String = qualified.substringAfter(':').lowercase()
 }

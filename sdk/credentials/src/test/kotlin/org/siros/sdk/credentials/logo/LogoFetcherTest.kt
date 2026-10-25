@@ -45,7 +45,12 @@ class LogoFetcherTest {
 
     @After
     fun tearDown() {
-        server.shutdown()
+        // A throttled-body test leaves the server thread mid-sleep; that is not a failure.
+        try {
+            server.shutdown()
+        } catch (e: java.io.IOException) {
+            // ignored
+        }
         plain.shutdown()
     }
 
@@ -175,5 +180,44 @@ class LogoFetcherTest {
     @Test(expected = IllegalArgumentException::class)
     fun `timeout is validated`() {
         LogoFetcher(client, timeoutMillis = 0)
+    }
+
+    @Test
+    fun `cancelling the last waiter aborts a stalled body read promptly`() = runBlocking {
+        val canceled = java.util.concurrent.CountDownLatch(1)
+        val listening = client.newBuilder().eventListener(object : okhttp3.EventListener() {
+            override fun canceled(call: okhttp3.Call) = canceled.countDown()
+        }).build()
+        // Headers arrive at once; the body then trickles at 1 byte per 10 s.
+        server.enqueue(
+            MockResponse().setBody(Buffer().write(ByteArray(4096))).addHeader("Content-Type", "image/png")
+                .throttleBody(1, 10, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        val f = LogoFetcher(listening, timeoutMillis = 60_000)
+        val waiter = async(kotlinx.coroutines.Dispatchers.Default) { f.load(url()) }
+        assertTrue(server.takeRequest(10, java.util.concurrent.TimeUnit.SECONDS) != null)
+        waiter.cancelAndJoin()
+        assertTrue("the socket must be aborted, not left to the 60 s timeout", canceled.await(10, java.util.concurrent.TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun `a waiter cancelled while the lock is held still leaves, so a later load refetches`() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val f = LogoFetcher(client, timeoutMillis = 60_000)
+        val lockField = LogoFetcher::class.java.getDeclaredField("lock").apply { isAccessible = true }
+        val lock = lockField.get(f) as kotlinx.coroutines.sync.Mutex
+        val waiter = async(kotlinx.coroutines.Dispatchers.Default) { f.load(url()) }
+        assertTrue(server.takeRequest(10, java.util.concurrent.TimeUnit.SECONDS) != null)
+        lock.lock()
+        waiter.cancel() // its cleanup now has to wait for the lock
+        // The cleanup is non-cancellable, so the waiter cannot finish while the lock is held
+        // (a cancellable cleanup would throw at the lock and finish at once, skipping the decrement).
+        assertEquals(null, kotlinx.coroutines.withTimeoutOrNull(500) { waiter.join() })
+        lock.unlock()
+        waiter.join()
+        server.enqueue(body(png()))
+        val later = kotlinx.coroutines.withTimeoutOrNull(10_000) { f.load(url()) }
+        assertTrue("a phantom waiter kept the old flight alive: $later", later is LogoLoad.Loaded)
+        assertEquals(2, server.requestCount)
     }
 }
