@@ -109,6 +109,7 @@ import org.siros.sdk.keystore.mdoc.MdocCose
 import org.siros.sdk.credentials.VctmFetcher
 import org.siros.sdk.credentials.MddlSchema
 import org.siros.sdk.credentials.MddlSchemaFetcher
+import org.siros.sdk.keystore.WscdPluginCapabilities
 import org.siros.sdk.keystore.BbsHolderStateVault
 import org.siros.sdk.keystore.CredentialRefreshTokenEntry
 import org.siros.sdk.keystore.DCAPIResponseEncryption
@@ -3765,7 +3766,13 @@ class SirosWallet private constructor(
             // cancelled attempt must not write into a newer attempt's fields.
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_STARTING_FLOW)
             // Only now, with the epoch confirmed current, is the adapter selection published.
-            resolvedDisplay?.record?.invoke()
+            if (resolvedDisplay != null && !resolvedDisplay.record()) {
+                // The advertisement is malformed NOW: any earlier selection was cleared above, and the issuance is refused.
+                throw WalletException(
+                    "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                    errorCode = "auxiliary_data_advertisement_malformed",
+                )
+            }
             if (displayOffer != null) {
                 activeOffer = displayOffer
                 activeVctm = displayVctm
@@ -3813,7 +3820,8 @@ class SirosWallet private constructor(
      * issuer, issuer doesn't support the offered configuration) rather than
      * throwing - a missing display must never block issuance itself.
      */
-    private class ResolvedOfferForDisplay(val offer: CredentialOffer, val record: () -> Unit)
+    /** [offer] is null when the current advertisement is MALFORMED (not a lookup failure); [record] publishes (or, malformed, clears) the selection and says whether it is usable. */
+    private class ResolvedOfferForDisplay(val offer: CredentialOffer?, val record: () -> Boolean)
 
     private suspend fun resolveOfferForDisplay(offerUri: String): ResolvedOfferForDisplay? {
         return try {
@@ -3824,8 +3832,12 @@ class SirosWallet private constructor(
             val metadata = getIssuerMetadata(issuerUrl)
             // The adapter selection stays LOCAL here: the caller records it only after its own epoch check, so a lookup that completes
             // after a cancel and a retry cannot overwrite or remove the retry's selection.
+            val config = metadata.credentialConfigurationsSupported[configId] ?: return null
+            if (org.siros.sdk.credentials.AuxiliaryDataShapes.select(config) is org.siros.sdk.credentials.AuxiliarySelection.Malformed) {
+                // Kept apart from "no display metadata": issuance must be refused (after the caller's epoch check), not started.
+                return ResolvedOfferForDisplay(null) { recordAuxiliarySelection(issuerUrl, configId, config) }
+            }
             val offer = buildCredentialOfferFromMetadata(issuerUrl, configId, metadata, record = false) ?: return null
-            val config = metadata.credentialConfigurationsSupported.getValue(configId)
             ResolvedOfferForDisplay(offer) { recordAuxiliarySelection(issuerUrl, configId, config) }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -7130,15 +7142,41 @@ class SirosWallet private constructor(
         }
     }
 
+    /** Whether [manager]'s WSCD is onboarded; "cannot tell" is not onboarded (fail closed). */
+    private suspend fun isOnboarded(manager: KeystoreManager, pluginId: String): Boolean = try {
+        manager.isWscdOnboarded()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Timber.w(e, "could not determine whether the '$pluginId' WSCD is onboarded")
+        false
+    }
+
+    /**
+     * Returns the wallet's own default keystore only if its WSCD is onboarded, so a PIN is never
+     * asked for when no token has been onboarded.
+     */
+    private suspend fun requireDefaultKeystoreOnboarded(
+        pluginId: String,
+        issuer: String?,
+        credentialType: String?,
+        requiredTier: String?,
+    ): KeystoreManager {
+        if (!isOnboarded(keystore, pluginId)) {
+            throw NoOnboardedWscdException(issuer, credentialType, requiredTier, listOf(pluginId))
+        }
+        return keystore
+    }
+
     private suspend fun resolveEffectiveKeystoreForIssuance(): KeystoreManager {
         val available = config.availableKeystores
         if (available.isNullOrEmpty()) {
             Timber.i("resolveEffectiveKeystoreForIssuance: no availableKeystores configured, using default keystore")
-            return keystore
+            return requireDefaultKeystoreOnboarded("default", null, null, null)
         }
         val offer = activeOffer ?: run {
             Timber.i("resolveEffectiveKeystoreForIssuance: no activeOffer, using default keystore")
-            return keystore
+            return requireDefaultKeystoreOnboarded(available.entries.firstOrNull { it.value === keystore }?.key ?: "default", null, null, null)
         }
         val issuer = offer.credentialIssuerIdentifier
 
@@ -7174,17 +7212,39 @@ class SirosWallet private constructor(
                 "globalOverride=${wscdSelectionPolicy.currentGlobalUserOverride()} " +
                 "userOverrides=${wscdSelectionPolicy.currentUserOverrides()}",
         )
+        // Only an ONBOARDED plugin can serve a tier requirement: a PIN for a token nobody enrolled is
+        // meaningless. Statically eligible plugins that are not onboarded are withheld from the policy
+        // (so it falls over to another onboarded one); if none is onboarded, refuse before any prompt.
+        var selectable: Set<String> = available.keys
+        if (requiredTier != null) {
+            val eligible = available.keys.filter {
+                WscdPluginCapabilities.tierOf(it)?.let { tier -> WscdPluginCapabilities.meets(tier, requiredTier) } == true
+            }
+            val onboarded = eligible.filter { id -> available[id]?.let { isOnboarded(it, id) } == true }
+            if (eligible.isNotEmpty() && onboarded.isEmpty()) {
+                throw NoOnboardedWscdException(issuer, credentialType, requiredTier, eligible)
+            }
+            selectable = available.keys - (eligible - onboarded.toSet())
+        }
         val pluginId = wscdSelectionPolicy.resolve(
             issuer = issuer,
             credentialType = credentialType,
             requiredTier = requiredTier,
-            availablePluginIds = available.keys,
+            availablePluginIds = selectable,
             currentDefaultPluginId = currentDefaultPluginId,
         )
         Timber.i("resolveEffectiveKeystoreForIssuance: resolve() returned pluginId=$pluginId")
-        if (pluginId == null) return keystore
+        if (pluginId == null) {
+            return requireDefaultKeystoreOnboarded(currentDefaultPluginId ?: "default", issuer, credentialType, requiredTier)
+        }
 
         val resolved = available[pluginId] ?: keystore
+        // Whatever the policy chose (override, TOFU, default mapping, auto-pick), regardless of
+        // requiredTier: an override or mapping can name a plugin that was never onboarded (the tier
+        // filter above only runs when a tier is required), and it must not reach a PIN prompt.
+        if (!isOnboarded(resolved, pluginId)) {
+            throw NoOnboardedWscdException(issuer, credentialType, requiredTier, listOf(pluginId))
+        }
         config.onWscdOperationStart?.invoke(pluginId)
         return resolved
     }

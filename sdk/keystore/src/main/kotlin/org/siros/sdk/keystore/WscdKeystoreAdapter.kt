@@ -118,6 +118,8 @@ class WscdKeystoreAdapter private constructor(
     override suspend fun destroyLifecycle(request: DestroyLifecycleRequest): DestructionOutcome =
         requireWscdManager().destroyLifecycle(request)
 
+    override suspend fun isWscdOnboarded(): Boolean = signer.isWscdOnboarded()
+
     override fun registerFido2Plugin(transport: Ctap2TransportProvider) =
         requireWscdManager().registerFido2Plugin(transport)
 

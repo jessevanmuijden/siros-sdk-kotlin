@@ -94,6 +94,29 @@ class NoEligibleWscdPluginException(
 )
 
 /**
+ * Thrown by `SirosWallet` when no WSCD able to serve the credential has been ONBOARDED (enrolled: a
+ * token-backed plugin such as FIDO2 holds no enrolled key), or onboarding could not be determined,
+ * which is treated the same. Raised BEFORE any PIN request: a PIN for a token nobody onboarded is
+ * meaningless. Distinct from [NoEligibleWscdPluginException] (no registered plugin has a sufficient
+ * tier): here a plugin of sufficient tier exists but none is onboarded. The message is suitable to
+ * show the user.
+ *
+ * @param issuer null when the wallet was using its default keystore with no credential type in scope.
+ * @param requiredTier null when the credential type declared no tier requirement.
+ * @param pluginIds the plugins that were candidates and are not onboarded.
+ */
+class NoOnboardedWscdException(
+    val issuer: String?,
+    val credentialType: String?,
+    val requiredTier: String?,
+    val pluginIds: List<String>,
+) : WscdSelectionException(
+    "No applicable WSCD is available: none of $pluginIds has been onboarded" +
+        (if (requiredTier != null) " for required key-storage tier '$requiredTier'" else "") +
+        (if (issuer != null) " (issuer=$issuer credentialType=$credentialType)" else "")
+)
+
+/**
  * Thrown by [WscdSelectionPolicy.resolve] when two or more of the host app's
  * registered plugins meet the credential type's declared `requiredTier`, but
  * there was no way to have the user pick which one: either no

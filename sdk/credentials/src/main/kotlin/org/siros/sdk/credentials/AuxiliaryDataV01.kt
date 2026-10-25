@@ -41,12 +41,17 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     /** The text encodings of a commitment claim the advertisement may name (vc pull 850 `encoding`); absent means the format's default. */
     val ENCODINGS: Set<String> = setOf("base64url", "base64", "hex")
 
-    /** The advertised `encoding` of [o]: null when absent; [INVALID_ENCODING] when present but not one of [ENCODINGS] as a string. */
+    /**
+     * The advertised `encoding` of [o]: null when absent; [UNSUPPORTED_ENCODING] for a string this wallet cannot read;
+     * [INVALID_ENCODING] when present but not a string at all (malformed).
+     */
     private fun encodingOf(o: JsonObject): String? = o["encoding"]?.let { e ->
-        (e as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it in ENCODINGS } ?: INVALID_ENCODING
+        val text = (e as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return INVALID_ENCODING
+        if (text in ENCODINGS) text else UNSUPPORTED_ENCODING
     }
 
     private const val INVALID_ENCODING = "\u0000invalid"
+    private const val UNSUPPORTED_ENCODING = "\u0000unsupported"
 
     private const val MAX_ENTRIES = 8
     private const val MAX_PATH = 8
@@ -83,21 +88,31 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             // type, or a hash_commitment without a string alg or a valid path, is malformed (the configuration is not offered).
             val type = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
             var recognised = false
+            var usable = true
             if (type == TYPE) {
                 val alg = (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-                path(o["path"]) ?: return null
+                val p0 = path(o["path"]) ?: return null
                 // A value in public metadata is not an advertisement: checked on EVERY hash_commitment, before an unsupported
                 // algorithm can make the entry skippable (an opening or commitment is a secret or a value, never advertised).
                 if ("opening" in o || "commitment" in o) return null
                 recognised = alg == ALG
-                // A named encoding must be one this wallet can read, and must make sense for the credential format: the
-                // configuration is not offered otherwise (an unreadable representation must not fail after delivery).
                 val enc = encodingOf(o)
                 if (enc == INVALID_ENCODING) return null
-                if (recognised && enc != null && !isSdJwt(format) && !isMdoc(format)) return null
-                // An ABSENT encoding legally means the claim holds the BYTES, which only an mdoc byte string can: an SD-JWT
-                // configuration cannot be issued without one (the issuer requires it), so it is refused there rather than guessed.
-                if (recognised && enc == null && !isMdoc(format)) return null
+                if (recognised) {
+                    // What this wallet cannot READ at receipt is unusable: an encoding it does not know, an absent one outside an
+                    // mdoc (bytes only an mdoc byte string holds), an encoding on a format it cannot read at all, or a path the
+                    // receipt reader does not handle (SD-JWT: one segment; mdoc: exactly two).
+                    usable = enc != UNSUPPORTED_ENCODING &&
+                        !(enc != null && !isSdJwt(format) && !isMdoc(format)) &&
+                        !(enc == null && !isMdoc(format)) &&
+                        pathReadable(format, p0)
+                }
+            }
+            if (recognised && !usable) {
+                // Spec 4.1: an OPTIONAL to_issuer entry the wallet cannot honour is omitted; anything the wallet is expected to
+                // read or send (to_wallet, a required to_issuer) makes the configuration unusable.
+                if (allowRequired && !required) continue
+                return null
             }
             if (!recognised) {
                 // A well-formed entry of a type (or algorithm) this wallet does not recognise: ignored, unless it is REQUIRED.
@@ -114,6 +129,13 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     }
 
     private fun isSdJwt(format: String) = format.contains("sd-jwt", ignoreCase = true)
+
+    /** Whether the receipt reader can read a claim at [path] in [format]: an SD-JWT top-level claim, an mdoc `[namespace, element]`. */
+    private fun pathReadable(format: String, path: List<String>) = when {
+        isSdJwt(format) -> path.size == 1
+        isMdoc(format) -> path.size == 2
+        else -> false
+    }
     private fun isMdoc(format: String) = format.equals("mso_mdoc", ignoreCase = true)
 
     override fun advertisement(config: CredentialConfiguration): AuxiliarySelection {
@@ -157,6 +179,9 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             if (type != TYPE) continue
             val alg = (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return fail()
             val p = path(o["path"]) ?: return fail()
+            // `encoding` occurs only in metadata and `commitment` only in wallet key proofs: in a RESPONSE entry either is malformed
+            // (fail closed, before the opening is decoded).
+            if ("encoding" in o || "commitment" in o) return fail()
             if (alg != ALG) continue
             val text = (o["opening"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return fail()
             val bytes = decodeB64(text, OPENING_BYTES) ?: return fail()
@@ -323,7 +348,7 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             val supported = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content == TYPE &&
                 (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content == ALG
             val enc = if (supported) encodingOf(o) else null
-            val p = if (supported && enc != INVALID_ENCODING) path(o["path"]) else null
+            val p = if (supported && enc != INVALID_ENCODING && enc != UNSUPPORTED_ENCODING) path(o["path"]) else null
             if (p == null) {
                 if (required) {
                     throw WalletException(
