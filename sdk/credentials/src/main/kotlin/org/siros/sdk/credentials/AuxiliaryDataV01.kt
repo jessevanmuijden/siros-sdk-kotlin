@@ -76,6 +76,9 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             if (type == TYPE) {
                 val alg = (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
                 path(o["path"]) ?: return null
+                // A value in public metadata is not an advertisement: checked on EVERY hash_commitment, before an unsupported
+                // algorithm can make the entry skippable (an opening or commitment is a secret or a value, never advertised).
+                if ("opening" in o || "commitment" in o) return null
                 recognised = alg == ALG
             }
             if (!recognised) {
@@ -107,7 +110,17 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         return AuxiliarySelection.Selected(this, AuxiliaryAdvertisement(toWallet, toIssuer))
     }
 
-    override fun carriesSecret(metadata: JsonObject): Boolean = RESPONSE_MEMBER in metadata
+    /**
+     * Whether the response carries a secret in this shape: a malformed member, or at least one RECOGNISED delivery. A member of only
+     * unrecognised extension entries (spec section 3) carries none, so it is ignored like everywhere else (also in a deferred response).
+     */
+    override fun carriesSecret(metadata: JsonObject): Boolean {
+        if (RESPONSE_MEMBER !in metadata) return false
+        return when (val parsed = parseDeliveries(metadata)) {
+            is AuxiliaryParse.Malformed -> true
+            is AuxiliaryParse.Parsed -> parsed.deliveries.isNotEmpty().also { parsed.deliveries.forEach { d -> d.bytes.fill(0) } }
+        }
+    }
 
     override fun parseDeliveries(metadata: JsonObject): AuxiliaryParse {
         val member = metadata[RESPONSE_MEMBER] ?: return AuxiliaryParse.Parsed(emptyList())
@@ -160,58 +173,76 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         /** There is no such claim in the credential. */
         object Absent : Claim
 
-        /** There is something there that is not exactly one well-formed 32-byte commitment (wrong type or length, duplicated, ambiguous), or the credential cannot be read. */
-        object Invalid : Claim
+        /**
+         * There is something there that is not exactly one well-formed 32-byte commitment (wrong representation or length,
+         * duplicated, ambiguous), or the credential cannot be read. [shape] says what was found (type and length only, NEVER the
+         * value): it is what a refusal names.
+         */
+        class Invalid(val shape: String) : Claim
 
         /** The commitment; the caller zeroes [bytes]. */
         class Value(val bytes: ByteArray) : Claim
     }
 
-    /** [claimAt] that tells an absent claim from a present but malformed or ambiguous one. */
+    /** [claimAt] that tells an absent claim from a present but malformed or ambiguous one, and says what the malformed one was. */
     fun claimStatus(format: String, credential: String, path: List<String>): Claim = try {
         when {
             format.equals("mso_mdoc", ignoreCase = true) -> mdocClaim(credential, path)
             format.contains("sd-jwt", ignoreCase = true) -> sdJwtClaim(credential, path)
-            else -> Claim.Invalid
+            else -> Claim.Invalid("a credential format this wallet cannot read a commitment from")
         }
     } catch (e: Exception) {
-        Claim.Invalid
+        Claim.Invalid("the credential could not be read")
     }
 
     /** An mdoc claim at `[namespace, element]`: a 32-byte bstr, present exactly once. */
     private fun mdocClaim(rawBase64Url: String, path: List<String>): Claim {
-        if (path.size != 2) return Claim.Invalid
+        if (path.size != 2) return Claim.Invalid("a path of ${path.size} segments (an mdoc claim needs [namespace, element])")
         val doc = MdocCbor.parseStoredCredential(Base64.getUrlDecoder().decode(rawBase64Url))
         val matches = doc.issuerSigned.nameSpaces[path[0]].orEmpty().filter { it.item.elementIdentifier == path[1] }
         if (matches.isEmpty()) return Claim.Absent
-        val v = matches.singleOrNull()?.item?.elementValue ?: return Claim.Invalid
-        if (v.type != CBORType.ByteString) return Claim.Invalid
-        return v.GetByteString().takeIf { it.size == COMMITMENT_BYTES }?.let { Claim.Value(it) } ?: Claim.Invalid
+        val v = matches.singleOrNull()?.item?.elementValue ?: return Claim.Invalid("present ${matches.size} times")
+        return when (v.type) {
+            CBORType.ByteString -> v.GetByteString().let { if (it.size == COMMITMENT_BYTES) Claim.Value(it) else Claim.Invalid("a byte string of ${it.size} bytes, expected $COMMITMENT_BYTES") }
+            CBORType.TextString -> Claim.Invalid("a text string of ${v.AsString().length} characters, a byte string is required")
+            else -> Claim.Invalid("CBOR type ${v.type}, a byte string is required")
+        }
     }
 
-    /** A top-level SD-JWT claim (one path segment): in the signed payload, or one disclosure bound by the payload's `_sd`; base64url of 32 bytes. */
+    /** A top-level SD-JWT claim (one path segment): in the signed payload, or one disclosure bound by the payload's `_sd`; unpadded base64url of 32 bytes. */
     private fun sdJwtClaim(credential: String, path: List<String>): Claim {
-        if (path.size != 1) return Claim.Invalid
+        if (path.size != 1) return Claim.Invalid("a path of ${path.size} segments (an SD-JWT claim here is top level)")
         val name = path[0]
         val parts = credential.split('~')
-        val payload = parts[0].split('.').getOrNull(1) ?: return Claim.Invalid
-        val obj = json.parseToJsonElement(String(Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)) as? JsonObject ?: return Claim.Invalid
+        val payload = parts[0].split('.').getOrNull(1) ?: return Claim.Invalid("the credential could not be read")
+        val obj = json.parseToJsonElement(String(Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)) as? JsonObject
+            ?: return Claim.Invalid("the credential could not be read")
         // The digests below are SHA-256: under another (or an unreadable) algorithm a disclosure cannot be matched, which is
         // NOT the same as the claim being absent: a different value could be hidden behind it.
-        obj["_sd_alg"]?.let { if ((it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content != "sha-256") return Claim.Invalid }
+        obj["_sd_alg"]?.let { if ((it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content != "sha-256") return Claim.Invalid("a disclosure digest algorithm other than sha-256") }
         val inClear = obj[name]
         val disclosed = disclosureValues(parts, obj, name)
         if (inClear != null) {
             // Present in the clear AND selectively disclosable is ambiguous: nothing is read.
-            if (disclosed.isNotEmpty()) return Claim.Invalid
+            if (disclosed.isNotEmpty()) return Claim.Invalid("both in the clear and disclosed")
             return decodeClaim(inClear)
         }
         if (disclosed.isEmpty()) return Claim.Absent
-        return decodeClaim(disclosed.singleOrNull() ?: return Claim.Invalid)
+        return decodeClaim(disclosed.singleOrNull() ?: return Claim.Invalid("disclosed ${disclosed.size} times"))
     }
 
-    private fun decodeClaim(v: JsonElement): Claim =
-        (v as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { decodeB64(it, COMMITMENT_BYTES) }?.let { Claim.Value(it) } ?: Claim.Invalid
+    private fun decodeClaim(v: JsonElement): Claim {
+        val text = (v as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return Claim.Invalid("not a text value, unpadded base64url text is required")
+        decodeB64(text, COMMITMENT_BYTES)?.let { return Claim.Value(it) }
+        // Why it is not readable, from its SHAPE only (never the value).
+        val shape = when {
+            text.endsWith("=") -> "text of ${text.length} characters with padding (padded base64 is not accepted)"
+            text.length == COMMITMENT_BYTES * 2 && text.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } -> "text of ${text.length} characters that looks like hex (hex is not accepted)"
+            text.any { it == '+' || it == '/' } -> "text of ${text.length} characters in the standard base64 alphabet (unpadded base64url is required)"
+            else -> "text of ${text.length} characters that is not unpadded base64url of $COMMITMENT_BYTES bytes"
+        }
+        return Claim.Invalid(shape)
+    }
 
     private fun disclosureValues(parts: List<String>, payload: JsonObject, name: String): List<JsonElement> {
         payload["_sd_alg"]?.let { if ((it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content != "sha-256") return emptyList() }

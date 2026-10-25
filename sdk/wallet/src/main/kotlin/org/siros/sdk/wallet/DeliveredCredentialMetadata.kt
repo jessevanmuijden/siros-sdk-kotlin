@@ -52,6 +52,9 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
     /** The credential does not carry, at the path the issuer asked for, the commitment this wallet sent in the proofs. */
     HOLDER_COMMITMENT_MISSING("the credential does not hold the holder commitment that was sent"),
 
+    /** A commitment claim in the credential is not in a representation this wallet can read (padded base64, hex, a text string in an mdoc, ...). */
+    COMMITMENT_UNREADABLE("a commitment claim in the credential is not in a readable representation"),
+
     /** A response key was offered for the flow but the completion is plain: an encrypted response is never silently downgraded. */
     PLAIN_RESPONSE("the issuer answered in clear although an encrypted response was requested"),
 }
@@ -75,7 +78,11 @@ internal sealed class DeliveredMetadataVerdict {
     }
 
     /** The response must not be stored: not one of its credentials. */
-    class Refuse(val reason: DeliveredMetadataRefusal) : DeliveredMetadataVerdict()
+    class Refuse(
+        val reason: DeliveredMetadataRefusal,
+        /** Where and what (a claim path and a shape, type and length only: NEVER a value); null when [reason] says it all. */
+        val detail: String? = null,
+    ) : DeliveredMetadataVerdict()
 }
 
 /** Whether [c] commits to a seed (carries an `ssc`): a credential that cannot be used for its pseudonym without it. */
@@ -116,9 +123,7 @@ internal object DeliveredCredentialMetadata {
         /** The commitments this wallet put in the key proofs of the request (Auxiliary Data v0.1): the credentials must hold them. */
         holderCommitments: List<org.siros.sdk.credentials.HolderCommitment> = emptyList(),
     ): DeliveredMetadataVerdict {
-        if (!holdsHolderCommitments(credentials, holderCommitments)) {
-            return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING)
-        }
+        holdsHolderCommitments(credentials, holderCommitments)?.let { return it }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         }
@@ -165,22 +170,30 @@ internal object DeliveredCredentialMetadata {
      * Spec: after issuance the wallet MUST check that the claim at each `to_issuer` path holds the commitment it sent. A claim that is
      * absent or different on any credential refuses the response (an optional entry the issuer left out entirely is allowed).
      */
-    private fun holdsHolderCommitments(credentials: List<DeliveredCredential>, sent: List<org.siros.sdk.credentials.HolderCommitment>): Boolean {
+    private fun holdsHolderCommitments(credentials: List<DeliveredCredential>, sent: List<org.siros.sdk.credentials.HolderCommitment>): DeliveredMetadataVerdict.Refuse? {
+        val missing = DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING)
         for (h in sent) {
             for (c in credentials) {
                 when (val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, h.path)) {
-                    // Only a genuinely absent OPTIONAL claim is skipped; malformed or ambiguous is refused either way.
-                    org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Absent -> if (h.required) return false
-                    org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid -> return false
+                    // Only a genuinely absent OPTIONAL claim is skipped; a malformed or ambiguous one is refused either way.
+                    org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Absent -> if (h.required) return missing
+                    is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid -> return unreadable(h.path, claim.shape)
                     is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Value -> {
                         val same = java.security.MessageDigest.isEqual(claim.bytes, h.commitment)
                         claim.bytes.fill(0)
-                        if (!same) return false
+                        if (!same) return missing
                     }
                 }
             }
         }
-        return true
+        return null
+    }
+
+    /** The refusal of a commitment claim this wallet cannot read: names the path and the SHAPE found (never the value). */
+    private fun unreadable(path: List<String>, shape: String): DeliveredMetadataVerdict.Refuse {
+        val detail = "claim at path $path is $shape"
+        timber.log.Timber.w("Delivered credential refused: $detail")
+        return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.COMMITMENT_UNREADABLE, detail)
     }
 
     private fun verifyAll(
@@ -191,8 +204,15 @@ internal object DeliveredCredentialMetadata {
     ): DeliveredMetadataVerdict {
         for (delivery in toVerify) {
             for (c in credentials) {
-                val commitment = shape.commitmentOf(c.format, c.credential, delivery)
-                    ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_COMMITMENT)
+                val commitment = shape.commitmentOf(c.format, c.credential, delivery) ?: run {
+                    // Absent stays "no commitment"; a claim that is there but unreadable names its path and shape.
+                    val status = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, delivery.path)
+                    return if (shape.id == org.siros.sdk.credentials.AuxiliaryDataV01.id && status is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid) {
+                        unreadable(delivery.path, status.shape)
+                    } else {
+                        DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_COMMITMENT)
+                    }
+                }
                 val ok = SecretSeedCommitment.opens(delivery.bytes, commitment)
                 commitment.fill(0)
                 if (!ok) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MISMATCH)

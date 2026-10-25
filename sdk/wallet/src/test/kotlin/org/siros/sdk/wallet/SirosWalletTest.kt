@@ -5113,6 +5113,64 @@ class SirosWalletTest {
     }
 
     @Test
+    fun aCancelledIssuanceStartsLateMetadataLookup_neverOverwritesTheRetrysAdapterSelection() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        fun metadataWith(advert: kotlinx.serialization.json.JsonElement) = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", advert)
+                }
+            }
+        }
+        val valid = metadataWith(Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}"""))
+        val malformed = metadataWith(buildJsonObject {})
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var call = 0
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } coAnswers {
+            val n = ++call
+            // The FIRST attempt's lookup hangs; it is released after the user cancelled and restarted, with a different answer.
+            if (n == 1) gate.await()
+            buildJsonObject { putJsonObject("context") { put("trust_metadata", if (n == 1) malformed else valid) } }
+        }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        val offer = org.siros.sdk.credentials.CredentialOffer("pid", issuer, "PID", issuerName = "I")
+        // Real time (the start does real IO work on its own dispatcher): wait until the lookup number [n] has been made.
+        suspend fun untilLookup(n: Int) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(10_000) { while (call < n) kotlinx.coroutines.delay(10) }
+        }
+        val first = async { runCatching { wallet.startIssuanceByOffer(offer) } }
+        untilLookup(1)
+        wallet.cancelCurrentFlow()
+        val second = async { runCatching { wallet.startIssuanceByOffer(offer) } }
+        untilLookup(2)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(200) }
+        assertEquals(org.siros.sdk.credentials.AuxiliaryDataV01.id, selections[issuer to "pid"]!!.shape.id)
+        gate.complete(Unit) // the cancelled attempt's lookup finally answers, with a MALFORMED advertisement
+        advanceUntilIdle()
+        val firstFailure = first.await().exceptionOrNull()
+        assertTrue("the cancelled attempt unwinds as a cancellation, not a refusal: $firstFailure", firstFailure is kotlinx.coroutines.CancellationException)
+        assertEquals(
+            "the retry's selection survived the late answer of the cancelled attempt",
+            org.siros.sdk.credentials.AuxiliaryDataV01.id, selections[issuer to "pid"]?.shape?.id,
+        )
+        second.await()
+    }
+
+    @Test
     fun generateProof_auxiliaryData_derivesFromTheOffersVctAndIssuerWhenTheRequestOmitsThem_andRecordsThatIssuer() = runTest(dispatcher) {
         val asked = mutableListOf<Pair<String, String>>()
         val keystore = pscKeystore(asked)
