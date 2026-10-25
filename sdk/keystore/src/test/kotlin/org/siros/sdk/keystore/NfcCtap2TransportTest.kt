@@ -187,4 +187,61 @@ class NfcCtap2TransportTest {
         val tagLost = runCatching { Ctap2TransportBridge(FakeBranch { throw Ctap2TransportException.DeviceDisconnected() }).ctap2SendCommand(byteArrayOf(1)) }.exceptionOrNull()
         assertEquals("key moved away (tag lost)", (tagLost as uniffi.siros_wscd_manager.FfiWscdException.Callback).msg)
     }
+
+    // ---- a connect that finishes after the timeout leaves nothing connected ----
+
+    @Test
+    fun aConnectThatFinishesAfterTheTimeoutIsClosedAndNeverPublished() {
+        val reader = FakeReader()
+        val transport = NfcCtap2Transport(reader, tagWaitTimeoutMs = 150)
+        val slow = object : NfcTagHandle {
+            var closed = false
+            override fun connect(timeoutMs: Int) { Thread.sleep(500) } // blocking: not cancellable, finishes after the timeout
+            override fun transceive(apdu: ByteArray) = byteArrayOf(0x90.toByte(), 0x00)
+            override fun close() { closed = true }
+        }
+        val failure = kotlinx.coroutines.runBlocking {
+            val connecting = kotlinx.coroutines.GlobalScope.async(kotlinx.coroutines.Dispatchers.Default) { runCatching { transport.connect() } }
+            kotlinx.coroutines.delay(30)
+            reader.present(slow)
+            connecting.await().exceptionOrNull()
+        }
+        assertTrue(failure.toString(), failure is Ctap2TransportException)
+        assertTrue("the late session was closed", slow.closed)
+        assertFalse("and reader mode disarmed", reader.armed)
+        // Nothing was published: a send has no session.
+        val sendFailure = runCatching { kotlinx.coroutines.runBlocking { transport.send(byteArrayOf(1)) } }.exceptionOrNull()
+        assertTrue(sendFailure is Ctap2TransportException.DeviceDisconnected)
+    }
+
+    // ---- the real ISO-DEP handle closes the IsoDep even when the timeout or the connect throws ----
+
+    @Test
+    fun theRealIsoDepHandleClosesTheIsoDepWhenSettingTheTimeoutOrConnectingThrows() {
+        mockkStatic(android.nfc.tech.IsoDep::class)
+        try {
+            for (failAt in listOf("timeout", "connect")) {
+                val iso = mockk<android.nfc.tech.IsoDep>(relaxed = true)
+                every { android.nfc.tech.IsoDep.get(any()) } returns iso
+                if (failAt == "timeout") every { iso.timeout = any() } throws IllegalStateException("tag lost") else every { iso.connect() } throws IOException("tag lost")
+                val handle = IsoDepHandle(mockk(relaxed = true))
+                try {
+                    handle.connect(1000)
+                    fail("connected")
+                } catch (_: Exception) {
+                }
+                handle.close() // what the transport's retry loop does
+                io.mockk.verify(exactly = 1) { iso.close() }
+            }
+        } finally {
+            unmockkStatic(android.nfc.tech.IsoDep::class)
+        }
+    }
+
+    // ---- the pre-seam constructor still exists for compiled consumers ----
+
+    @Test
+    fun theCompositeKeepsItsOldJvmConstructor() {
+        CompositeCtap2Transport::class.java.getConstructor(UsbCtap2Transport::class.java, NfcCtap2Transport::class.java, kotlin.jvm.functions.Function1::class.java)
+    }
 }

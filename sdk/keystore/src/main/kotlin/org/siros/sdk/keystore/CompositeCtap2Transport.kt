@@ -32,6 +32,13 @@ class CompositeCtap2Transport(
     private val requestChoice: suspend () -> Fido2TransportMode?,
 ) : Ctap2TransportProvider {
 
+    /** The pre-seam JVM signature (concrete USB and NFC transports), kept so consumers compiled against it still link. */
+    constructor(
+        usb: UsbCtap2Transport,
+        nfc: NfcCtap2Transport,
+        requestChoice: suspend () -> Fido2TransportMode?,
+    ) : this(usb as Ctap2TransportProvider, nfc as Ctap2TransportProvider, requestChoice)
+
     private var active: Ctap2TransportProvider? = null
 
     // Once a race picks a winner, later reconnects (e.g. Ctap2TransportBridge's

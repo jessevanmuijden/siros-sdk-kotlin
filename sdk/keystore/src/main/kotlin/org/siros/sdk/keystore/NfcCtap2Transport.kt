@@ -75,6 +75,9 @@ class NfcCtap2Transport internal constructor(
         val tags = Channel<NfcTagHandle>(Channel.UNLIMITED)
         reader.enableReaderMode { tag -> tags.trySend(tag) }
         var lastFailure: Throwable? = null
+        // The tag whose session this call opened: published to [isoDep] only when the wait ended in success, so a connect/SELECT
+        // that finishes AFTER the timeout or a cancellation fired never leaves a connected session behind.
+        var opened: NfcTagHandle? = null
         try {
             Timber.i("$TAG: waiting for NFC tap - present the security key")
             withTimeout(tagWaitTimeoutMs) {
@@ -83,8 +86,7 @@ class NfcCtap2Transport internal constructor(
                     try {
                         tag.connect(ISODEP_TIMEOUT_MS)
                         selectFidoApplet(tag)
-                        isoDep = tag
-                        Timber.i("$TAG: FIDO2 applet selected over NFC")
+                        opened = tag
                         return@withTimeout
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
@@ -96,10 +98,14 @@ class NfcCtap2Transport internal constructor(
                     }
                 }
             }
+            isoDep = opened
+            Timber.i("$TAG: FIDO2 applet selected over NFC")
         } catch (e: TimeoutCancellationException) {
+            runCatching { opened?.close() }
             reader.disableReaderMode()
             throw lastFailure?.let { mapFailure(it) } ?: Ctap2TransportException.Timeout()
         } catch (e: kotlinx.coroutines.CancellationException) {
+            runCatching { opened?.close() }
             reader.disableReaderMode()
             throw e
         } finally {

@@ -57,14 +57,15 @@ internal class AndroidNfcReader(private val activity: Activity) : NfcReader {
     }
 }
 
-private class IsoDepHandle(private val tag: Tag) : NfcTagHandle {
+internal class IsoDepHandle(private val tag: Tag) : NfcTagHandle {
     private var isoDep: IsoDep? = null
 
     override fun connect(timeoutMs: Int) {
         val tech = IsoDep.get(tag) ?: throw Ctap2TransportException.ConnectionFailed("Tag does not support ISO-DEP")
+        // Held BEFORE the timeout and the connect, so close() reaches the real IsoDep when either of them throws.
+        isoDep = tech
         tech.timeout = timeoutMs
         tech.connect()
-        isoDep = tech
     }
 
     override fun transceive(apdu: ByteArray): ByteArray = (isoDep ?: throw Ctap2TransportException.DeviceDisconnected()).transceive(apdu)
