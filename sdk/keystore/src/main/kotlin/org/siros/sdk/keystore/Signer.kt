@@ -42,6 +42,15 @@ interface Signer {
     suspend fun beginScaSign(keyId: String): ScaSignSession =
         throw ScaSignSession.insufficient("This signer does not report the authentication it applies")
 
+    /**
+     * Whether the WSCD this signer needs has been ONBOARDED (a token-backed plugin holds an
+     * enrolled key), answered WITHOUT prompting. A PIN is only meaningful for an onboarded token,
+     * so callers refuse before asking when this is `false`. Anything that cannot be determined is
+     * `false` (fail closed). The default is `true`: a signer whose keys need no onboarding
+     * (software keys, a remote service) has nothing to onboard.
+     */
+    suspend fun isWscdOnboarded(): Boolean = true
+
     /** List all keys managed by this signer. */
     suspend fun listKeys(): List<SignerKeyInfo>
 

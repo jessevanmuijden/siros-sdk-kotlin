@@ -64,6 +64,11 @@ class UniFFISigner(
 
     private val ffi: FfiWscdManager = FfiWscdManager(config)
 
+    private companion object {
+        /** Plugins whose keys live on a token the user must onboard (enroll) before use. */
+        val ONBOARDED_KEY_PLUGIN_IDS = setOf("fido2")
+    }
+
     /**
      * Which plugin this instance was constructed to back by default (e.g.
      * "softkey", "fido2", "r2ps"). Every instance also self-registers a
@@ -96,12 +101,30 @@ class UniFFISigner(
         ffi.registerR2psPlugin(ffiConfig, R2psTransportBridge(transport))
     }
 
+
     override fun registerFido2Plugin(transport: Ctap2TransportProvider) {
         ffi.registerFido2Plugin(Ctap2TransportBridge(transport))
     }
 
     override fun registerFido2PluginWithState(transport: Ctap2TransportProvider, state: ByteArray) {
         ffi.registerFido2PluginWithState(Ctap2TransportBridge(transport), state)
+    }
+
+    /**
+     * Onboarding is the plugin holding at least one enrolled key: enrolling a token generates its
+     * first key, restoring from synced state (`registerFido2PluginWithState`) brings the keys back,
+     * and destroying the lifecycle removes them. A token plugin that is not registered, holds no
+     * key, or cannot be queried is not onboarded (fail closed).
+     */
+    override suspend fun isWscdOnboarded(): Boolean {
+        if (defaultPluginId !in ONBOARDED_KEY_PLUGIN_IDS) return true
+        return try {
+            withContext(Dispatchers.IO) { ffi.listKeys().any { it.pluginId == defaultPluginId } }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            false
+        }
     }
 
     override fun exportFido2State(): ByteArray = ffi.exportFido2State()
