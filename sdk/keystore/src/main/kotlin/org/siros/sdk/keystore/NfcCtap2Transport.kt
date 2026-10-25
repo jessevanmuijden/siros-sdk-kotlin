@@ -1,14 +1,11 @@
 package org.siros.sdk.keystore
 
 import android.app.Activity
-import android.nfc.NfcAdapter
-import android.nfc.Tag
 import android.nfc.TagLostException
-import android.nfc.tech.IsoDep
-import android.util.Log
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeout
+import timber.log.Timber
 import java.io.IOException
 
 /**
@@ -39,9 +36,14 @@ import java.io.IOException
  * constraint, not a design choice, so a host app must supply its current
  * foreground Activity when constructing this transport.
  */
-class NfcCtap2Transport(private val activity: Activity) : Ctap2TransportProvider {
+class NfcCtap2Transport internal constructor(
+    private val reader: NfcReader,
+    private val tagWaitTimeoutMs: Long = TAG_WAIT_TIMEOUT_MS,
+) : Ctap2TransportProvider {
 
-    private var isoDep: IsoDep? = null
+    constructor(activity: Activity) : this(AndroidNfcReader(activity))
+
+    private var isoDep: NfcTagHandle? = null
 
     companion object {
         private const val TAG = "NfcCtap2Transport"
@@ -52,64 +54,71 @@ class NfcCtap2Transport(private val activity: Activity) : Ctap2TransportProvider
         )
 
         private const val SW_SUCCESS = 0x9000
-        private const val TAG_WAIT_TIMEOUT_MS = 30_000L
+        internal const val TAG_WAIT_TIMEOUT_MS = 30_000L
         private const val ISODEP_TIMEOUT_MS = 20_000
 
-        private const val READER_FLAGS =
-            NfcAdapter.FLAG_READER_NFC_A or
-                NfcAdapter.FLAG_READER_NFC_B or
-                NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK
     }
 
-    override suspend fun isAvailable(): Boolean {
-        val adapter = NfcAdapter.getDefaultAdapter(activity)
-        return adapter != null && adapter.isEnabled
-    }
+    override suspend fun isAvailable(): Boolean = reader.isEnabled
 
+    /**
+     * Waits for the key to be presented and selects its FIDO applet.
+     *
+     * Reader mode is armed ONCE and stays armed for the whole wait: a first presentation that fails (the tag moved away during
+     * the SELECT, an ISO-DEP error, the key re-presented) is logged (type and short reason, never payload bytes) and the next
+     * presentation is handled here too, so Android's own tag dispatcher (the YubiKey OTP "Web link" prompt) never gets the key
+     * while an enrollment is waiting. Reader mode is disarmed only on a timeout or cancellation (a connected session keeps it
+     * until [disconnect]).
+     */
     override suspend fun connect() {
-        val adapter = NfcAdapter.getDefaultAdapter(activity)
-            ?: throw Ctap2TransportException.NotAvailable()
-        if (!adapter.isEnabled) throw Ctap2TransportException.NotAvailable()
-
-        val tagDeferred = CompletableDeferred<Tag>()
-        adapter.enableReaderMode(
-            activity,
-            { tag -> tagDeferred.complete(tag) },
-            READER_FLAGS,
-            null,
-        )
-
-        val tag = try {
-            Log.i(TAG, "Waiting for NFC tap - present the security key")
-            withTimeout(TAG_WAIT_TIMEOUT_MS) { tagDeferred.await() }
-        } catch (e: TimeoutCancellationException) {
-            adapter.disableReaderMode(activity)
-            throw Ctap2TransportException.NotAvailable()
-        }
-
-        val tech = IsoDep.get(tag) ?: run {
-            adapter.disableReaderMode(activity)
-            throw Ctap2TransportException.ConnectionFailed("Tag does not support ISO-DEP")
-        }
-
+        if (!reader.isEnabled) throw Ctap2TransportException.NotAvailable()
+        val tags = Channel<NfcTagHandle>(Channel.UNLIMITED)
+        reader.enableReaderMode { tag -> tags.trySend(tag) }
+        var lastFailure: Throwable? = null
         try {
-            tech.timeout = ISODEP_TIMEOUT_MS
-            tech.connect()
-            selectFidoApplet(tech)
-        } catch (e: Exception) {
-            runCatching { tech.close() }
-            adapter.disableReaderMode(activity)
-            throw Ctap2TransportException.ConnectionFailed(e.message ?: "NFC connect failed")
+            Timber.i("$TAG: waiting for NFC tap - present the security key")
+            withTimeout(tagWaitTimeoutMs) {
+                while (true) {
+                    val tag = tags.receive()
+                    try {
+                        tag.connect(ISODEP_TIMEOUT_MS)
+                        selectFidoApplet(tag)
+                        isoDep = tag
+                        Timber.i("$TAG: FIDO2 applet selected over NFC")
+                        return@withTimeout
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        runCatching { tag.close() }
+                        lastFailure = e
+                        // The cause, for the log only: type and message, never APDU bytes.
+                        Timber.w("$TAG: tag connection failed (${e.javaClass.simpleName}: ${e.message?.take(80)}); waiting for the next tap")
+                    }
+                }
+            }
+        } catch (e: TimeoutCancellationException) {
+            reader.disableReaderMode()
+            throw lastFailure?.let { mapFailure(it) } ?: Ctap2TransportException.Timeout()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            reader.disableReaderMode()
+            throw e
+        } finally {
+            tags.close()
         }
+    }
 
-        isoDep = tech
-        Log.i(TAG, "FIDO2 applet selected over NFC")
+    /** A tag-level failure as a typed transport error with a short, payload-free reason. */
+    private fun mapFailure(e: Throwable): Ctap2TransportException = when (e) {
+        is Ctap2TransportException -> e
+        is TagLostException -> Ctap2TransportException.DeviceDisconnected()
+        is IOException -> Ctap2TransportException.DeviceDisconnected()
+        else -> Ctap2TransportException.ConnectionFailed(e.javaClass.simpleName)
     }
 
     override suspend fun disconnect() {
         runCatching { isoDep?.close() }
         isoDep = null
-        NfcAdapter.getDefaultAdapter(activity)?.disableReaderMode(activity)
+        reader.disableReaderMode()
     }
 
     /**
@@ -121,7 +130,7 @@ class NfcCtap2Transport(private val activity: Activity) : Ctap2TransportProvider
      */
     override suspend fun send(command: ByteArray): ByteArray {
         val tech = isoDep ?: throw Ctap2TransportException.DeviceDisconnected()
-        Log.i(TAG, "CTAP2 command (${command.size}B): ${command.toHex()}")
+        Timber.d("$TAG: CTAP2 command (${command.size}B)")
         val response = try {
             tech.transceive(buildApdu(command))
         } catch (e: TagLostException) {
@@ -131,14 +140,12 @@ class NfcCtap2Transport(private val activity: Activity) : Ctap2TransportProvider
             throw Ctap2TransportException.DeviceDisconnected()
         }
         val unwrapped = unwrapApduResponse(response)
-        Log.i(TAG, "CTAP2 response (${unwrapped.size}B): ${unwrapped.toHex()}")
+        Timber.d("$TAG: CTAP2 response (${unwrapped.size}B)")
         return unwrapped
     }
 
-    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
-
     /** ISO 7816-4 SELECT (by name) for the FIDO2 applet AID. */
-    private fun selectFidoApplet(tech: IsoDep) {
+    private fun selectFidoApplet(tech: NfcTagHandle) {
         val selectApdu = byteArrayOf(0x00, 0xA4.toByte(), 0x04, 0x00, FIDO_AID.size.toByte()) +
             FIDO_AID + byteArrayOf(0x00)
         val response = tech.transceive(selectApdu)
