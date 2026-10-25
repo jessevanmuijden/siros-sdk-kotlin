@@ -62,6 +62,13 @@ class AuxiliaryDataV01Test {
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"required":true}]}""",
             """{"to_wallet":[],"to_issuer":[]}""",
             "{}",
+            """{"to_wallet":[{"path":["ssc"]}]}""",
+            """{"to_wallet":[{"type":5,"alg":"sha-256","path":["ssc"]}]}""",
+            """{"to_wallet":[{"type":"hash_commitment","path":["ssc"]}]}""",
+            """{"to_wallet":[{"type":"hash_commitment","alg":7,"path":["ssc"]}]}""",
+            """{"to_wallet":[{"type":"hash_commitment","alg":"sha-512"}]}""",
+            """{"to_wallet":[{"type":"hash_commitment","alg":"sha-512","path":[]}]}""",
+            """{"to_issuer":[{"alg":"sha-256","path":["psc"]}]}""",
             """{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":"true"}]}""",
             """{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":"false"}]}""",
             """{"to_wallet":[],"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"]}]}""",
@@ -78,6 +85,8 @@ class AuxiliaryDataV01Test {
         val both = config(goodAdvert, legacy = """{"namespaces":["org.siros.nym_auth"]}""")
         assertTrue(AuxiliaryDataShapes.select(both) is AuxiliarySelection.Malformed)
     }
+
+    private fun ext0() = """{"type":"future_kind","alg":"sha-256","path":["x"]}"""
 
     private fun response(vararg entries: String) = Json.parseToJsonElement("""{"auxiliary_data":[${entries.joinToString(",")}],"display":[]}""").jsonObject
     private fun entry(path: String = """["ssc"]""", opening: String = openingB64, alg: String = "sha-256", type: String = "hash_commitment") =
@@ -97,6 +106,12 @@ class AuxiliaryDataV01Test {
             response(entry(opening = openingB64 + "==")),
             response(entry(opening = openingB64.replace('-', '+').replace('_', '/') + "!")),
             response(entry(), entry()),
+            response("""{"alg":"sha-256","path":["ssc"],"opening":"$openingB64"}"""),
+            response("""{"type":3,"alg":"sha-256","path":["ssc"],"opening":"$openingB64"}"""),
+            response("""{"type":"hash_commitment","path":["ssc"],"opening":"$openingB64"}"""),
+            response("""{"type":"hash_commitment","alg":9,"path":["ssc"],"opening":"$openingB64"}"""),
+            response("""{"type":"hash_commitment","alg":"sha-512","opening":"$openingB64"}"""),
+            response(ext0(), """{"type":"hash_commitment","path":["ssc"],"opening":"$openingB64"}"""),
             Json.parseToJsonElement("""{"auxiliary_data":[]}""").jsonObject,
             Json.parseToJsonElement("""{"auxiliary_data":{"path":["ssc"]}}""").jsonObject,
         )

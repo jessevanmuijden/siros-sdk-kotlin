@@ -387,6 +387,12 @@ class DeliveredCredentialMetadataTest {
         )
         // 2. a recognised secret nobody advertised: refused (not accepted, not stored).
         assertTrue(receipt(onlyExt, members(aux to "[$extEntry,$recognised]")) is DeliveredMetadataVerdict.Refuse)
+        // 2b. an entry with no alg is MALFORMED, not an ignorable extension: its unchecked opening must not be stored.
+        assertRefused(
+            DeliveredMetadataRefusal.MALFORMED,
+            receipt(onlyExt, members(aux to """[{"type":"hash_commitment","path":["ssc"],"opening":"$v01OpeningB64"}]""")),
+        )
+        assertRefused(DeliveredMetadataRefusal.MALFORMED, receipt(onlyExt, members(aux to """[{"path":["ssc"],"opening":"$v01OpeningB64"}]""")))
         // 3. nothing delivered under that advertisement: nothing to refuse.
         assertTrue(receipt(onlyExt, response(members = mapOf("display" to JsonArray(emptyList())))) is DeliveredMetadataVerdict.Accept)
         // 4. a legacy-shape secret under a v0.1 advertisement: foreign, refused.
@@ -400,6 +406,18 @@ class DeliveredCredentialMetadataTest {
         assertTrue(receipt(withSlot, members(aux to "[$recognised]")) is DeliveredMetadataVerdict.Accept)
         // 8. an empty advertisement object is not an advertisement at all: the configuration is malformed.
         assertTrue(org.siros.sdk.credentials.AuxiliaryDataShapes.select(configOf("{}")) is org.siros.sdk.credentials.AuxiliarySelection.Malformed)
+    }
+
+    @Test
+    fun mergeDisplay_neverCarriesAnyShapesSecretIntoDisplayMetadata() {
+        val issuerPublic = Json.parseToJsonElement("""{"display":[{"name":"PID"}]}""").jsonObject
+        val v01 = Json.parseToJsonElement("""{"auxiliary_data":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$v01OpeningB64"}],"claims":[1]}""").jsonObject
+        val merged = SecretSeedDelivery.mergeDisplay(issuerPublic, v01)
+        assertFalse("auxiliary_data reached display metadata", "auxiliary_data" in merged)
+        assertEquals(setOf("display", "claims"), merged.keys)
+        val both = Json.parseToJsonElement("""{"${SecretSeedDelivery.MEMBER}":{"$ns":"${N.seedHex}"},"auxiliary_data":[],"claims":[1]}""").jsonObject
+        assertEquals(setOf("display", "claims"), SecretSeedDelivery.mergeDisplay(issuerPublic, both).keys)
+        assertEquals(setOf("claims"), SecretSeedDelivery.stripped(both).keys)
     }
 
     private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(
