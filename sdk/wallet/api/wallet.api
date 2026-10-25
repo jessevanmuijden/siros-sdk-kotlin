@@ -406,6 +406,14 @@ public final class org/siros/sdk/wallet/NoEligibleWscdPluginException : org/siro
 	public final fun getRequiredTier ()Ljava/lang/String;
 }
 
+public final class org/siros/sdk/wallet/NoOnboardedWscdException : org/siros/sdk/wallet/WscdSelectionException {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)V
+	public final fun getCredentialType ()Ljava/lang/String;
+	public final fun getIssuer ()Ljava/lang/String;
+	public final fun getPluginIds ()Ljava/util/List;
+	public final fun getRequiredTier ()Ljava/lang/String;
+}
+
 public final class org/siros/sdk/wallet/NonDisclosureMode : java/lang/Enum {
 	public static final field DEFAULT Lorg/siros/sdk/wallet/NonDisclosureMode;
 	public static final field NONE Lorg/siros/sdk/wallet/NonDisclosureMode;
