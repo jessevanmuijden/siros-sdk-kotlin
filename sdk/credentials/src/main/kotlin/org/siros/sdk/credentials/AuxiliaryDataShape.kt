@@ -9,6 +9,9 @@ import kotlinx.serialization.json.JsonObject
  * namespace), the hash [alg] of the commitment and the secret [bytes] (the "opening"). The caller owns [bytes] and zeroes them.
  */
 class SecretDelivery(val path: List<String>, val alg: String, val bytes: ByteArray) {
+    /** How the claim at [path] writes the commitment (the advertised `encoding`; null: the format's default); set from the advertisement at receipt. */
+    var encoding: String? = null
+
     override fun toString() = "SecretDelivery(path=$path, alg=$alg, redacted)"
 }
 
@@ -16,13 +19,14 @@ class SecretDelivery(val path: List<String>, val alg: String, val bytes: ByteArr
  * A commitment the wallet gives the issuer, normalised: the claims [path] it is for, the hash [alg], whether the issuer
  * [required] it, and the [commitment] value itself.
  */
-class HolderCommitment(val path: List<String>, val alg: String, val required: Boolean, val commitment: ByteArray) {
+class HolderCommitment(val path: List<String>, val alg: String, val required: Boolean, val commitment: ByteArray, val encoding: String? = null) {
     override fun toString() = "HolderCommitment(path=$path, alg=$alg, required=$required, redacted)"
 }
 
 /** What a configuration advertises it will deliver ([toWallet]) and wants ([toIssuer]), normalised. Names and slots, never values. */
 class AuxiliaryAdvertisement(val toWallet: List<Slot>, val toIssuer: List<Slot>) {
-    class Slot(val path: List<String>, val alg: String, val required: Boolean = false)
+    /** [encoding]: how the claim at [path] writes the commitment (`base64url`, `base64`, `hex`); null: the format's default (SD-JWT unpadded base64url, mdoc a byte string). */
+    class Slot(val path: List<String>, val alg: String, val required: Boolean = false, val encoding: String? = null)
 }
 
 /** The outcome of reading an issuer's advertisement for one configuration. */

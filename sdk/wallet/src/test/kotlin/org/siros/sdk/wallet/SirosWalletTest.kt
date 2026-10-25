@@ -5043,7 +5043,7 @@ class SirosWalletTest {
             putJsonObject("credential_configurations_supported") {
                 putJsonObject("pid") {
                     put("format", JsonPrimitive("dc+sd-jwt"))
-                    put("auxiliary_data_supported", Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}"""))
+                    put("auxiliary_data_supported", Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}"""))
                 }
             }
         }
@@ -5124,7 +5124,7 @@ class SirosWalletTest {
                 }
             }
         }
-        val valid = metadataWith(Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}"""))
+        val valid = metadataWith(Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}"""))
         val malformed = metadataWith(buildJsonObject {})
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
         var call = 0
@@ -5166,6 +5166,62 @@ class SirosWalletTest {
         assertEquals(
             "the retry's selection survived the late answer of the cancelled attempt",
             org.siros.sdk.credentials.AuxiliaryDataV01.id, selections[issuer to "pid"]?.shape?.id,
+        )
+        second.await()
+    }
+
+    @Test
+    fun aCancelledRawOfferStartsLateDisplayLookup_neverOverwritesTheRetrysAdapterSelection() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        fun metadataWith(advert: kotlinx.serialization.json.JsonElement) = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", advert)
+                }
+            }
+        }
+        val valid = metadataWith(Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}"""))
+        val differentValid = metadataWith(Json.parseToJsonElement("""{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"encoding":"base64url"}]}"""))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var call = 0
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } coAnswers {
+            val n = ++call
+            if (n == 1) gate.await() // the FIRST attempt's display lookup hangs and is released after the retry recorded its own
+            buildJsonObject { putJsonObject("context") { put("trust_metadata", if (n == 1) differentValid else valid) } }
+        }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        val offerJson = """{"credential_issuer":"$issuer","credential_configuration_ids":["pid"]}"""
+        suspend fun untilLookup(n: Int) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(10_000) { while (call < n) kotlinx.coroutines.delay(10) }
+        }
+        val first = async { runCatching { wallet.startIssuance(offerJson) } }
+        untilLookup(1)
+        wallet.cancelCurrentFlow()
+        val second = async { runCatching { wallet.startIssuance(offerJson) } }
+        untilLookup(2)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(200) }
+        val retrys = selections[issuer to "pid"]
+        assertEquals("the retry recorded its own selection", listOf(listOf("ssc")), retrys!!.advertisement.toWallet.map { it.path })
+        gate.complete(Unit) // the cancelled attempt's lookup answers late, with a DIFFERENT valid advertisement
+        advanceUntilIdle()
+        first.await()
+        assertEquals(
+            "the late display lookup of the cancelled start did not overwrite the retry's selection",
+            listOf(listOf("ssc")), selections[issuer to "pid"]!!.advertisement.toWallet.map { it.path },
         )
         second.await()
     }
@@ -5251,6 +5307,47 @@ class SirosWalletTest {
         verify(exactly = 1) { listener.onFlowError("flow-psc", any(), any()) }
         coVerify(exactly = 0) { keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) }
         coVerify(exactly = 0) { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun anInvalidProofWithAnAuxiliaryDataDetail_isTypedNonRetryableAndLeaksNoFreeText() = runTest(dispatcher) {
+        val errorFlow = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        mockEngineConstructor(flowErrors = errorFlow)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val cases = mapOf(
+            "auxiliary_data: the key proofs carry different auxiliary_data" to AuxiliaryDataRefusedException.Reason.PROOFS_DIFFER,
+            "auxiliary_data: the entry for [psc] is required" to AuxiliaryDataRefusedException.Reason.ENTRY_REQUIRED,
+            "auxiliary_data: to_issuer lists no entry for [x]" to AuxiliaryDataRefusedException.Reason.NO_SUCH_ENTRY,
+            "auxiliary_data: alg must be sha-256" to AuxiliaryDataRefusedException.Reason.ALG,
+            "auxiliary_data: the entry for [psc] carries only type, alg, path and commitment" to AuxiliaryDataRefusedException.Reason.ENTRY_MEMBERS,
+            "auxiliary_data: the commitment must be a base64url sha-256 hash" to AuxiliaryDataRefusedException.Reason.COMMITMENT_FORMAT,
+            "auxiliary_data: something new SECRET-FREE-TEXT" to AuxiliaryDataRefusedException.Reason.OTHER,
+        )
+        var n = 0
+        for ((text, reason) in cases) {
+            val flow = "flow-aux-${n++}"
+            errorFlow.emit(FlowErrorMessage(flowId = flow, error = org.siros.sdk.transport.engine.FlowError(code = "INVALID_PROOF", message = "invalid_proof: $text")))
+            advanceUntilIdle()
+            val err = slot<AuxiliaryDataRefusedException>()
+            verify(exactly = 1) { listener.onAuxiliaryDataRefused(flow, capture(err)) }
+            assertEquals(reason, err.captured.reason)
+            assertFalse(err.captured.retryable)
+            assertFalse("no issuer free text in the exception", err.captured.message!!.contains("SECRET-FREE-TEXT"))
+            verify(exactly = 0) { listener.onFlowError(flow, any(), any()) }
+        }
+        // An invalid_proof WITHOUT the auxiliary_data prefix is an ordinary flow error.
+        errorFlow.emit(FlowErrorMessage(flowId = "flow-plain", error = org.siros.sdk.transport.engine.FlowError(code = "INVALID_PROOF", message = "invalid_proof: nonce mismatch")))
+        advanceUntilIdle()
+        verify(exactly = 1) { listener.onFlowError("flow-plain", any(), any()) }
     }
 
     @Test

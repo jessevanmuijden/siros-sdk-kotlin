@@ -405,7 +405,7 @@ class DeliveredCredentialMetadataTest {
         // 5. nothing advertised at all: a v0.1 secret is a foreign shape, refused.
         assertRefused(DeliveredMetadataRefusal.MALFORMED, receipt(configOf(null), members(aux to "[$recognised]")))
         // 6. a recognised slot advertised but only extensions delivered: the slot did not arrive.
-        val withSlot = configOf("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}""")
+        val withSlot = configOf("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}""")
         assertTrue(receipt(withSlot, members(aux to "[$extEntry]")) is DeliveredMetadataVerdict.Refuse)
         // 7. the same slot delivered: accepted.
         assertTrue(receipt(withSlot, members(aux to "[$recognised]")) is DeliveredMetadataVerdict.Accept)
@@ -457,6 +457,76 @@ class DeliveredCredentialMetadataTest {
         assertTrue(verdictFor("mso_mdoc", N.mdoc(listOf(N.bstr(N.goodSsc))), mdocPath) is DeliveredMetadataVerdict.Accept)
         assertUnreadable(verdictFor("mso_mdoc", N.mdoc(listOf(N.text(goodB64()))), mdocPath), "text string", "byte string is required")
         assertUnreadable(verdictFor("mso_mdoc", N.mdoc(listOf(N.bstr(ByteArray(16)))), mdocPath), "16 bytes")
+    }
+
+    // ---- the commitment claim is read per the ADVERTISED encoding (vc pull 850 publishes `encoding` in auxiliary_data_supported) ----
+
+    private val specCommitment = java.util.Base64.getUrlDecoder().decode(v01Commitment)
+
+    private fun written(encoding: String?) = when (encoding) {
+        "base64" -> java.util.Base64.getEncoder().encodeToString(specCommitment)
+        "hex" -> specCommitment.joinToString("") { "%02x".format(it) }
+        else -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(specCommitment)
+    }
+
+    /** A delivery of the spec vector whose claim at [path] is [credential], advertised with [encoding]. */
+    private fun deliveryVerdict(format: String, credential: String, path: List<String>, encoding: String?): DeliveredMetadataVerdict {
+        val adv = org.siros.sdk.credentials.AuxiliaryAdvertisement(
+            listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(path, "sha-256", false, encoding)), emptyList(),
+        )
+        val body = response(
+            mapOf("auxiliary_data" to Json.parseToJsonElement("""[{"type":"hash_commitment","alg":"sha-256","path":${JsonArray(path.map { JsonPrimitive(it) })},"opening":"$v01OpeningB64"}]""")),
+            encrypted = true,
+        )
+        return DeliveredCredentialMetadata.check(
+            body, listOf(DeliveredCredential(format, credential, "n1")), ns, true, advertised = true,
+            shape = org.siros.sdk.credentials.AuxiliaryDataV01, advertisement = adv,
+        )
+    }
+
+    @Test
+    fun everyAdvertisedEncodingIsReadInBothFormats_andAMismatchBetweenAdvertisedAndFoundIsRefusedWithAShortTypedDetail() {
+        val mdocPath = listOf(N.DOCTYPE, "ssc")
+        for (enc in listOf(null, "base64url", "base64", "hex")) {
+            // SD-JWT: the claim is text in the advertised encoding (absent: unpadded base64url).
+            assertTrue("sd-jwt $enc", deliveryVerdict("dc+sd-jwt", N.sdJwt(sscValues = listOf(written(enc))), listOf("ssc"), enc) is DeliveredMetadataVerdict.Accept)
+            // mdoc: absent = a byte string; set = a text string in that encoding.
+            val mdocClaim = if (enc == null) N.bstr(specCommitment) else N.text(written(enc))
+            assertTrue("mdoc $enc", deliveryVerdict("mso_mdoc", N.mdoc(listOf(mdocClaim)), mdocPath, enc) is DeliveredMetadataVerdict.Accept)
+        }
+        fun unreadable(v: DeliveredMetadataVerdict, vararg words: String) {
+            assertRefused(DeliveredMetadataRefusal.COMMITMENT_UNREADABLE, v)
+            val detail = (v as DeliveredMetadataVerdict.Refuse).detail!!
+            words.forEach { assertTrue("$detail should mention '$it'", detail.contains(it)) }
+            assertFalse("never the value", detail.contains(written(null)) || detail.contains(written("hex")) || detail.contains(written("base64")))
+        }
+        // Advertised hex, found base64url (and the other way round, and padded vs unpadded).
+        unreadable(deliveryVerdict("dc+sd-jwt", N.sdJwt(sscValues = listOf(written("base64url"))), listOf("ssc"), "hex"), "hex")
+        unreadable(deliveryVerdict("dc+sd-jwt", N.sdJwt(sscValues = listOf(written("hex"))), listOf("ssc"), "base64url"), "looks like hex", "base64url")
+        unreadable(deliveryVerdict("dc+sd-jwt", N.sdJwt(sscValues = listOf(written("base64url"))), listOf("ssc"), "base64"), "base64")
+        unreadable(deliveryVerdict("dc+sd-jwt", N.sdJwt(sscValues = listOf(written("hex").uppercase())), listOf("ssc"), "hex"), "hex")
+        // mdoc: a byte string where text was advertised, and text where nothing was advertised.
+        unreadable(deliveryVerdict("mso_mdoc", N.mdoc(listOf(N.bstr(specCommitment))), mdocPath, "base64"), "byte string", "base64")
+        unreadable(deliveryVerdict("mso_mdoc", N.mdoc(listOf(N.text(written("base64url")))), mdocPath, null), "text string", "byte string is required")
+        unreadable(deliveryVerdict("mso_mdoc", N.mdoc(listOf(N.text(written("hex")))), mdocPath, "base64url"), "looks like hex")
+    }
+
+    @Test
+    fun aHolderCommitmentIsCheckedAgainstTheAdvertisedEncodingOfItsSlotToo() {
+        val value = N.goodSsc
+        fun sentWith(enc: String?) = listOf(org.siros.sdk.credentials.HolderCommitment(listOf("ssc"), "sha-256", true, value.copyOf(), enc))
+        fun text(enc: String?) = when (enc) {
+            "hex" -> N.hex(value)
+            "base64" -> java.util.Base64.getEncoder().encodeToString(value)
+            else -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(value)
+        }
+        for (enc in listOf(null, "base64url", "base64", "hex")) {
+            assertTrue(enc, checkV01(credentials = listOf(DeliveredCredential("dc+sd-jwt", N.sdJwt(sscValues = listOf(text(enc))), "n1")), holderCommitments = sentWith(enc), response = response(members = mapOf("display" to JsonArray(emptyList()))), advertised = false) is DeliveredMetadataVerdict.Accept)
+        }
+        assertRefused(
+            DeliveredMetadataRefusal.COMMITMENT_UNREADABLE,
+            checkV01(credentials = listOf(DeliveredCredential("dc+sd-jwt", N.sdJwt(sscValues = listOf(text(null))), "n1")), holderCommitments = sentWith("hex"), response = response(members = mapOf("display" to JsonArray(emptyList()))), advertised = false),
+        )
     }
 
     private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(
