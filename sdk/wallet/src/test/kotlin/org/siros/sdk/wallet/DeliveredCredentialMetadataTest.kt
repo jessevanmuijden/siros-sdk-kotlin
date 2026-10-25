@@ -345,6 +345,63 @@ class DeliveredCredentialMetadataTest {
         )
     }
 
+    // ---- truth table: what an advertisement (or none) allows a response to carry ----
+
+    private fun configOf(advert: String?, legacy: Boolean = false) = Json { ignoreUnknownKeys = true }.decodeFromString(
+        org.siros.sdk.credentials.CredentialConfiguration.serializer(),
+        buildString {
+            append("""{"format":"dc+sd-jwt"""")
+            if (legacy) append(""","credential_metadata":{"org.siros.secret_seed":{"namespaces":["org.siros.nym_auth"]}}""")
+            if (advert != null) append(""","auxiliary_data_supported":$advert""")
+            append("}")
+        },
+    )
+
+    private val extEntry = """{"type":"future_kind","alg":"sha-256","path":["x"],"opening":"ignored"}"""
+
+    private fun members(vararg pairs: Pair<String, String>) =
+        response(pairs.associate { (k, v) -> k to Json.parseToJsonElement(v) })
+
+    /** The verdict of a receipt for [response] under the adapter and advertisement [config] selects (none selected: legacy, nothing advertised). */
+    private fun receipt(config: org.siros.sdk.credentials.CredentialConfiguration, response: Response, credentials: List<DeliveredCredential> = listOf(v01Cred()), canStore: Boolean = true): DeliveredMetadataVerdict {
+        val sel = org.siros.sdk.credentials.AuxiliaryDataShapes.select(config)
+        val selected = sel as? org.siros.sdk.credentials.AuxiliarySelection.Selected
+        return DeliveredCredentialMetadata.check(
+            response, credentials, ns, canStore,
+            advertised = selected?.advertisement?.toWallet?.isNotEmpty() == true,
+            shape = selected?.shape ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+            advertisement = selected?.advertisement,
+        )
+    }
+
+    @Test
+    fun truthTable_anAdvertisementOfOnlyUnrecognisedEntries_keepsTheShape_andNeitherHidesItNorAcceptsAForeignOrUnadvertisedSecret() {
+        val onlyExt = configOf("""{"to_wallet":[{"type":"future_kind","alg":"sha-256","path":["x"]}]}""")
+        val aux = "auxiliary_data"
+        val recognised = """{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$v01OpeningB64"}"""
+        // 1. only extensions delivered: ignored, accepted.
+        assertTrue(receipt(onlyExt, members(aux to "[$extEntry]")) is DeliveredMetadataVerdict.Accept)
+        // ...and without a notification id or a place to keep a secret, since there is no secret.
+        assertTrue(
+            receipt(onlyExt, members(aux to "[$extEntry]"), listOf(DeliveredCredential("dc+sd-jwt", v01Cred().credential, null)), canStore = false) is DeliveredMetadataVerdict.Accept,
+        )
+        // 2. a recognised secret nobody advertised: refused (not accepted, not stored).
+        assertTrue(receipt(onlyExt, members(aux to "[$extEntry,$recognised]")) is DeliveredMetadataVerdict.Refuse)
+        // 3. nothing delivered under that advertisement: nothing to refuse.
+        assertTrue(receipt(onlyExt, response(members = mapOf("display" to JsonArray(emptyList())))) is DeliveredMetadataVerdict.Accept)
+        // 4. a legacy-shape secret under a v0.1 advertisement: foreign, refused.
+        assertRefused(DeliveredMetadataRefusal.MALFORMED, receipt(onlyExt, members(SecretSeedDelivery.MEMBER to """{"$ns":"${N.seedHex}"}""")))
+        // 5. nothing advertised at all: a v0.1 secret is a foreign shape, refused.
+        assertRefused(DeliveredMetadataRefusal.MALFORMED, receipt(configOf(null), members(aux to "[$recognised]")))
+        // 6. a recognised slot advertised but only extensions delivered: the slot did not arrive.
+        val withSlot = configOf("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}""")
+        assertTrue(receipt(withSlot, members(aux to "[$extEntry]")) is DeliveredMetadataVerdict.Refuse)
+        // 7. the same slot delivered: accepted.
+        assertTrue(receipt(withSlot, members(aux to "[$recognised]")) is DeliveredMetadataVerdict.Accept)
+        // 8. an empty advertisement object is not an advertisement at all: the configuration is malformed.
+        assertTrue(org.siros.sdk.credentials.AuxiliaryDataShapes.select(configOf("{}")) is org.siros.sdk.credentials.AuxiliarySelection.Malformed)
+    }
+
     private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(
         mapOf("auxiliary_data" to Json.parseToJsonElement("""[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$opening"}]""")),
         encrypted,

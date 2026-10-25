@@ -148,8 +148,11 @@ internal object DeliveredCredentialMetadata {
         val deliveries = (shape.parseDeliveries(members) as? AuxiliaryParse.Parsed)?.deliveries
             ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         try {
-            if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
-            if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
+            // A secret needs a notification id and somewhere to be kept; a response whose only entries are ignored extensions has none.
+            if (deliveries.isNotEmpty()) {
+                if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
+                if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
+            }
             val toVerify = shape.deliveriesToVerify(deliveries, secretNamespace, advertisement)
                 ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NAMESPACE_ABSENT)
             return verifyAll(shape, toVerify, credentials, all)
