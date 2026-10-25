@@ -89,11 +89,13 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         if (config.credentialMetadata?.auxiliaryData != null) return AuxiliarySelection.Malformed
         val raw = config.auxiliaryDataSupported ?: return AuxiliarySelection.None
         val obj = raw as? JsonObject ?: return AuxiliarySelection.Malformed
+        // Section 5: at least one direction. An empty object is a malformed advertisement, not "nothing advertised".
+        if (obj.isEmpty()) return AuxiliarySelection.Malformed
         if (!obj.keys.all { it == "to_wallet" || it == "to_issuer" }) return AuxiliarySelection.Malformed
         val toWallet = entries(obj["to_wallet"], allowRequired = false) ?: return AuxiliarySelection.Malformed
         val toIssuer = entries(obj["to_issuer"], allowRequired = true) ?: return AuxiliarySelection.Malformed
-        // Nothing recognised (only extensions this wallet does not know): it takes no part, as if nothing was advertised.
-        if (toWallet.isEmpty() && toIssuer.isEmpty()) return AuxiliarySelection.None
+        // Only extensions this wallet does not know: the SHAPE is still the advertised one (section 3: unrecognised entries are
+        // ignored, not a reason to treat the response as a foreign shape), it just has no recognised slots to act on.
         return AuxiliarySelection.Selected(this, AuxiliaryAdvertisement(toWallet, toIssuer))
     }
 
@@ -136,7 +138,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         // Everything delivered is verified, and the delivery must be exactly what was advertised: no extra secret, none missing.
         val want = advertised?.toWallet?.map { it.path }?.toSet() ?: return null
         val got = deliveries.map { it.path }.toSet()
-        return if (got == want && deliveries.isNotEmpty()) deliveries else null
+        // Nothing recognised advertised and nothing recognised delivered (only extensions): nothing to verify, nothing missing.
+        return if (got == want && (deliveries.isNotEmpty() || want.isEmpty())) deliveries else null
     }
 
     override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = claimAt(format, credential, delivery.path)

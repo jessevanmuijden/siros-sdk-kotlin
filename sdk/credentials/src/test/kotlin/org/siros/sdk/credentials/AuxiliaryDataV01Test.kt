@@ -61,6 +61,7 @@ class AuxiliaryDataV01Test {
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"opening":"AAAA"}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"required":true}]}""",
             """{"to_wallet":[],"to_issuer":[]}""",
+            "{}",
             """{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":"true"}]}""",
             """{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":"false"}]}""",
             """{"to_wallet":[],"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"]}]}""",
@@ -194,8 +195,9 @@ class AuxiliaryDataV01Test {
         val sel = AuxiliaryDataShapes.select(config(ok)) as AuxiliarySelection.Selected
         assertEquals(listOf(listOf("ssc")), sel.advertisement.toWallet.map { it.path })
         assertEquals(listOf(listOf("psc")), sel.advertisement.toIssuer.map { it.path })
-        // An unrecognised OPTIONAL to_issuer entry alone: ignored, nothing recognised, as if nothing was advertised.
-        assertTrue(AuxiliaryDataShapes.select(config("""{"to_issuer":[$ext]}""")) is AuxiliarySelection.None)
+        // An unrecognised OPTIONAL to_issuer entry alone: ignored; the advertised shape is kept with no recognised slots.
+        val onlyExt = AuxiliaryDataShapes.select(config("""{"to_issuer":[$ext]}""")) as AuxiliarySelection.Selected
+        assertTrue(onlyExt.advertisement.toWallet.isEmpty() && onlyExt.advertisement.toIssuer.isEmpty())
         // An unrecognised REQUIRED one cannot be satisfied.
         val required = """{"type":"future_kind","alg":"sha-256","path":["x"],"required":true}"""
         assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}],"to_issuer":[$required]}""")) is AuxiliarySelection.Malformed)
