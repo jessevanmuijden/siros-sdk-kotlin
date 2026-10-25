@@ -2739,12 +2739,13 @@ class SirosWallet private constructor(
      * succeeding would turn a backend outage into an outage for every issuer.
      */
     private suspend fun issuerEntitlementFor(issuerUrl: String, configurationId: String): IssuerEntitlement? =
+        resolveIssuerMetadataForStart(issuerUrl, configurationId)?.entitlement
+
+    private suspend fun resolveIssuerMetadataForStart(issuerUrl: String, configurationId: String): ResolvedIssuerMetadata? =
         try {
-            val resolved = resolveIssuerMetadata(issuerUrl, listOf(configurationId))
-            // The offer may have been built independently of any listing or display lookup (the sample's re-issuance fallback):
-            // the adapter its response will be read with is resolved HERE, at issuance start, from the metadata just resolved.
-            resolved.metadata.credentialConfigurationsSupported[configurationId]?.let { recordAuxiliarySelection(issuerUrl, configurationId, it) }
-            resolved.entitlement
+            resolveIssuerMetadata(issuerUrl, listOf(configurationId))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.w(e, "Could not obtain an entitlement decision for $issuerUrl; proceeding unchecked")
             null
@@ -3551,13 +3552,17 @@ class SirosWallet private constructor(
             // than on the display paths, which deliberately swallow failures so
             // a missing card image cannot block issuance - a place that
             // swallows exceptions cannot also be where a refusal is decided.
-            enforceIssuerEntitlement(
-                offer.credentialIssuerIdentifier,
-                issuerEntitlementFor(
-                    offer.credentialIssuerIdentifier,
-                    offer.credentialConfigurationId,
-                ),
-            )
+            val resolvedForStart = resolveIssuerMetadataForStart(offer.credentialIssuerIdentifier, offer.credentialConfigurationId)
+            // OUTSIDE the best-effort lookup above: a malformed current advertisement is a refusal, never swallowed.
+            resolvedForStart?.metadata?.credentialConfigurationsSupported?.get(offer.credentialConfigurationId)?.let { cfg ->
+                if (!recordAuxiliarySelection(offer.credentialIssuerIdentifier, offer.credentialConfigurationId, cfg)) {
+                    throw WalletException(
+                        "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                        errorCode = "auxiliary_data_advertisement_malformed",
+                    )
+                }
+            }
+            enforceIssuerEntitlement(offer.credentialIssuerIdentifier, resolvedForStart?.entitlement)
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_PREPARING_ISSUANCE)
 
             // Lookup results stay local until the epoch is re-checked below: a

@@ -5073,6 +5073,46 @@ class SirosWalletTest {
     }
 
     @Test
+    fun startIssuanceByOffer_abortsWhenTheCurrentAdvertisementIsMalformed_evenForAnOfferListedBefore() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        val metadata = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    // An empty advertisement object: malformed (the offer was valid when it was listed, the CURRENT metadata is not).
+                    put("auxiliary_data_supported", buildJsonObject {})
+                }
+            }
+        }
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } returns buildJsonObject { putJsonObject("context") { put("trust_metadata", metadata) } }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A"))
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        val offer = org.siros.sdk.credentials.CredentialOffer("pid", issuer, "PID", issuerName = "I")
+        try {
+            wallet.startIssuanceByOffer(offer)
+            org.junit.Assert.fail("issuance started although the advertisement is malformed")
+        } catch (e: WalletException) {
+            assertEquals("auxiliary_data_advertisement_malformed", e.errorCode)
+        }
+        advanceUntilIdle()
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertEquals("a new issuance can start afterwards", false, getField(wallet, "issuanceInFlight"))
+    }
+
+    @Test
     fun generateProof_auxiliaryData_derivesFromTheOffersVctAndIssuerWhenTheRequestOmitsThem_andRecordsThatIssuer() = runTest(dispatcher) {
         val asked = mutableListOf<Pair<String, String>>()
         val keystore = pscKeystore(asked)

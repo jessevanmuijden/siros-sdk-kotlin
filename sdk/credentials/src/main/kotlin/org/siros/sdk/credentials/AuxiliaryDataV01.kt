@@ -69,9 +69,17 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
                 if (!allowRequired) return null
                 (r as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: return null
             } ?: false
-            val recognised = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content == TYPE &&
-                (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content == ALG
+            // The mandatory members are validated BEFORE deciding whether an entry is an extension to ignore: a missing or non-string
+            // type, or a hash_commitment without a string alg or a valid path, is malformed (the configuration is not offered).
+            val type = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+            var recognised = false
+            if (type == TYPE) {
+                val alg = (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+                path(o["path"]) ?: return null
+                recognised = alg == ALG
+            }
             if (!recognised) {
+                // A well-formed entry of a type (or algorithm) this wallet does not recognise: ignored, unless it is REQUIRED.
                 if (required) return null
                 continue
             }
@@ -109,13 +117,13 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         fun fail(): AuxiliaryParse { out.forEach { it.bytes.fill(0) }; return AuxiliaryParse.Malformed }
         for (item in arr) {
             val o = item as? JsonObject ?: return fail()
-            // An entry of an unrecognised type or algorithm is an extension: ignored, only recognised slots are compared.
-            if ((o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content != TYPE ||
-                (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content != ALG
-            ) {
-                continue
-            }
+            // Mandatory members first: a missing or non-string type, or a hash_commitment without a string alg or a valid path, refuses
+            // the whole response (nothing is stored); only a well-formed entry of an unrecognised type or algorithm is an extension.
+            val type = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return fail()
+            if (type != TYPE) continue
+            val alg = (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return fail()
             val p = path(o["path"]) ?: return fail()
+            if (alg != ALG) continue
             val text = (o["opening"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return fail()
             val bytes = decodeB64(text, OPENING_BYTES) ?: return fail()
             out += SecretDelivery(p, ALG, bytes)

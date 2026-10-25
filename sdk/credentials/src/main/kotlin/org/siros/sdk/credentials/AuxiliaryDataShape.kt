@@ -147,7 +147,8 @@ object LegacyOrgSirosShape : AuxiliaryDataShape {
         else -> null
     }
 
-    override fun stripFromMetadata(metadata: JsonObject): JsonObject = SecretSeedDelivery.stripped(metadata)
+    // Raw removal of this shape's own member: SecretSeedDelivery.stripped() composes every shape and must not recurse here.
+    override fun stripFromMetadata(metadata: JsonObject): JsonObject = JsonObject(metadata - SecretSeedDelivery.MEMBER)
 
     override fun placeInProof(commitments: List<HolderCommitment>): Map<String, JsonElement> {
         if (commitments.isEmpty()) return emptyMap()
