@@ -174,7 +174,7 @@ internal object DeliveredCredentialMetadata {
         val missing = DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING)
         for (h in sent) {
             for (c in credentials) {
-                when (val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, h.path)) {
+                when (val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, h.path, h.encoding)) {
                     // Only a genuinely absent OPTIONAL claim is skipped; a malformed or ambiguous one is refused either way.
                     org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Absent -> if (h.required) return missing
                     is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid -> return unreadable(h.path, claim.shape)
@@ -206,7 +206,7 @@ internal object DeliveredCredentialMetadata {
             for (c in credentials) {
                 val commitment = shape.commitmentOf(c.format, c.credential, delivery) ?: run {
                     // Absent stays "no commitment"; a claim that is there but unreadable names its path and shape.
-                    val status = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, delivery.path)
+                    val status = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, delivery.path, delivery.encoding)
                     return if (shape.id == org.siros.sdk.credentials.AuxiliaryDataV01.id && status is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid) {
                         unreadable(delivery.path, status.shape)
                     } else {

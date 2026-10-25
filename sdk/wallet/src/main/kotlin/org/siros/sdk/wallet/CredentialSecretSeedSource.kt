@@ -45,9 +45,12 @@ internal class KeystoreSecretSeedSource(
             ) as? org.siros.sdk.credentials.AuxiliaryParse.Parsed ?: return null
             // The credential's seed is the opening of its SSC slot (the claim named "ssc", whatever its namespace); the others are
             // other secrets of the same response and are zeroed here. Not exactly one such slot: no seed.
-            val slot = parsed.deliveries.filter { it.path.last() == SSC_CLAIM }.singleOrNull()
-            parsed.deliveries.filter { it !== slot }.forEach { it.bytes.fill(0) }
-            return slot?.bytes
+            if (parsed.deliveries.isNotEmpty()) {
+                val slot = parsed.deliveries.filter { it.path.last() == SSC_CLAIM }.singleOrNull()
+                parsed.deliveries.filter { it !== slot }.forEach { it.bytes.fill(0) }
+                return slot?.bytes
+            }
+            // Only ignored extension entries (receipt accepts and stores them): they carry no seed, so the legacy lookup below decides.
         }
         val matching = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
             .filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.SecretSeedDelivery.MEMBER }

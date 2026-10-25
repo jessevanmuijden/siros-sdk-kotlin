@@ -3480,16 +3480,25 @@ class SirosWallet private constructor(
         }
     }
 
+    private fun buildCredentialOfferFromMetadata(issuerUrl: String, configId: String, metadata: IssuerMetadata): CredentialOffer? =
+        buildCredentialOfferFromMetadata(issuerUrl, configId, metadata, record = true)
+
     private fun buildCredentialOfferFromMetadata(
         issuerUrl: String,
         configId: String,
         metadata: IssuerMetadata,
+        /** False: the adapter selection is validated but NOT recorded (the caller records it after its own epoch check). */
+        record: Boolean,
     ): CredentialOffer? {
         metadata.credentialConfigurationsSupported[configId] ?: return null
         val config = metadata.credentialConfigurationsSupported.getValue(configId)
         // A configuration that advertises a seed (names only) must have its response encrypted; one whose public
         // metadata carries anything else under that member (a seed value, say) is malformed: not offered.
-        if (!recordAuxiliarySelection(issuerUrl, configId, config)) return null
+        if (record) {
+            if (!recordAuxiliarySelection(issuerUrl, configId, config)) return null
+        } else if (org.siros.sdk.credentials.AuxiliaryDataShapes.select(config) is org.siros.sdk.credentials.AuxiliarySelection.Malformed) {
+            return null
+        }
         val issuerDisplay = metadata.display?.firstOrNull()
         val issuerName = issuerDisplay?.name
             ?: java.net.URI(issuerUrl).host
@@ -3738,7 +3747,8 @@ class SirosWallet private constructor(
             connectEngineForIssuance(engine, epoch)
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_PREPARING_ISSUANCE)
             val redirectUri = config.redirectUri.ifBlank { null }
-            val displayOffer = resolveOfferForDisplay(offerUri)
+            val resolvedDisplay = resolveOfferForDisplay(offerUri)
+            val displayOffer = resolvedDisplay?.offer
             val displayVctm = displayOffer?.let { offer ->
                 try {
                     vctmFetcher.fetch(
@@ -3754,6 +3764,8 @@ class SirosWallet private constructor(
             // Lookup results are published only after the epoch re-check: a
             // cancelled attempt must not write into a newer attempt's fields.
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_STARTING_FLOW)
+            // Only now, with the epoch confirmed current, is the adapter selection published.
+            resolvedDisplay?.record?.invoke()
             if (displayOffer != null) {
                 activeOffer = displayOffer
                 activeVctm = displayVctm
@@ -3801,14 +3813,22 @@ class SirosWallet private constructor(
      * issuer, issuer doesn't support the offered configuration) rather than
      * throwing - a missing display must never block issuance itself.
      */
-    private suspend fun resolveOfferForDisplay(offerUri: String): CredentialOffer? {
+    private class ResolvedOfferForDisplay(val offer: CredentialOffer, val record: () -> Unit)
+
+    private suspend fun resolveOfferForDisplay(offerUri: String): ResolvedOfferForDisplay? {
         return try {
             val offerJson = extractOfferJson(offerUri) ?: return null
             val issuerUrl = offerJson["credential_issuer"]?.jsonPrimitive?.contentOrNull ?: return null
             val configId = offerJson["credential_configuration_ids"]?.jsonArray
                 ?.firstOrNull()?.jsonPrimitive?.contentOrNull ?: return null
             val metadata = getIssuerMetadata(issuerUrl)
-            buildCredentialOfferFromMetadata(issuerUrl, configId, metadata)
+            // The adapter selection stays LOCAL here: the caller records it only after its own epoch check, so a lookup that completes
+            // after a cancel and a retry cannot overwrite or remove the retry's selection.
+            val offer = buildCredentialOfferFromMetadata(issuerUrl, configId, metadata, record = false) ?: return null
+            val config = metadata.credentialConfigurationsSupported.getValue(configId)
+            ResolvedOfferForDisplay(offer) { recordAuxiliarySelection(issuerUrl, configId, config) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.w(e, "Failed to resolve display metadata for offer")
             null
@@ -6913,7 +6933,7 @@ class SirosWallet private constructor(
                     val value = derive(type, issuer)
                     try {
                         onHolderCommitments?.invoke(
-                            auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value.copyOf()) },
+                            auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value.copyOf(), it.encoding) },
                         )
                         org.siros.sdk.credentials.AuxiliaryDataV01.placeInProof(
                             auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value) },
@@ -10845,6 +10865,10 @@ class SirosWallet private constructor(
      * Nothing was issued, so there is nothing to roll back.
      */
     internal fun reportPseudonymCommitmentConflict(flowId: String, code: String?, message: String?): Boolean {
+        AuxiliaryDataRefusedException.fromIssuerMessage(message)?.let {
+            eventListener?.onAuxiliaryDataRefused(flowId, it)
+            return true
+        }
         if (code == AuxiliaryDataConflictException.FLOW_ERROR_CODE) {
             eventListener?.onAuxiliaryDataConflict(flowId, AuxiliaryDataConflictException(message.orEmpty()))
             return true

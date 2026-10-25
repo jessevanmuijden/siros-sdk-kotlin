@@ -85,4 +85,16 @@ class CredentialSecretSeedSourceTest {
         }
         assertNull(source(two).secretSeed(1L))
     }
+
+    @Test
+    fun anAuxiliaryDataMemberOfOnlyIgnoredExtensionsFallsThroughToTheLegacySeed() = runTest {
+        val ext = kotlinx.serialization.json.Json.parseToJsonElement("""[{"type":"future_kind","alg":"sha-256","path":["x"],"opening":"ignored"}]""")
+        val md = buildJsonArray {
+            add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext))
+            add(entry(type, seeds(ns to JsonPrimitive(hex))))
+        }
+        assertArrayEquals(org.siros.sdk.credentials.SecretSeedCommitment.seedFromHex(hex), source(md).secretSeed(1L))
+        // Receipt stores both; with no legacy seed either, there is none.
+        assertNull(source(buildJsonArray { add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext)) }).secretSeed(1L))
+    }
 }

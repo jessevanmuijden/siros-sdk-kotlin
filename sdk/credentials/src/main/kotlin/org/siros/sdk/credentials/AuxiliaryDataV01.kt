@@ -38,6 +38,16 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     /** The issuer's error code for a commitment that conflicts with the one it holds: retrying never helps. */
     const val ERROR_CONFLICT = "auxiliary_data_conflict"
 
+    /** The text encodings of a commitment claim the advertisement may name (vc pull 850 `encoding`); absent means the format's default. */
+    val ENCODINGS: Set<String> = setOf("base64url", "base64", "hex")
+
+    /** The advertised `encoding` of [o]: null when absent; [INVALID_ENCODING] when present but not one of [ENCODINGS] as a string. */
+    private fun encodingOf(o: JsonObject): String? = o["encoding"]?.let { e ->
+        (e as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it in ENCODINGS } ?: INVALID_ENCODING
+    }
+
+    private const val INVALID_ENCODING = "\u0000invalid"
+
     private const val MAX_ENTRIES = 8
     private const val MAX_PATH = 8
     private const val OPENING_BYTES = 16
@@ -56,7 +66,7 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
      * configuration unusable (null here, section 5). A recognised entry must be well formed, and a direction that is present
      * must carry entries.
      */
-    private fun entries(e: JsonElement?, allowRequired: Boolean): List<AuxiliaryAdvertisement.Slot>? {
+    private fun entries(e: JsonElement?, allowRequired: Boolean, format: String): List<AuxiliaryAdvertisement.Slot>? {
         if (e == null) return emptyList()
         val arr = e as? JsonArray ?: return null
         // A direction that is present must carry entries: an explicitly empty one is a configuration the engine rejects too.
@@ -80,6 +90,14 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
                 // algorithm can make the entry skippable (an opening or commitment is a secret or a value, never advertised).
                 if ("opening" in o || "commitment" in o) return null
                 recognised = alg == ALG
+                // A named encoding must be one this wallet can read, and must make sense for the credential format: the
+                // configuration is not offered otherwise (an unreadable representation must not fail after delivery).
+                val enc = encodingOf(o)
+                if (enc == INVALID_ENCODING) return null
+                if (recognised && enc != null && !isSdJwt(format) && !isMdoc(format)) return null
+                // An ABSENT encoding legally means the claim holds the BYTES, which only an mdoc byte string can: an SD-JWT
+                // configuration cannot be issued without one (the issuer requires it), so it is refused there rather than guessed.
+                if (recognised && enc == null && !isMdoc(format)) return null
             }
             if (!recognised) {
                 // A well-formed entry of a type (or algorithm) this wallet does not recognise: ignored, unless it is REQUIRED.
@@ -89,11 +107,14 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             val p = path(o["path"]) ?: return null
             // A value in public metadata is not an advertisement.
             if ("opening" in o || "commitment" in o) return null
-            out += AuxiliaryAdvertisement.Slot(p, ALG, required)
+            out += AuxiliaryAdvertisement.Slot(p, ALG, required, encodingOf(o))
         }
         if (out.map { it.path }.toSet().size != out.size) return null
         return out
     }
+
+    private fun isSdJwt(format: String) = format.contains("sd-jwt", ignoreCase = true)
+    private fun isMdoc(format: String) = format.equals("mso_mdoc", ignoreCase = true)
 
     override fun advertisement(config: CredentialConfiguration): AuxiliarySelection {
         // `auxiliary_data` belongs to a RESPONSE only: in public issuer metadata it is forbidden, whatever else the configuration says.
@@ -103,8 +124,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         // Section 5: at least one direction. An empty object is a malformed advertisement, not "nothing advertised".
         if (obj.isEmpty()) return AuxiliarySelection.Malformed
         if (!obj.keys.all { it == "to_wallet" || it == "to_issuer" }) return AuxiliarySelection.Malformed
-        val toWallet = entries(obj["to_wallet"], allowRequired = false) ?: return AuxiliarySelection.Malformed
-        val toIssuer = entries(obj["to_issuer"], allowRequired = true) ?: return AuxiliarySelection.Malformed
+        val toWallet = entries(obj["to_wallet"], allowRequired = false, config.format) ?: return AuxiliarySelection.Malformed
+        val toIssuer = entries(obj["to_issuer"], allowRequired = true, config.format) ?: return AuxiliarySelection.Malformed
         // Only extensions this wallet does not know: the SHAPE is still the advertised one (section 3: unrecognised entries are
         // ignored, not a reason to treat the response as a foreign shape), it just has no recognised slots to act on.
         return AuxiliarySelection.Selected(this, AuxiliaryAdvertisement(toWallet, toIssuer))
@@ -160,13 +181,16 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         val want = advertised?.toWallet?.map { it.path }?.toSet() ?: return null
         val got = deliveries.map { it.path }.toSet()
         // Nothing recognised advertised and nothing recognised delivered (only extensions): nothing to verify, nothing missing.
-        return if (got == want && (deliveries.isNotEmpty() || want.isEmpty())) deliveries else null
+        if (!(got == want && (deliveries.isNotEmpty() || want.isEmpty()))) return null
+        // How each claim writes its commitment comes from the advertisement (the response entries do not carry it).
+        deliveries.forEach { d -> d.encoding = advertised.toWallet.first { it.path == d.path }.encoding }
+        return deliveries
     }
 
-    override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = claimAt(format, credential, delivery.path)
+    override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = claimAt(format, credential, delivery.path, delivery.encoding)
 
     /** The 32-byte commitment claim at [path] of an issued credential (see [commitmentOf]); null when absent, ambiguous or malformed. */
-    fun claimAt(format: String, credential: String, path: List<String>): ByteArray? = (claimStatus(format, credential, path) as? Claim.Value)?.bytes
+    fun claimAt(format: String, credential: String, path: List<String>, encoding: String? = null): ByteArray? = (claimStatus(format, credential, path, encoding) as? Claim.Value)?.bytes
 
     /** What [claimStatus] found at a path. */
     sealed interface Claim {
@@ -185,10 +209,10 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     }
 
     /** [claimAt] that tells an absent claim from a present but malformed or ambiguous one, and says what the malformed one was. */
-    fun claimStatus(format: String, credential: String, path: List<String>): Claim = try {
+    fun claimStatus(format: String, credential: String, path: List<String>, encoding: String? = null): Claim = try {
         when {
-            format.equals("mso_mdoc", ignoreCase = true) -> mdocClaim(credential, path)
-            format.contains("sd-jwt", ignoreCase = true) -> sdJwtClaim(credential, path)
+            format.equals("mso_mdoc", ignoreCase = true) -> mdocClaim(credential, path, encoding)
+            format.contains("sd-jwt", ignoreCase = true) -> sdJwtClaim(credential, path, encoding)
             else -> Claim.Invalid("a credential format this wallet cannot read a commitment from")
         }
     } catch (e: Exception) {
@@ -196,21 +220,30 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     }
 
     /** An mdoc claim at `[namespace, element]`: a 32-byte bstr, present exactly once. */
-    private fun mdocClaim(rawBase64Url: String, path: List<String>): Claim {
+    private fun mdocClaim(rawBase64Url: String, path: List<String>, encoding: String?): Claim {
         if (path.size != 2) return Claim.Invalid("a path of ${path.size} segments (an mdoc claim needs [namespace, element])")
         val doc = MdocCbor.parseStoredCredential(Base64.getUrlDecoder().decode(rawBase64Url))
         val matches = doc.issuerSigned.nameSpaces[path[0]].orEmpty().filter { it.item.elementIdentifier == path[1] }
         if (matches.isEmpty()) return Claim.Absent
         val v = matches.singleOrNull()?.item?.elementValue ?: return Claim.Invalid("present ${matches.size} times")
+        if (encoding == null) {
+            // The default: the commitment is a byte string.
+            return when (v.type) {
+                CBORType.ByteString -> v.GetByteString().let { if (it.size == COMMITMENT_BYTES) Claim.Value(it) else Claim.Invalid("a byte string of ${it.size} bytes, expected $COMMITMENT_BYTES") }
+                CBORType.TextString -> Claim.Invalid("a text string of ${v.AsString().length} characters, a byte string is required (no encoding was advertised)")
+                else -> Claim.Invalid("CBOR type ${v.type}, a byte string is required")
+            }
+        }
+        // An advertised text encoding: the commitment is a text string in that encoding.
         return when (v.type) {
-            CBORType.ByteString -> v.GetByteString().let { if (it.size == COMMITMENT_BYTES) Claim.Value(it) else Claim.Invalid("a byte string of ${it.size} bytes, expected $COMMITMENT_BYTES") }
-            CBORType.TextString -> Claim.Invalid("a text string of ${v.AsString().length} characters, a byte string is required")
-            else -> Claim.Invalid("CBOR type ${v.type}, a byte string is required")
+            CBORType.TextString -> textClaim(v.AsString(), encoding)
+            CBORType.ByteString -> Claim.Invalid("a byte string of ${v.GetByteString().size} bytes where text in $encoding was advertised")
+            else -> Claim.Invalid("CBOR type ${v.type} where text in $encoding was advertised")
         }
     }
 
     /** A top-level SD-JWT claim (one path segment): in the signed payload, or one disclosure bound by the payload's `_sd`; unpadded base64url of 32 bytes. */
-    private fun sdJwtClaim(credential: String, path: List<String>): Claim {
+    private fun sdJwtClaim(credential: String, path: List<String>, encoding: String?): Claim {
         if (path.size != 1) return Claim.Invalid("a path of ${path.size} segments (an SD-JWT claim here is top level)")
         val name = path[0]
         val parts = credential.split('~')
@@ -225,23 +258,39 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         if (inClear != null) {
             // Present in the clear AND selectively disclosable is ambiguous: nothing is read.
             if (disclosed.isNotEmpty()) return Claim.Invalid("both in the clear and disclosed")
-            return decodeClaim(inClear)
+            return decodeClaim(inClear, encoding)
         }
         if (disclosed.isEmpty()) return Claim.Absent
-        return decodeClaim(disclosed.singleOrNull() ?: return Claim.Invalid("disclosed ${disclosed.size} times"))
+        return decodeClaim(disclosed.singleOrNull() ?: return Claim.Invalid("disclosed ${disclosed.size} times"), encoding)
     }
 
-    private fun decodeClaim(v: JsonElement): Claim {
-        val text = (v as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return Claim.Invalid("not a text value, unpadded base64url text is required")
-        decodeB64(text, COMMITMENT_BYTES)?.let { return Claim.Value(it) }
-        // Why it is not readable, from its SHAPE only (never the value).
-        val shape = when {
-            text.endsWith("=") -> "text of ${text.length} characters with padding (padded base64 is not accepted)"
-            text.length == COMMITMENT_BYTES * 2 && text.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } -> "text of ${text.length} characters that looks like hex (hex is not accepted)"
-            text.any { it == '+' || it == '/' } -> "text of ${text.length} characters in the standard base64 alphabet (unpadded base64url is required)"
-            else -> "text of ${text.length} characters that is not unpadded base64url of $COMMITMENT_BYTES bytes"
+    private fun decodeClaim(v: JsonElement, encoding: String?): Claim {
+        val text = (v as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return Claim.Invalid("not a text value, text in ${encoding ?: "base64url"} is required")
+        return textClaim(text, encoding ?: "base64url")
+    }
+
+    /** A commitment written as text in [encoding] (base64url unpadded, base64 padded, or lower-case hex): exactly 32 bytes, in that form only. */
+    private fun textClaim(text: String, encoding: String): Claim {
+        val bytes = when (encoding) {
+            "base64url" -> decodeB64(text, COMMITMENT_BYTES)
+            "base64" -> try {
+                Base64.getDecoder().decode(text).takeIf { it.size == COMMITMENT_BYTES && Base64.getEncoder().encodeToString(it) == text }
+            } catch (e: IllegalArgumentException) {
+                null
+            }
+            "hex" -> text.takeIf { it.length == COMMITMENT_BYTES * 2 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
+                ?.chunked(2)?.map { it.toInt(16).toByte() }?.toByteArray()
+            else -> null
         }
-        return Claim.Invalid(shape)
+        if (bytes != null) return Claim.Value(bytes)
+        // Why it is not readable, from its SHAPE only (never the value), against what was advertised (or the default).
+        val found = when {
+            text.endsWith("=") -> "text of ${text.length} characters with padding"
+            text.length == COMMITMENT_BYTES * 2 && text.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } -> "text of ${text.length} characters that looks like hex"
+            text.any { it == '+' || it == '/' } -> "text of ${text.length} characters in the standard base64 alphabet"
+            else -> "text of ${text.length} characters"
+        }
+        return Claim.Invalid("$found, which is not $encoding of $COMMITMENT_BYTES bytes as advertised")
     }
 
     private fun disclosureValues(parts: List<String>, payload: JsonObject, name: String): List<JsonElement> {
@@ -273,7 +322,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
             val required = (o["required"] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull == true
             val supported = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content == TYPE &&
                 (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content == ALG
-            val p = if (supported) path(o["path"]) else null
+            val enc = if (supported) encodingOf(o) else null
+            val p = if (supported && enc != INVALID_ENCODING) path(o["path"]) else null
             if (p == null) {
                 if (required) {
                     throw WalletException(
@@ -283,7 +333,7 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
                 }
                 continue
             }
-            out += AuxiliaryAdvertisement.Slot(p, ALG, required)
+            out += AuxiliaryAdvertisement.Slot(p, ALG, required, enc)
         }
         if (entries.size > MAX_ENTRIES || out.map { it.path }.toSet().size != out.size) {
             throw WalletException("The issuer's auxiliary data request is not acceptable", errorCode = "holder_commitment_unsupported")
