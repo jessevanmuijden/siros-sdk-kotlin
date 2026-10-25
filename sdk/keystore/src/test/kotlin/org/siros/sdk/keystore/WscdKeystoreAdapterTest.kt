@@ -745,8 +745,9 @@ class WscdKeystoreAdapterTest {
             String(java.util.Base64.getUrlDecoder().decode(jwt.split('.')[1]), Charsets.UTF_8),
         ) as kotlinx.serialization.json.JsonObject
 
+    // Includes strings whose JSON escaping differs between serialisers: U+2028/U+2029, quotes, a backslash, a slash, non-ASCII.
     private val auxiliaryClaim = kotlinx.serialization.json.Json.parseToJsonElement(
-        """[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"commitment":"JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0"},{"type":"hash_commitment","alg":"sha-256","path":["a","b"],"commitment":"AAAA"}]""",
+        """[{"type":"hash_commitment","alg":"sha-256","path":["psc","\u2028line","\u2029para"],"commitment":"JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0"},{"type":"hash_commitment","alg":"sha-256","path":["a/b","q\"uote","back\\slash","\u00e5\u4e2d"],"commitment":"AAAA"}]""",
     )
 
     private suspend fun wscdAdapter(signer: Signer = createMockSigner()): WscdKeystoreAdapter {
@@ -789,6 +790,8 @@ class WscdKeystoreAdapterTest {
         }
         assertEquals(member(soft), member(wscd))
         assertTrue(member(wscd).startsWith("[{"))
+        // The escape-sensitive characters really are in the claim, and encoded the way Nimbus encodes them.
+        assertTrue(member(wscd), member(wscd).contains("\\u2028") && member(wscd).contains("\\u2029"))
     }
 
     @Test

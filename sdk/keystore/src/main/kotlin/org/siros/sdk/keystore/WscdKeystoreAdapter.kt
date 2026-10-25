@@ -893,16 +893,13 @@ class WscdKeystoreAdapter private constructor(
         }
     }
 
-    private fun base64Url(obj: Map<String, Any>): String {
-        val jsonObj = kotlinx.serialization.json.JsonObject(
-            obj.mapValues { (_, v) -> toJsonElement(v) }
-        )
-        val json = Json.encodeToString(
-            kotlinx.serialization.json.JsonObject.serializer(),
-            jsonObj
-        )
-        return base64UrlEncode(json.toByteArray(Charsets.UTF_8))
-    }
+    /**
+     * The JWS segment of [obj]: serialised by Nimbus (`JSONObjectUtils`), the same serialiser [JweKeystore] signs through, so a
+     * claim is encoded identically by both keystores (including the escaping of U+2028 / U+2029, which kotlinx.serialization
+     * emits literally).
+     */
+    private fun base64Url(obj: Map<String, Any>): String =
+        base64UrlEncode(com.nimbusds.jose.util.JSONObjectUtils.toJSONString(obj).toByteArray(Charsets.UTF_8))
 
     private fun toJsonElement(value: Any?): kotlinx.serialization.json.JsonElement {
         return when (value) {
