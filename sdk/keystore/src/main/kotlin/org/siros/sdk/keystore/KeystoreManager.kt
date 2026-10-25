@@ -19,6 +19,15 @@ interface KeystoreManager {
     val isUnlocked: Boolean
 
     /**
+     * Whether this keystore's WSCD has been ONBOARDED: a token-backed plugin (FIDO2) holds at least
+     * one enrolled key. Callers use it to fail with a clear error BEFORE asking the user for a PIN,
+     * which is meaningless when no token has been onboarded. `false` also means "could not be
+     * determined" (fail closed). The default is `true`: a keystore whose keys need no onboarding
+     * (software keys) has nothing to onboard.
+     */
+    suspend fun isWscdOnboarded(): Boolean = true
+
+    /**
      * Unlock the keystore using PRF-derived key material.
      *
      * @param prfOutput   raw PRF output from the WebAuthn authenticator.
