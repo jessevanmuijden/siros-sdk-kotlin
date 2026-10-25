@@ -56,8 +56,6 @@ class AuxiliaryDataV01Test {
     @Test
     fun badAdvertisementsAreMalformed_neverGuessed() {
         val bad = listOf(
-            """{"to_wallet":[{"type":"other","alg":"sha-256","path":["ssc"]}]}""",
-            """{"to_wallet":[{"type":"hash_commitment","alg":"md5","path":["ssc"]}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":[]}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"]},{"type":"hash_commitment","alg":"sha-256","path":["a"]}]}""",
             """{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["a"],"opening":"AAAA"}]}""",
@@ -97,8 +95,6 @@ class AuxiliaryDataV01Test {
             response(entry(opening = Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(17)))),
             response(entry(opening = openingB64 + "==")),
             response(entry(opening = openingB64.replace('-', '+').replace('_', '/') + "!")),
-            response(entry(alg = "sha-512")),
-            response(entry(type = "x")),
             response(entry(), entry()),
             Json.parseToJsonElement("""{"auxiliary_data":[]}""").jsonObject,
             Json.parseToJsonElement("""{"auxiliary_data":{"path":["ssc"]}}""").jsonObject,
@@ -188,5 +184,51 @@ class AuxiliaryDataV01Test {
         )
         assertTrue(AuxiliaryDataShapes.select(withBoth) is AuxiliarySelection.Malformed)
         assertTrue(AuxiliaryDataShapes.select(config(null)) is AuxiliarySelection.None)
+    }
+
+    @Test
+    fun unrecognisedEntriesAreIgnored_exceptARequiredToIssuerOneWhichMakesTheConfigurationUnusable() {
+        val ext = """{"type":"future_kind","alg":"sha-256","path":["x"]}"""
+        val badAlg = """{"type":"hash_commitment","alg":"sha-512","path":["y"]}"""
+        val ok = """{"to_wallet":[$ext,{"type":"hash_commitment","alg":"sha-256","path":["ssc"]},$badAlg],"to_issuer":[$ext,{"type":"hash_commitment","alg":"sha-256","path":["psc"],"required":true},$badAlg]}"""
+        val sel = AuxiliaryDataShapes.select(config(ok)) as AuxiliarySelection.Selected
+        assertEquals(listOf(listOf("ssc")), sel.advertisement.toWallet.map { it.path })
+        assertEquals(listOf(listOf("psc")), sel.advertisement.toIssuer.map { it.path })
+        // An unrecognised OPTIONAL to_issuer entry alone: ignored, nothing recognised, as if nothing was advertised.
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_issuer":[$ext]}""")) is AuxiliarySelection.None)
+        // An unrecognised REQUIRED one cannot be satisfied.
+        val required = """{"type":"future_kind","alg":"sha-256","path":["x"],"required":true}"""
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}],"to_issuer":[$required]}""")) is AuxiliarySelection.Malformed)
+        // A recognised entry is still strict.
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[$ext,{"type":"hash_commitment","alg":"sha-256","path":[]}]}""")) is AuxiliarySelection.Malformed)
+    }
+
+    @Test
+    fun aDeliveryWithAnExtensionEntryIsNormalisedToTheRecognisedSlotsOnly() {
+        val ext = """{"type":"future_kind","alg":"sha-256","path":["x"],"opening":"not-checked"}"""
+        val md = response(ext, entry(), """{"type":"hash_commitment","alg":"sha-512","path":["z"],"opening":"zz"}""")
+        val parsed = (AuxiliaryDataV01.parseDeliveries(md) as AuxiliaryParse.Parsed).deliveries
+        assertEquals(listOf(listOf("ssc")), parsed.map { it.path })
+        val adv = (AuxiliaryDataShapes.select(config(goodAdvert)) as AuxiliarySelection.Selected).advertisement
+        assertEquals(parsed, AuxiliaryDataV01.deliveriesToVerify(parsed, "x", adv))
+        // Only extensions delivered: nothing recognised, so the advertised slot did not arrive.
+        val onlyExt = (AuxiliaryDataV01.parseDeliveries(response(ext)) as AuxiliaryParse.Parsed).deliveries
+        assertTrue(onlyExt.isEmpty())
+        assertNull(AuxiliaryDataV01.deliveriesToVerify(onlyExt, "x", adv))
+    }
+
+    @Test
+    fun anUnsupportedSdAlgIsAnInvalidClaimNotAnAbsentOne() {
+        val b64 = { x: String -> Base64.getUrlEncoder().withoutPadding().encodeToString(x.toByteArray()) }
+        val disclosure = b64("""["salt","psc","$commitmentB64"]""")
+        for (alg in listOf("sha-512", "SHA-256", "")) {
+            val jwt = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"$alg","_sd":["x"]}""") + ".sig~$disclosure~"
+            assertEquals(alg, AuxiliaryDataV01.Claim.Invalid, AuxiliaryDataV01.claimStatus("dc+sd-jwt", jwt, listOf("psc")))
+        }
+        val nonString = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":5,"_sd":[]}""") + ".sig~"
+        assertEquals(AuxiliaryDataV01.Claim.Invalid, AuxiliaryDataV01.claimStatus("dc+sd-jwt", nonString, listOf("psc")))
+        // No _sd_alg at all (the SHA-256 default) and nothing disclosed: genuinely absent.
+        val none = b64("""{"alg":"none"}""") + "." + b64("""{"_sd":[]}""") + ".sig~"
+        assertEquals(AuxiliaryDataV01.Claim.Absent, AuxiliaryDataV01.claimStatus("dc+sd-jwt", none, listOf("psc")))
     }
 }

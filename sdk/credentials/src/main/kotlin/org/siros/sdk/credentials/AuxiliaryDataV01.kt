@@ -50,6 +50,12 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         return arr.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.takeIf { s -> s.isNotEmpty() } ?: return null }
     }
 
+    /**
+     * The recognised slots of one advertised direction. Spec section 3: an entry of a type (or algorithm) this wallet does not
+     * recognise is IGNORED, except that an unrecognised REQUIRED `to_issuer` entry cannot be satisfied and makes the whole
+     * configuration unusable (null here, section 5). A recognised entry must be well formed, and a direction that is present
+     * must carry entries.
+     */
     private fun entries(e: JsonElement?, allowRequired: Boolean): List<AuxiliaryAdvertisement.Slot>? {
         if (e == null) return emptyList()
         val arr = e as? JsonArray ?: return null
@@ -59,13 +65,17 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         val out = ArrayList<AuxiliaryAdvertisement.Slot>()
         for (item in arr) {
             val o = item as? JsonObject ?: return null
-            if ((o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content != TYPE) return null
-            if ((o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content != ALG) return null
-            val p = path(o["path"]) ?: return null
             val required = o["required"]?.let { r ->
                 if (!allowRequired) return null
                 (r as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull ?: return null
             } ?: false
+            val recognised = (o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content == TYPE &&
+                (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content == ALG
+            if (!recognised) {
+                if (required) return null
+                continue
+            }
+            val p = path(o["path"]) ?: return null
             // A value in public metadata is not an advertisement.
             if ("opening" in o || "commitment" in o) return null
             out += AuxiliaryAdvertisement.Slot(p, ALG, required)
@@ -82,7 +92,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         if (!obj.keys.all { it == "to_wallet" || it == "to_issuer" }) return AuxiliarySelection.Malformed
         val toWallet = entries(obj["to_wallet"], allowRequired = false) ?: return AuxiliarySelection.Malformed
         val toIssuer = entries(obj["to_issuer"], allowRequired = true) ?: return AuxiliarySelection.Malformed
-        if (toWallet.isEmpty() && toIssuer.isEmpty()) return AuxiliarySelection.Malformed
+        // Nothing recognised (only extensions this wallet does not know): it takes no part, as if nothing was advertised.
+        if (toWallet.isEmpty() && toIssuer.isEmpty()) return AuxiliarySelection.None
         return AuxiliarySelection.Selected(this, AuxiliaryAdvertisement(toWallet, toIssuer))
     }
 
@@ -96,8 +107,12 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         fun fail(): AuxiliaryParse { out.forEach { it.bytes.fill(0) }; return AuxiliaryParse.Malformed }
         for (item in arr) {
             val o = item as? JsonObject ?: return fail()
-            if ((o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content != TYPE) return fail()
-            if ((o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content != ALG) return fail()
+            // An entry of an unrecognised type or algorithm is an extension: ignored, only recognised slots are compared.
+            if ((o["type"] as? JsonPrimitive)?.takeIf { it.isString }?.content != TYPE ||
+                (o["alg"] as? JsonPrimitive)?.takeIf { it.isString }?.content != ALG
+            ) {
+                continue
+            }
             val p = path(o["path"]) ?: return fail()
             val text = (o["opening"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return fail()
             val bytes = decodeB64(text, OPENING_BYTES) ?: return fail()
@@ -170,6 +185,9 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         val parts = credential.split('~')
         val payload = parts[0].split('.').getOrNull(1) ?: return Claim.Invalid
         val obj = json.parseToJsonElement(String(Base64.getUrlDecoder().decode(payload), Charsets.UTF_8)) as? JsonObject ?: return Claim.Invalid
+        // The digests below are SHA-256: under another (or an unreadable) algorithm a disclosure cannot be matched, which is
+        // NOT the same as the claim being absent: a different value could be hidden behind it.
+        obj["_sd_alg"]?.let { if ((it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content != "sha-256") return Claim.Invalid }
         val inClear = obj[name]
         val disclosed = disclosureValues(parts, obj, name)
         if (inClear != null) {

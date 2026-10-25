@@ -332,6 +332,19 @@ class DeliveredCredentialMetadataTest {
         assertTrue(checkV01(holderCommitments = listOf(sentPsc)) is DeliveredMetadataVerdict.Accept)
     }
 
+    @Test
+    fun v01_anOptionalPscDisclosedUnderSha512IsRefused_notSkippedAsAbsent() {
+        val b64 = { x: String -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(x.toByteArray()) }
+        val other = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32) { 9 })
+        val disclosure = b64("""["salt","psc","$other"]""")
+        val jwt = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"sha-512","_sd":["digest-under-sha512"]}""") + ".sig~$disclosure~"
+        val sentPsc = sent(path = listOf("psc"), required = false, value = ByteArray(32) { 5 })
+        assertRefused(
+            DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING,
+            checkV01(credentials = listOf(DeliveredCredential("dc+sd-jwt", jwt, "n1")), holderCommitments = listOf(sentPsc)),
+        )
+    }
+
     private fun v01Response(opening: String = v01OpeningB64, encrypted: Boolean = true) = response(
         mapOf("auxiliary_data" to Json.parseToJsonElement("""[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"$opening"}]""")),
         encrypted,
