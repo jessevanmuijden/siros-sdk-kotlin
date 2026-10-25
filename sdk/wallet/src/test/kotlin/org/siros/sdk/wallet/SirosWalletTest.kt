@@ -2965,14 +2965,25 @@ class SirosWalletTest {
     }
 
     @Test
-    fun requestBackendKeyAttestation_sendsTheConfiguredPluginClaim_andNothingWhenUnset() = runTest(dispatcher) {
-        for (claim in listOf("soft", null)) {
+    fun requestBackendKeyAttestation_sendsTheClaimOfTheKeystoreThatHoldsTheKeysOnly() = runTest(dispatcher) {
+        // (resolved keystore, claims) -> the plugin that must be sent. "Resolved" is the keystore the issuance uses: here the
+        // wallet's default one, which is registered under its id in availableKeystores.
+        data class Case(val resolved: String, val claims: Map<String, String>, val expected: String?)
+        val cases = listOf(
+            Case("fido2", mapOf("softkey" to "soft"), null), // claim only for the software one, issuance resolves FIDO2: nothing
+            Case("softkey", mapOf("softkey" to "soft"), "soft"), // and the reverse
+            Case("softkey", mapOf("fido2" to "fido2"), null), // never another keystore's claim
+            Case("fido2", mapOf("softkey" to "soft", "fido2" to "fido2"), "fido2"), // each keystore its own
+            Case("softkey", emptyMap(), null), // no claim configured
+        )
+        for (c in cases) {
             val signFlow = MutableSharedFlow<SignRequestMessage>()
-            val keystore = mockk<KeystoreManager>()
-            val keypairs = listOf(KeypairInfo(keyId = "key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
-            coEvery { keystore.generateKeypairs(1) } returns keypairs
-            coEvery { keystore.attestationChain("key-1") } returns null
-            coEvery { keystore.securityProperties("key-1") } returns null
+            fun ks(): KeystoreManager = mockk<KeystoreManager>().also {
+                coEvery { it.generateKeypairs(1) } returns listOf(KeypairInfo(keyId = "key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
+                coEvery { it.attestationChain("key-1") } returns null
+                coEvery { it.securityProperties("key-1") } returns null
+            }
+            val keystores = mapOf("softkey" to ks(), "fido2" to ks())
             val apiClient = mockk<BackendApiClient>(relaxed = true)
             val sentPlugin = slot<String?>()
             coEvery { apiClient.requestKeyAttestation(any(), any(), any(), any(), any(), captureNullable(sentPlugin)) } returns "jwt"
@@ -2980,8 +2991,8 @@ class SirosWalletTest {
             val wallet = newWallet(
                 "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
                 "scope" to CoroutineScope(dispatcher + SupervisorJob()),
-                "config" to WalletConfig(backendUrl = "https://wallet.example.com", wscdPluginClaim = claim),
-                "keystore" to keystore,
+                "config" to WalletConfig(backendUrl = "https://wallet.example.com", availableKeystores = keystores, wscdPluginClaims = c.claims),
+                "keystore" to keystores.getValue(c.resolved),
             )
             invokeConnectEngine(wallet, "app-token")
             setField(wallet, "apiClient", apiClient)
@@ -2996,7 +3007,7 @@ class SirosWalletTest {
             )
             advanceUntilIdle()
             coVerify(exactly = 1) { apiClient.requestKeyAttestation(any(), any(), any(), any(), any(), any()) }
-            assertEquals(claim, sentPlugin.captured)
+            assertEquals("resolved=${c.resolved} claims=${c.claims}", c.expected, sentPlugin.captured)
         }
     }
 

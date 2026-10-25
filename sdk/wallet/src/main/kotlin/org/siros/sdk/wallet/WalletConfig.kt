@@ -444,16 +444,22 @@ data class WalletConfig(
      */
     val trustDecisionCacheTtl: java.time.Duration = java.time.Duration.ofMinutes(5),
     /**
-     * Optional name of the keystore/WSCD plugin type this wallet's keys live in (e.g. `"soft"`, `"fido2"`), sent as
-     * `security_properties.plugin` in the key attestation request. It is a CLAIM: the wallet provider backend records it as
-     * unverified evidence and alone decides what assurance, if any, it earns; the wallet never overrides or asserts a tier
-     * because of it. Lower-case letters, digits, `_` and `-`, at most 64 characters. Null (the default) sends nothing.
+     * Optional claimed plugin type PER KEYSTORE: the id of a keystore as registered in [availableKeystores] to the name of its
+     * plugin type (for example `"softkey" to "soft"`, `"fido2" to "fido2"`). When a key attestation is requested, `security_properties.plugin`
+     * is sent ONLY for the keystore that generated (and will hold) those keys, i.e. the keystore the issuance resolved; a keystore with no
+     * entry sends nothing, and never another keystore's claim. A keystore that is not registered in [availableKeystores] (the wallet's
+     * plain default one) cannot be named here and sends no claim.
+     *
+     * It is a CLAIM: the wallet provider backend records it as unverified evidence and alone decides what assurance, if any, it earns; the
+     * wallet never overrides or asserts a tier because of it. Every key must be a registered keystore id and every value 1-64 characters of
+     * `[a-z0-9_-]`; anything else is refused when the configuration is built. Empty (the default) sends nothing.
      */
-    val wscdPluginClaim: String? = null,
+    val wscdPluginClaims: Map<String, String> = emptyMap(),
 ) {
     init {
-        require(wscdPluginClaim == null || Regex("[a-z0-9_-]{1,64}").matches(wscdPluginClaim)) {
-            "wscdPluginClaim must be 1-64 characters of [a-z0-9_-]"
+        wscdPluginClaims.forEach { (keystoreId, claim) ->
+            require(availableKeystores?.containsKey(keystoreId) == true) { "wscdPluginClaims names a keystore that is not registered in availableKeystores" }
+            require(Regex("[a-z0-9_-]{1,64}").matches(claim)) { "a wscdPluginClaims value must be 1-64 characters of [a-z0-9_-]" }
         }
         require(secretSeedNamespace.isNotBlank()) { "secretSeedNamespace must not be blank" }
         VerifierIdTypeOrder.require(circuitZkVerifierIdTypes)
