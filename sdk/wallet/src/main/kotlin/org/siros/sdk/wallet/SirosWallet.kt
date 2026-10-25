@@ -2740,7 +2740,11 @@ class SirosWallet private constructor(
      */
     private suspend fun issuerEntitlementFor(issuerUrl: String, configurationId: String): IssuerEntitlement? =
         try {
-            resolveIssuerMetadata(issuerUrl, listOf(configurationId)).entitlement
+            val resolved = resolveIssuerMetadata(issuerUrl, listOf(configurationId))
+            // The offer may have been built independently of any listing or display lookup (the sample's re-issuance fallback):
+            // the adapter its response will be read with is resolved HERE, at issuance start, from the metadata just resolved.
+            resolved.metadata.credentialConfigurationsSupported[configurationId]?.let { recordAuxiliarySelection(issuerUrl, configurationId, it) }
+            resolved.entitlement
         } catch (e: Exception) {
             Timber.w(e, "Could not obtain an entitlement decision for $issuerUrl; proceeding unchecked")
             null
@@ -3462,6 +3466,19 @@ class SirosWallet private constructor(
      *
      * Returns null if `configId` isn't actually offered by this issuer.
      */
+    /**
+     * Records which auxiliary-data adapter the issuer's advertisement selects for ([issuerUrl], [configId]) so a response is read
+     * with it. Returns false when the advertisement is malformed (the configuration is not offered; an earlier record is dropped,
+     * so nothing is read with a stale adapter).
+     */
+    private fun recordAuxiliarySelection(issuerUrl: String, configId: String, config: org.siros.sdk.credentials.CredentialConfiguration): Boolean {
+        return when (val selection = org.siros.sdk.credentials.AuxiliaryDataShapes.select(config)) {
+            org.siros.sdk.credentials.AuxiliarySelection.Malformed -> { secretSeedAdvertised?.remove(issuerUrl to configId); false }
+            is org.siros.sdk.credentials.AuxiliarySelection.Selected -> { secretSeedAdvertised?.put(issuerUrl to configId, selection); true }
+            org.siros.sdk.credentials.AuxiliarySelection.None -> { secretSeedAdvertised?.remove(issuerUrl to configId); true }
+        }
+    }
+
     private fun buildCredentialOfferFromMetadata(
         issuerUrl: String,
         configId: String,
@@ -3471,11 +3488,7 @@ class SirosWallet private constructor(
         val config = metadata.credentialConfigurationsSupported.getValue(configId)
         // A configuration that advertises a seed (names only) must have its response encrypted; one whose public
         // metadata carries anything else under that member (a seed value, say) is malformed: not offered.
-        when (val selection = org.siros.sdk.credentials.AuxiliaryDataShapes.select(config)) {
-            org.siros.sdk.credentials.AuxiliarySelection.Malformed -> return null
-            is org.siros.sdk.credentials.AuxiliarySelection.Selected -> secretSeedAdvertised?.put(issuerUrl to configId, selection)
-            org.siros.sdk.credentials.AuxiliarySelection.None -> secretSeedAdvertised?.remove(issuerUrl to configId)
-        }
+        if (!recordAuxiliarySelection(issuerUrl, configId, config)) return null
         val issuerDisplay = metadata.display?.firstOrNull()
         val issuerName = issuerDisplay?.name
             ?: java.net.URI(issuerUrl).host

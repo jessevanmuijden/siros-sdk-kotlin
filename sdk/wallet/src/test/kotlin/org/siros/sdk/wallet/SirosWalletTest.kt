@@ -5036,6 +5036,43 @@ class SirosWalletTest {
     )
 
     @Test
+    fun startIssuanceByOffer_resolvesTheAuxiliarySelectionAtStart_forAnOfferBuiltIndependently() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        val metadata = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}"""))
+                }
+            }
+        }
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } returns buildJsonObject {
+            putJsonObject("context") { put("trust_metadata", metadata) }
+        }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections, // a FRESH wallet: no listing or display lookup happened before
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        // An offer the sample's full-reissuance fallback builds on its own, not through any resolve call.
+        val offer = org.siros.sdk.credentials.CredentialOffer("pid", issuer, "PID", issuerName = "I")
+        wallet.startIssuanceByOffer(offer)
+        advanceUntilIdle()
+        val selected = selections[issuer to "pid"]
+        assertNotNull("the selection was recorded at issuance start", selected)
+        assertEquals(org.siros.sdk.credentials.AuxiliaryDataV01.id, selected!!.shape.id)
+    }
+
+    @Test
     fun generateProof_auxiliaryData_derivesFromTheOffersVctAndIssuerWhenTheRequestOmitsThem_andRecordsThatIssuer() = runTest(dispatcher) {
         val asked = mutableListOf<Pair<String, String>>()
         val keystore = pscKeystore(asked)
