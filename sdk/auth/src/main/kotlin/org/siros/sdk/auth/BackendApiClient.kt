@@ -255,32 +255,33 @@ class BackendApiClient(
             if (!walletInstanceId.isNullOrBlank()) {
                 put("wallet_instance_id", kotlinx.serialization.json.JsonPrimitive(walletInstanceId))
             }
-            if (securityProperties != null || !plugin.isNullOrBlank()) {
-                put("security_properties", kotlinx.serialization.json.buildJsonObject {
-                    if (!plugin.isNullOrBlank()) put("plugin", kotlinx.serialization.json.JsonPrimitive(plugin))
-                    if (securityProperties == null) return@buildJsonObject
-                    put("key_storage", kotlinx.serialization.json.JsonArray(
-                        securityProperties.keyStorage.map { kotlinx.serialization.json.JsonPrimitive(it) }
-                    ))
-                    put("user_authentication", kotlinx.serialization.json.JsonArray(
-                        securityProperties.userAuthentication.map { kotlinx.serialization.json.JsonPrimitive(it) }
-                    ))
-                    when (val cert = securityProperties.certification) {
-                        is CertificationInfo.None ->
-                            put("certification", kotlinx.serialization.json.JsonPrimitive("none"))
-                        is CertificationInfo.Certified ->
-                            put("certification", kotlinx.serialization.json.buildJsonObject {
-                                put("scheme", kotlinx.serialization.json.JsonPrimitive(cert.scheme))
-                                put("assurance_level", kotlinx.serialization.json.JsonPrimitive(cert.assuranceLevel))
-                            })
-                    }
-                })
-            }
+            securityPropertiesJson(securityProperties, plugin)?.let { put("security_properties", it) }
         }
         val result = post("/wallet-provider/key-attestation/generate", body)
         return result["key_attestation"]?.let {
             (it as? kotlinx.serialization.json.JsonPrimitive)?.content
         } ?: throw BackendApiException(0, "Missing key_attestation in response", "")
+    }
+
+    /** The `security_properties` member of a key attestation request: the keystore's properties and/or the claimed plugin; null when neither. */
+    private fun securityPropertiesJson(securityProperties: SignerSecurityProperties?, plugin: String?): JsonObject? {
+        if (securityProperties == null && plugin.isNullOrBlank()) return null
+        val prim = { v: String -> kotlinx.serialization.json.JsonPrimitive(v) }
+        return kotlinx.serialization.json.buildJsonObject {
+            if (!plugin.isNullOrBlank()) put("plugin", prim(plugin))
+            if (securityProperties == null) return@buildJsonObject
+            put("key_storage", kotlinx.serialization.json.JsonArray(securityProperties.keyStorage.map(prim)))
+            put("user_authentication", kotlinx.serialization.json.JsonArray(securityProperties.userAuthentication.map(prim)))
+            put("certification", certificationJson(securityProperties.certification))
+        }
+    }
+
+    private fun certificationJson(cert: CertificationInfo): kotlinx.serialization.json.JsonElement = when (cert) {
+        is CertificationInfo.None -> kotlinx.serialization.json.JsonPrimitive("none")
+        is CertificationInfo.Certified -> kotlinx.serialization.json.buildJsonObject {
+            put("scheme", kotlinx.serialization.json.JsonPrimitive(cert.scheme))
+            put("assurance_level", kotlinx.serialization.json.JsonPrimitive(cert.assuranceLevel))
+        }
     }
 
     /** POST /wallet-provider/wia/challenge — request a WIA challenge nonce. */
