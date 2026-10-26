@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`WalletConfig.zkProofSystemPreference`: the app says which proof system answers a `circuit_zk` request that offers several** (sirosfoundation/siros-sdk-kotlin#304). Until now the wallet took the first offered circuit in catalog order (Longfellow first), so a verifier that offered both Longfellow and Vega could never get Vega. The preference is an ORDERED ALLOW-list of circuit ids / aliases (`urn:circuits:vega:nym_auth:v1`, `urn:circuits:longfellow:nym_auth:v1`) or proof systems (`vega-v1`, `longfellow-libzk-v1`); empty (the default) is today's behaviour. A non-empty list narrows the choice to the systems it names, tried in its order, always INSIDE the set the verifier offered (it never reaches outside it): a system that is not listed is never chosen, and when the verifier offered none of the listed ones the request is refused like any request nothing offered can answer. Blank, repeated or unknown entries are refused when the configuration is built. The chosen proof system and the preference in force are logged (system ids only). `WalletPolicyOptions.proofSystem` (`ZkProofSystemChoice`: Default / Longfellow / Vega) carries it for a host's settings screen; the sample app shows it as "Preferred proof system" in the request policy card (takes effect when the wallet is next created, like the other policy settings).
+
 ## [0.21.3] - 2026-10-26
 
 Requires siros-wscd-manager 0.11.0 (CTAP2 setPIN); the Swift SDK takes the same release. Not verified on real hardware. Known follow-ups: https://github.com/sirosfoundation/siros-sdk-kotlin/issues/316; held out: https://github.com/sirosfoundation/siros-sdk-kotlin/pull/312 and https://github.com/sirosfoundation/siros-sdk-kotlin/pull/285.

@@ -314,4 +314,8 @@
     <string name="settings_policy_verifier_ids_add">Adicionar</string>
     <string name="settings_policy_verifier_ids_reset">Repor predefinição</string>
     <string name="settings_policy_applies_next">Produz efeito da próxima vez que a carteira for criada: após Desligar, ou ao reiniciar a aplicação.</string>
+    <string name="settings_policy_proof_system">Sistema de prova preferido</string>
+    <string name="settings_policy_proof_system_default">Predefinição (ordem do catálogo)</string>
+    <string name="settings_policy_proof_system_longfellow">Apenas Longfellow</string>
+    <string name="settings_policy_proof_system_vega">Apenas Vega</string>
 </resources>

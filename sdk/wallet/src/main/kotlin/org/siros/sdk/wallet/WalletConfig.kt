@@ -455,6 +455,16 @@ data class WalletConfig(
      * `[a-z0-9_-]`; anything else is refused when the configuration is built. Empty (the default) sends nothing.
      */
     val wscdPluginClaims: Map<String, String> = emptyMap(),
+    /**
+     * Which zero-knowledge proof system answers a `circuit_zk` request that OFFERS several (the verifier's `system_id_values` and
+     * `proof_system_values`): an ordered ALLOW-list of circuit ids / aliases (`urn:circuits:vega:nym_auth:v1`,
+     * `urn:circuits:longfellow:nym_auth:v1`) or proof systems (`vega-v1`, `longfellow-libzk-v1`). Empty (the default) is no preference:
+     * the first offered circuit in catalog order, as before. A non-empty list narrows the choice to the systems it names, tried in its
+     * order: a system that is not listed is never chosen, and when the verifier offered none of the listed ones the request is
+     * refused like any request nothing offered can answer. It never reaches outside what the verifier offered. Blank, repeated or
+     * unknown entries are refused when the configuration is built.
+     */
+    val zkProofSystemPreference: List<String> = emptyList(),
 ) {
     init {
         wscdPluginClaims.forEach { (keystoreId, claim) ->
@@ -463,6 +473,7 @@ data class WalletConfig(
         }
         require(secretSeedNamespace.isNotBlank()) { "secretSeedNamespace must not be blank" }
         VerifierIdTypeOrder.require(circuitZkVerifierIdTypes)
+        org.siros.sdk.credentials.ZkProofSystemPreference.require(zkProofSystemPreference)
     }
 
     /**

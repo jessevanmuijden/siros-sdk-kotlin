@@ -34,6 +34,16 @@ enum class SignedRequestRule {
  * The defaults reproduce [WalletConfig]'s own defaults except [circuitZk],
  * which is off, as there.
  */
+/**
+ * Which proof system answers a `circuit_zk` request that offers several: [DEFAULT] leaves it to the catalog order; the others allow only
+ * that system (see [WalletConfig.zkProofSystemPreference]).
+ */
+enum class ZkProofSystemChoice(val preference: List<String>) {
+    DEFAULT(emptyList()),
+    LONGFELLOW(listOf("urn:circuits:longfellow:nym_auth:v1", "longfellow-libzk-v1")),
+    VEGA(listOf("urn:circuits:vega:nym_auth:v1", "vega-v1")),
+}
+
 data class WalletPolicyOptions(
     val nonDisclosure: NonDisclosureMode = NonDisclosureMode.DEFAULT,
     /** Turn on `circuit_zk` (matching and presentation). Also needs a prover; see [fakeProver]. */
@@ -51,6 +61,8 @@ data class WalletPolicyOptions(
      * is used. Empty means no pseudonym request can be answered. Must satisfy [VerifierIdTypeOrder.isValid].
      */
     val verifierIdTypes: List<String> = VerifierIdTypeOrder.DEFAULT,
+    /** The proof system a `circuit_zk` request that offers several is answered with; see [ZkProofSystemChoice]. */
+    val proofSystem: ZkProofSystemChoice = ZkProofSystemChoice.DEFAULT,
 ) {
     init {
         VerifierIdTypeOrder.require(verifierIdTypes)
@@ -80,6 +92,7 @@ data class WalletPolicyOptions(
         circuitZkCircuits = if (circuitZk) circuits else null,
         circuitZkProver = if (circuitZk && fakeProver) FakeCircuitZkProver.optIn() else base.circuitZkProver,
         circuitZkVerifierIdTypes = verifierIdTypes,
+        zkProofSystemPreference = proofSystem.preference,
     )
 
     /**
@@ -93,6 +106,7 @@ data class WalletPolicyOptions(
         KEY_SIGNED_REQUEST to signedRequest.name,
         KEY_FAKE_PROVER to fakeProver.toString(),
         KEY_VERIFIER_ID_TYPES to VerifierIdTypeOrder.toStored(verifierIdTypes),
+        KEY_PROOF_SYSTEM to proofSystem.name,
     )
 
     companion object {
@@ -102,6 +116,7 @@ data class WalletPolicyOptions(
         private const val KEY_SIGNED_REQUEST = "signed_request"
         private const val KEY_FAKE_PROVER = "fake_prover"
         private const val KEY_VERIFIER_ID_TYPES = "verifier_id_types"
+        private const val KEY_PROOF_SYSTEM = "proof_system"
 
         private val ALWAYS_SIGNED: (kotlinx.serialization.json.JsonObject?) -> Boolean = { true }
 
@@ -119,6 +134,7 @@ data class WalletPolicyOptions(
                 signedRequest = get(KEY_SIGNED_REQUEST).asEnum<SignedRequestRule>() ?: d.signedRequest,
                 fakeProver = get(KEY_FAKE_PROVER)?.toBooleanStrictOrNull() ?: d.fakeProver,
                 verifierIdTypes = VerifierIdTypeOrder.fromStored(get(KEY_VERIFIER_ID_TYPES)) ?: d.verifierIdTypes,
+                proofSystem = get(KEY_PROOF_SYSTEM).asEnum<ZkProofSystemChoice>() ?: d.proofSystem,
             )
         }
 

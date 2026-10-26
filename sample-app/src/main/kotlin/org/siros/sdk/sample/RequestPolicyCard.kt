@@ -86,6 +86,20 @@ fun RequestPolicyCard(
             ) { update(policy.copy(fakeProver = it)) }
 
             PolicyChoice(
+                title = R.string.settings_policy_proof_system,
+                options = org.siros.sdk.wallet.ZkProofSystemChoice.entries,
+                selected = policy.proofSystem,
+                label = {
+                    when (it) {
+                        org.siros.sdk.wallet.ZkProofSystemChoice.DEFAULT -> R.string.settings_policy_proof_system_default
+                        org.siros.sdk.wallet.ZkProofSystemChoice.LONGFELLOW -> R.string.settings_policy_proof_system_longfellow
+                        org.siros.sdk.wallet.ZkProofSystemChoice.VEGA -> R.string.settings_policy_proof_system_vega
+                    }
+                },
+                enabled = enabled && policy.circuitZk,
+            ) { update(policy.copy(proofSystem = it)) }
+
+            PolicyChoice(
                 title = R.string.settings_policy_expected_origins,
                 options = ExpectedOriginsMode.entries,
                 selected = policy.expectedOrigins,

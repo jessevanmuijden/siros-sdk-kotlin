@@ -4533,6 +4533,7 @@ class SirosWallet private constructor(
         val presenter = (keystore as? org.siros.sdk.keystore.HolderWitnessSource)
             ?.circuitZkPresenter(prover, support.circuits, support.validator, handlers = presenterHandlers, serving = support.serving)
             ?: org.siros.sdk.keystore.CircuitZkPresenter(prover, support.circuits, support.validator, NoWitnessProvider, handlers = presenterHandlers, serving = support.serving)
+        presenter.withProofSystemPreference(config.zkProofSystemPreference)
         val today = java.time.LocalDate.now(java.time.ZoneOffset.UTC)
 
         // ── Phase 1: decide what would be presented. No secret is touched here: no seed, no signature, no proof. ──

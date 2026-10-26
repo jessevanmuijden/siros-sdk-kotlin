@@ -350,3 +350,47 @@ internal object CircuitZkMatching {
         return plan.functions.all { it.id in declared }
     }
 }
+
+/**
+ * The wallet's choice among the proof systems a verifier OFFERS: an ordered ALLOW-list the app sets in its configuration
+ * (`WalletConfig.zkProofSystemPreference`). Empty (the default) means no preference: every offered circuit stays a candidate, in
+ * catalog order. A non-empty list narrows the candidates to the circuits it names and orders them by it, so a system that is not
+ * listed is never chosen, and when none of the offered circuits is listed there is nothing to answer with (the caller refuses, as it
+ * does when nothing is offered).
+ *
+ * An entry names a circuit by its id or one of its aliases (`urn:circuits:vega:nym_auth:v1`) or by its proof system
+ * (`vega-v1`, `longfellow-libzk-v1`).
+ */
+object ZkProofSystemPreference {
+    /** The identities this SDK's provers know; a preference entry outside them is refused when the configuration is built. */
+    val KNOWN: Set<String> = setOf(
+        "urn:circuits:longfellow:nym_auth:v1",
+        "urn:circuits:vega:nym_auth:v1",
+        "longfellow-libzk-v1",
+        "vega-v1",
+        "vega-mc-p256-v1",
+    )
+
+    /** Refuses a preference that is blank, repeats an entry, or names a system this SDK does not know. */
+    fun require(preference: List<String>) {
+        preference.forEach {
+            require(it.isNotBlank()) { "zkProofSystemPreference must not contain a blank entry" }
+            require(it in KNOWN) { "zkProofSystemPreference names a proof system this wallet does not know: $it" }
+        }
+        require(preference.toSet().size == preference.size) { "zkProofSystemPreference must not list a system twice" }
+    }
+
+    /** Whether [entry] names [circuit]. */
+    fun names(entry: String, circuit: CircuitZkCircuit): Boolean =
+        entry == circuit.circuitId || entry in circuit.aliases || entry == circuit.offeredProofSystem || entry == circuit.system
+
+    /** [candidates] (already inside the verifier's offered set) as [preference] allows and orders them; stable. */
+    fun order(candidates: List<CircuitZkCircuit>, preference: List<String>): List<CircuitZkCircuit> {
+        if (preference.isEmpty()) return candidates
+        val ranked = candidates.mapNotNull { c ->
+            val rank = preference.indexOfFirst { names(it, c) }
+            if (rank < 0) null else rank to c
+        }
+        return ranked.sortedBy { it.first }.map { it.second }
+    }
+}
