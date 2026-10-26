@@ -751,6 +751,8 @@ class JweKeystore(
         extraJsonClaims: Map<String, kotlinx.serialization.json.JsonElement>,
     ): String = mutex.withLock {
         requireUnlocked()
+        // Converted (and refused) BEFORE any key is registered: a rejected request must not leave a key behind.
+        val converted = ProofClaims.toJava(extraJsonClaims)
         // `freshKey` means batch issuance: each credential in the batch must
         // be bound to its own key, or every copy shares one holder key and
         // presenting them is linkable. Honouring it also keeps the recorded
@@ -803,7 +805,7 @@ class JweKeystore(
             .issueTime(Date())
             .claim("nonce", nonce)
         did?.let { claimsBuilder.issuer(it) }
-        extraJsonClaims.forEach { (k, v) -> claimsBuilder.claim(k, jsonToJava(v)) }
+        converted.forEach { (k, v) -> claimsBuilder.claim(k, v) }
         val claims = claimsBuilder.build()
 
         val headerBuilder = JWSHeader.Builder(JWSAlgorithm.ES256)
@@ -1838,18 +1840,3 @@ internal fun dpopClaims(htm: String, htu: String, nonce: String?, accessTokenHas
     accessTokenHash?.takeIf { it.isNotEmpty() }?.let { b.claim("ath", it) }
     return b.build()
 }
-
-/** A JSON claim value as the plain Java object nimbus serialises it from. */
-private fun jsonToJava(v: kotlinx.serialization.json.JsonElement): Any? = when (v) {
-    is kotlinx.serialization.json.JsonNull -> null
-    is kotlinx.serialization.json.JsonPrimitive -> when {
-        v.isString -> v.content
-        v.content == "true" || v.content == "false" -> v.content.toBoolean()
-        v.content.toLongOrNull() != null -> v.content.toLong()
-        // Outside Long: the exact decimal, never a rounded Double (a signed claim must carry what the issuer sent).
-        else -> java.math.BigDecimal(v.content)
-    }
-    is kotlinx.serialization.json.JsonArray -> v.map { jsonToJava(it) }
-    is kotlinx.serialization.json.JsonObject -> v.mapValues { jsonToJava(it.value) }
-}
-

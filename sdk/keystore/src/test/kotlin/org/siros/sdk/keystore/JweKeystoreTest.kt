@@ -176,15 +176,42 @@ class JweKeystoreTest {
     }
 
     @Test
-    fun generateProofWithJsonClaimsKeepsNumbersOutsideLongExactly() = runTest {
+    fun aRejectedJsonClaimRegistersNoKey_whetherTheKeystoreIsEmptyOrAFreshKeyIsAsked() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        val bad = mapOf("x" to kotlinx.serialization.json.JsonNull)
+        repeat(3) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", true, null, bad)
+                org.junit.Assert.fail("signed a claim it cannot carry")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+        assertEquals("rejected requests left no key behind (empty keystore, fresh key)", 0, keystore.listKeys().size)
+        keystore.generateKey()
+        repeat(2) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", true, null, bad)
+                org.junit.Assert.fail("signed a claim it cannot carry")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+        assertEquals(1, keystore.listKeys().size)
+    }
+
+    @Test
+    fun generateProofWithJsonClaimsRefusesNumbersItCannotCarryExactly() = runTest {
+        // The shared ProofClaims keeps only exact integers: a number outside Long (or a fraction) is refused, never rounded.
         val keystore = JweKeystore()
         keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
         keystore.generateKey()
-        val claim = kotlinx.serialization.json.Json.parseToJsonElement("[9223372036854775809, 0.1234567890123456789012345]")
-        val proof = keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", false, null, mapOf("big" to claim))
-        val payload = String(java.util.Base64.getUrlDecoder().decode(proof.split('.')[1]), Charsets.UTF_8)
-        assertTrue(payload, payload.contains("9223372036854775809"))
-        assertTrue(payload, payload.contains("0.1234567890123456789012345"))
+        for (n in listOf("9223372036854775809", "0.1234567890123456789012345")) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", false, null, mapOf("big" to kotlinx.serialization.json.Json.parseToJsonElement("[$n]")))
+                org.junit.Assert.fail("signed $n")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
     }
 
     @Test
