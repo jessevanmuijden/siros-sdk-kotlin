@@ -293,6 +293,8 @@ data class SignSubFlowParams(
     val state: String? = null,
     /** See [org.siros.sdk.transport.engine.SignRequestParams.verifiedRequest]. */
     @SerialName("verified_request") val verifiedRequest: org.siros.sdk.transport.VerifiedRequest? = null,
+    /** Credential Auxiliary Data v0.1: the advertised `to_issuer` entries verbatim (same meaning as the legacy transport's). Appended last. */
+    @SerialName("auxiliary_data_to_issuer") val auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
 )
 
 // ---------------------------------------------------------------------------

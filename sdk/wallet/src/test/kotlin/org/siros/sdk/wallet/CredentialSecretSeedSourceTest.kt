@@ -62,4 +62,39 @@ class CredentialSecretSeedSourceTest {
         assertNull(source(buildJsonArray { add(entry(type, JsonPrimitive(hex))) }).secretSeed(1L))
         assertNull(source(buildJsonArray { add(JsonPrimitive("junk")) }).secretSeed(1L))
     }
+
+    @Test
+    fun v01_theSeedIsTheOpeningOfTheSscSlot_evenWhenTheResponseDeliveredMoreOpenings() = runTest {
+        val seed = "8f3b2c9e41d07a65b1e2f4c3d9a08176".chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val other = ByteArray(16) { 9 }
+        val b64 = { x: ByteArray -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(x) }
+        fun slot(path: String, opening: ByteArray) = """{"type":"hash_commitment","alg":"sha-256","path":$path,"opening":"${b64(opening)}"}"""
+        val md = buildJsonArray {
+            add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, kotlinx.serialization.json.Json.parseToJsonElement(
+                "[" + slot("""["org.example.doc","psc"]""", other) + "," + slot("""["org.example.doc","ssc"]""", seed) + "]",
+            )))
+        }
+        assertArrayEquals(seed, source(md).secretSeed(1L))
+        // No ssc slot, or two: no seed.
+        val none = buildJsonArray { add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, kotlinx.serialization.json.Json.parseToJsonElement("[" + slot("""["psc"]""", other) + "]"))) }
+        assertNull(source(none).secretSeed(1L))
+        val two = buildJsonArray {
+            add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, kotlinx.serialization.json.Json.parseToJsonElement(
+                "[" + slot("""["a","ssc"]""", seed) + "," + slot("""["b","ssc"]""", other) + "]",
+            )))
+        }
+        assertNull(source(two).secretSeed(1L))
+    }
+
+    @Test
+    fun anAuxiliaryDataMemberOfOnlyIgnoredExtensionsFallsThroughToTheLegacySeed() = runTest {
+        val ext = kotlinx.serialization.json.Json.parseToJsonElement("""[{"type":"future_kind","alg":"sha-256","path":["x"],"opening":"ignored"}]""")
+        val md = buildJsonArray {
+            add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext))
+            add(entry(type, seeds(ns to JsonPrimitive(hex))))
+        }
+        assertArrayEquals(org.siros.sdk.credentials.SecretSeedCommitment.seedFromHex(hex), source(md).secretSeed(1L))
+        // Receipt stores both; with no legacy seed either, there is none.
+        assertNull(source(buildJsonArray { add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext)) }).secretSeed(1L))
+    }
 }

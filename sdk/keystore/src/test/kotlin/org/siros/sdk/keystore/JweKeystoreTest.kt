@@ -156,6 +156,38 @@ class JweKeystoreTest {
     }
 
     @Test
+    fun generateProofWithJsonClaimsSignsAnArrayClaimIntoThePayload() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.generateKey()
+        val claim = kotlinx.serialization.json.buildJsonArray {
+            add(kotlinx.serialization.json.buildJsonObject {
+                put("type", kotlinx.serialization.json.JsonPrimitive("hash_commitment"))
+                put("path", kotlinx.serialization.json.buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("psc")) })
+            })
+        }
+        val proof = keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", false, null, mapOf("auxiliary_data" to claim))
+        val signed = com.nimbusds.jwt.SignedJWT.parse(proof)
+        @Suppress("UNCHECKED_CAST")
+        val got = signed.jwtClaimsSet.getClaim("auxiliary_data") as List<Map<String, Any?>>
+        assertEquals("hash_commitment", got.single()["type"])
+        assertEquals(listOf("psc"), got.single()["path"])
+        assertTrue(signed.verify(com.nimbusds.jose.crypto.ECDSAVerifier(signed.header.jwk.toECKey())))
+    }
+
+    @Test
+    fun generateProofWithJsonClaimsKeepsNumbersOutsideLongExactly() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.generateKey()
+        val claim = kotlinx.serialization.json.Json.parseToJsonElement("[9223372036854775809, 0.1234567890123456789012345]")
+        val proof = keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", false, null, mapOf("big" to claim))
+        val payload = String(java.util.Base64.getUrlDecoder().decode(proof.split('.')[1]), Charsets.UTF_8)
+        assertTrue(payload, payload.contains("9223372036854775809"))
+        assertTrue(payload, payload.contains("0.1234567890123456789012345"))
+    }
+
+    @Test
     fun generateProofWithoutExtraClaimsCarriesNoCommitmentClaim() = runTest {
         val keystore = JweKeystore()
         keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
