@@ -58,4 +58,22 @@ sealed class Ctap2TransportException(
     class Timeout : Ctap2TransportException("ctap2_timeout", "CTAP2 transport timeout")
     class DeviceDisconnected : Ctap2TransportException("ctap2_device_disconnected", "Authenticator disconnected")
     class InvalidResponse(detail: String) : Ctap2TransportException("ctap2_invalid_response", "Invalid CTAP2 response: $detail")
+
+    /** Neither physical transport produced a usable authenticator; [usb] and [nfc] say, in short words, why each gave up. */
+    class TransportsUnavailable(val usb: String, val nfc: String) :
+        Ctap2TransportException("ctap2_not_available", "No security key found (NFC: $nfc; USB: $usb)")
+}
+
+/**
+ * A short, user-presentable reason for [this] failure of a CTAP2 transport (no stack trace, no payload, no device identifiers):
+ * what a caller may show or put in an error message. The full cause belongs in a log, never in this text.
+ */
+fun Throwable.shortTransportReason(): String = when (this) {
+    is Ctap2TransportException.NotAvailable -> "transport not available"
+    is Ctap2TransportException.Timeout -> "timed out waiting for the key"
+    is Ctap2TransportException.DeviceDisconnected -> "key moved away (tag lost)"
+    is Ctap2TransportException.TransportsUnavailable -> "no security key found"
+    is Ctap2TransportException.ConnectionFailed -> "could not talk to the key"
+    is Ctap2TransportException.InvalidResponse -> "unexpected answer from the key"
+    else -> "security key communication failed"
 }

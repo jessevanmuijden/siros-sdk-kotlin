@@ -1,5 +1,6 @@
 package org.siros.sdk.keystore
 
+import timber.log.Timber
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -594,7 +595,7 @@ class UniFFISigner(
  * called [Ctap2TransportProvider.connect] again. On any [send] failure,
  * drop the stale connection and reconnect once before giving up.
  */
-private class Ctap2TransportBridge(private val provider: Ctap2TransportProvider) : FfiCtap2Transport {
+internal class Ctap2TransportBridge(private val provider: Ctap2TransportProvider) : FfiCtap2Transport {
     // Read and written from Rust's own background FFI thread pool (per this
     // class's own doc comment) - @Volatile so a genuinely concurrent
     // invocation can't observe a stale value cached in another thread's
@@ -602,12 +603,24 @@ private class Ctap2TransportBridge(private val provider: Ctap2TransportProvider)
     @Volatile
     private var connected = false
 
-    override fun ctap2SendCommand(command: ByteArray): ByteArray = runBlocking {
+    override fun ctap2SendCommand(command: ByteArray): ByteArray = try {
+        runBlocking { exchange(command) }
+    } catch (e: uniffi.siros_wscd_manager.FfiWscdException) {
+        throw e
+    } catch (e: Exception) {
+        // The callback boundary: an exception of any other type would be sent to Rust as `UnexpectedUniFFICallbackError` whose
+        // message is the WHOLE Kotlin stack trace (what a user saw as "a very long error"). A typed error with a short message
+        // goes instead; the cause is logged here, separately.
+        Timber.w("Ctap2 transport failed: ${e.javaClass.simpleName}: ${e.message?.take(120)}")
+        throw uniffi.siros_wscd_manager.FfiWscdException.Callback(e.shortTransportReason())
+    }
+
+    private suspend fun exchange(command: ByteArray): ByteArray {
         if (!connected) {
             provider.connect()
             connected = true
         }
-        try {
+        return try {
             provider.send(command)
         } catch (e: Exception) {
             connected = false
