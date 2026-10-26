@@ -72,7 +72,33 @@ class PresentationRequestStepsTest {
             "one disclosing query among proofs" to request(zk("a", plan("pseudonym")), zk("b", legacyClaims)),
         )) {
             assertFalse(label, req.disclosesNoClaims)
-            assertEquals(label, req.matchResults.size + 2, req.consentStepCount)
+            assertEquals(label, req.consentMatchResults.size + 2, req.consentStepCount)
         }
+    }
+
+    private fun unmatched(queryId: String) =
+        CredentialMatcher.MatchResult(queryId = queryId, format = "mso_mdoc", candidates = emptyList(), requestedClaims = listOf(listOf("ns", "given_name")))
+
+    @Test
+    fun aQueryTheWalletCouldNotMatchGetsNoStepAndNoCard() {
+        // gdc: one dcql_query with five alternatives (mdl, photoid, pid_1_5, pid_1_8, pid_mdoc) asking for the same claims;
+        // the wallet holds only pid_1_8. The stepper must not iterate the four others.
+        val matched = result("pid_1_8", "mso_mdoc", listOf(listOf("ns", "given_name")))
+        val r = request(unmatched("mdl"), unmatched("photoid"), unmatched("pid_1_5"), matched, unmatched("pid_mdoc"))
+        assertEquals(listOf("pid_1_8"), r.consentMatchResults.map { it.queryId })
+        // preview + one claim step + summary
+        assertEquals(3, r.consentStepCount)
+        // five listed alternatives remain visible to the matcher's consumers
+        assertEquals(5, r.matchResults.size)
+    }
+
+    @Test
+    fun noMatchAtAllIsPreviewAndSummaryOnly_andUnmatchedZkpQueriesDoNotBlockTheSkip() {
+        assertEquals(2, request(unmatched("a"), unmatched("b")).consentStepCount)
+        // a zkp_req alternative that matched, beside alternatives that did not: still a request that discloses nothing
+        val z = zk("pid_1_8", plan("pseudonym"))
+        val r = request(unmatched("mdl"), z, unmatched("photoid"))
+        assertTrue(r.disclosesNoClaims)
+        assertEquals(1, r.consentStepCount)
     }
 }

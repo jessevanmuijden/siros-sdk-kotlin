@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **A resumed authorization no longer shows a "Flow failed: the connection to the engine was lost" dialog for the flow it resumes.** After the browser step, `completeAuthorization` takes the saved context out of the pending authorizations and forces a fresh engine WebSocket; the new socket generation then swept the original flow as "lost with its engine connection" and told the app it had failed (a Cancel / Try Again dialog), 1-20 ms before the resumed flow (a new flow id) completed and stored the credential. A flow whose own resumption is under way is now left alone by that sweep; if the resume itself fails, `onFlowError` still reports it. Reproduced on a Pixel against the gdc nym_auth issuer (2 of 2 runs).
+- **The consent stepper no longer iterates DCQL alternatives the wallet could not match.** A request with one `dcql_query` of five alternatives (mdl, photoid, pid_1_5, pid_1_8, pid_mdoc, each asking for the same claims, in `credential_sets` options with `required: false`) showed five claim-selection steps although the wallet matched only pid_1_8 (the matcher logged "0 matches" for the other four). `PresentationRequest.consentMatchResults` (only the queries with at least one candidate) now drives `consentStepCount` and `disclosesNoClaims`, and the sample app's stepper walks it: no step and no card for an unmatched query, an unmatched optional set is skipped, not an empty step. `matchResults` still lists every query.
 
 ## [0.21.4] - 2026-10-26
 

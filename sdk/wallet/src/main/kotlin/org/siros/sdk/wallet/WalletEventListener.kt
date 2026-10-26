@@ -39,19 +39,28 @@ data class PresentationRequest(
      * another format (which may ask for the whole credential) and an empty request.
      */
     val disclosesNoClaims: Boolean
-        get() = matchResults.isNotEmpty() && matchResults.all { r ->
+        get() = consentMatchResults.isNotEmpty() && consentMatchResults.all { r ->
             val plan = r.circuitZkPlan
             CredentialUtils.isCircuitZkFormat(r.format) && r.requestedClaims.flatten().isEmpty() && plan != null &&
                 plan.functions.isNotEmpty() && plan.functions.all { it.id in NON_DISCLOSING_FUNCTIONS }
         }
 
     /**
+     * The queries a consent UI shows: only those the wallet matched at least one credential for. A DCQL query without a candidate (one
+     * alternative of a `credential_sets` option list the wallet cannot answer, with several alternatives each asking for the same
+     * claims) has nothing to select or confirm, so it gets no claim-selection step and no card; an optional set with no match is skipped,
+     * not an empty step. [matchResults] still lists every query (the matcher's full answer).
+     */
+    val consentMatchResults: List<CredentialMatcher.MatchResult>
+        get() = matchResults.filter { it.candidates.isNotEmpty() }
+
+    /**
      * How many steps a stepped consent UI needs: the overview with the credential choice, then (unless [disclosesNoClaims]) one
-     * claim-selection step per matched query and a final "confirm what is shared" summary. Share and Decline are on the last step, so
+     * claim-selection step per [consentMatchResults] entry and a final "confirm what is shared" summary. Share and Decline are on the last step, so
      * a request that discloses nothing is one step.
      */
     val consentStepCount: Int
-        get() = if (disclosesNoClaims) 1 else matchResults.size + 2
+        get() = if (disclosesNoClaims) 1 else consentMatchResults.size + 2
 
     private companion object {
         /** Rulebook functions whose result is a derived value (a pseudonym, a boolean), never a disclosed claim. */
