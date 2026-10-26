@@ -46,9 +46,19 @@ enum class LogoRejection {
     InvalidSvg,
 }
 
-/** What a caller may render. Nothing else ever comes out of [LogoSanitizer]. */
+/**
+ * The result of classifying a logo URI. Only [Image] is sanitized image content;
+ * [Remote] is not (see below).
+ */
 sealed interface DisplayLogo {
-    /** A well-formed `https:` URL; the app's own image loader fetches it. */
+    /**
+     * A well-formed `https:` URL, and nothing more: only the URL was validated, not
+     * what the server answers or where it redirects. This does NOT represent
+     * sanitized image content. Do not hand it to an image loader; pass it to
+     * [LogoFetcher.load] and render only the [LogoLoad.Loaded.image] it returns,
+     * which enforces the redirect policy, size cap, timeout and the same
+     * decode/SVG-guard pipeline as `data:` logos.
+     */
     data class Remote(val url: String) : DisplayLogo
 
     /**

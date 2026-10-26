@@ -280,7 +280,10 @@ The entries below are the detailed changes that make up this release.
   `LogoResult.Accepted(DisplayLogo.Remote | DisplayLogo.Image)` or a typed
   `LogoRejection`, and fail closed. `LogoFetcher.load(url)` fetches an https
   logo and yields `LogoLoad.Loaded` (a clean PNG), `Rejected` (permanent) or
-  `Transient` (network, timeout, 5xx: never remembered).
+  `Transient` (network, timeout, 5xx: never remembered). `DisplayLogo.Remote`
+  is only a validated URL, not sanitized content: load it with
+  `LogoFetcher.load` and render only the `Loaded` PNG, never via your own
+  image loader.
   - `data:` URIs: strict RFC 2397, base64 only, png/jpeg/webp/gif/svg+xml,
     256 KiB decoded. Rasters are decoded by `BitmapFactory` (max 2048 px per
     edge, sniffed type must match), EXIF orientation is applied, and they are
