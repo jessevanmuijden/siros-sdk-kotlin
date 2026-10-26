@@ -35,6 +35,23 @@ internal class KeystoreSecretSeedSource(
     private val metadataOf: suspend (Long) -> kotlinx.serialization.json.JsonArray?,
 ) : CredentialSecretSeedSource {
     override suspend fun secretSeed(credentialId: Long): ByteArray? {
+        val entries = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
+        // Credential Auxiliary Data v0.1: the opening of the SSC slot is the credential's seed (one `auxiliary_data` entry per response).
+        val v01 = entries.filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER }
+        if (v01.isNotEmpty()) {
+            val member = v01.singleOrNull()?.get("value") ?: return null
+            val parsed = org.siros.sdk.credentials.AuxiliaryDataV01.parseDeliveries(
+                kotlinx.serialization.json.JsonObject(mapOf(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER to member)),
+            ) as? org.siros.sdk.credentials.AuxiliaryParse.Parsed ?: return null
+            // The credential's seed is the opening of its SSC slot (the claim named "ssc", whatever its namespace); the others are
+            // other secrets of the same response and are zeroed here. Not exactly one such slot: no seed.
+            if (parsed.deliveries.isNotEmpty()) {
+                val slot = parsed.deliveries.filter { it.path.last() == SSC_CLAIM }.singleOrNull()
+                parsed.deliveries.filter { it !== slot }.forEach { it.bytes.fill(0) }
+                return slot?.bytes
+            }
+            // Only ignored extension entries (receipt accepts and stores them): they carry no seed, so the legacy lookup below decides.
+        }
         val matching = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
             .filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.SecretSeedDelivery.MEMBER }
         val seeds = matching.singleOrNull()?.get("value") as? kotlinx.serialization.json.JsonObject ?: return null
@@ -42,3 +59,6 @@ internal class KeystoreSecretSeedSource(
         return org.siros.sdk.credentials.SecretSeedCommitment.seedFromHex(hex)
     }
 }
+
+/** The claim name of the `nym_auth` seed commitment (privatedata-spec 5A): the path the v0.1 opening for the seed is delivered under. */
+private const val SSC_CLAIM = "ssc"

@@ -156,6 +156,65 @@ class JweKeystoreTest {
     }
 
     @Test
+    fun generateProofWithJsonClaimsSignsAnArrayClaimIntoThePayload() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.generateKey()
+        val claim = kotlinx.serialization.json.buildJsonArray {
+            add(kotlinx.serialization.json.buildJsonObject {
+                put("type", kotlinx.serialization.json.JsonPrimitive("hash_commitment"))
+                put("path", kotlinx.serialization.json.buildJsonArray { add(kotlinx.serialization.json.JsonPrimitive("psc")) })
+            })
+        }
+        val proof = keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", false, null, mapOf("auxiliary_data" to claim))
+        val signed = com.nimbusds.jwt.SignedJWT.parse(proof)
+        @Suppress("UNCHECKED_CAST")
+        val got = signed.jwtClaimsSet.getClaim("auxiliary_data") as List<Map<String, Any?>>
+        assertEquals("hash_commitment", got.single()["type"])
+        assertEquals(listOf("psc"), got.single()["path"])
+        assertTrue(signed.verify(com.nimbusds.jose.crypto.ECDSAVerifier(signed.header.jwk.toECKey())))
+    }
+
+    @Test
+    fun aRejectedJsonClaimRegistersNoKey_whetherTheKeystoreIsEmptyOrAFreshKeyIsAsked() = runTest {
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        val bad = mapOf("x" to kotlinx.serialization.json.JsonNull)
+        repeat(3) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", true, null, bad)
+                org.junit.Assert.fail("signed a claim it cannot carry")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+        assertEquals("rejected requests left no key behind (empty keystore, fresh key)", 0, keystore.listKeys().size)
+        keystore.generateKey()
+        repeat(2) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", true, null, bad)
+                org.junit.Assert.fail("signed a claim it cannot carry")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+        assertEquals(1, keystore.listKeys().size)
+    }
+
+    @Test
+    fun generateProofWithJsonClaimsRefusesNumbersItCannotCarryExactly() = runTest {
+        // The shared ProofClaims keeps only exact integers: a number outside Long (or a fraction) is refused, never rounded.
+        val keystore = JweKeystore()
+        keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)
+        keystore.generateKey()
+        for (n in listOf("9223372036854775809", "0.1234567890123456789012345")) {
+            try {
+                keystore.generateProofWithJsonClaims("https://issuer.example.com", "n-1", false, null, mapOf("big" to kotlinx.serialization.json.Json.parseToJsonElement("[$n]")))
+                org.junit.Assert.fail("signed $n")
+            } catch (_: org.siros.sdk.credentials.KeystoreException) {
+            }
+        }
+    }
+
+    @Test
     fun generateProofWithoutExtraClaimsCarriesNoCommitmentClaim() = runTest {
         val keystore = JweKeystore()
         keystore.unlock(fakePrfOutput, ByteArray(0), hkdfSalt, hkdfInfo)

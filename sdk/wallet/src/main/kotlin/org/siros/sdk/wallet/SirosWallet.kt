@@ -1899,6 +1899,7 @@ class SirosWallet private constructor(
         // The response keys and everything opened with them are session material: gone with the session, synchronously,
         // not at the next connection (a wallet that stays logged out never makes one).
         blindIssuance.clear()
+        dropAllHolderCommitments()
         keystore.lock()
         sessionStore.clear()  // clears active account's session only
         accountRegistry.activeAccountId = null
@@ -2164,6 +2165,7 @@ class SirosWallet private constructor(
         wmpPeer = null
         credentialNotifier = null
         blindIssuance.clear()
+        dropAllHolderCommitments()
         keystore.lock()
         apiClient = null
         supervisorJob.cancel()
@@ -2738,8 +2740,13 @@ class SirosWallet private constructor(
      * succeeding would turn a backend outage into an outage for every issuer.
      */
     private suspend fun issuerEntitlementFor(issuerUrl: String, configurationId: String): IssuerEntitlement? =
+        resolveIssuerMetadataForStart(issuerUrl, configurationId)?.entitlement
+
+    private suspend fun resolveIssuerMetadataForStart(issuerUrl: String, configurationId: String): ResolvedIssuerMetadata? =
         try {
-            resolveIssuerMetadata(issuerUrl, listOf(configurationId)).entitlement
+            resolveIssuerMetadata(issuerUrl, listOf(configurationId))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.w(e, "Could not obtain an entitlement decision for $issuerUrl; proceeding unchecked")
             null
@@ -3461,19 +3468,37 @@ class SirosWallet private constructor(
      *
      * Returns null if `configId` isn't actually offered by this issuer.
      */
+    /**
+     * Records which auxiliary-data adapter the issuer's advertisement selects for ([issuerUrl], [configId]) so a response is read
+     * with it. Returns false when the advertisement is malformed (the configuration is not offered; an earlier record is dropped,
+     * so nothing is read with a stale adapter).
+     */
+    private fun recordAuxiliarySelection(issuerUrl: String, configId: String, config: org.siros.sdk.credentials.CredentialConfiguration): Boolean {
+        return when (val selection = org.siros.sdk.credentials.AuxiliaryDataShapes.select(config)) {
+            org.siros.sdk.credentials.AuxiliarySelection.Malformed -> { secretSeedAdvertised?.remove(issuerUrl to configId); false }
+            is org.siros.sdk.credentials.AuxiliarySelection.Selected -> { secretSeedAdvertised?.put(issuerUrl to configId, selection); true }
+            org.siros.sdk.credentials.AuxiliarySelection.None -> { secretSeedAdvertised?.remove(issuerUrl to configId); true }
+        }
+    }
+
+    private fun buildCredentialOfferFromMetadata(issuerUrl: String, configId: String, metadata: IssuerMetadata): CredentialOffer? =
+        buildCredentialOfferFromMetadata(issuerUrl, configId, metadata, record = true)
+
     private fun buildCredentialOfferFromMetadata(
         issuerUrl: String,
         configId: String,
         metadata: IssuerMetadata,
+        /** False: the adapter selection is validated but NOT recorded (the caller records it after its own epoch check). */
+        record: Boolean,
     ): CredentialOffer? {
         metadata.credentialConfigurationsSupported[configId] ?: return null
         val config = metadata.credentialConfigurationsSupported.getValue(configId)
         // A configuration that advertises a seed (names only) must have its response encrypted; one whose public
         // metadata carries anything else under that member (a seed value, say) is malformed: not offered.
-        when (org.siros.sdk.credentials.SecretSeedDelivery.classifyAdvertisement(config.credentialMetadata?.secretSeed)) {
-            is org.siros.sdk.credentials.SecretSeedDelivery.Advertisement.Malformed -> return null
-            is org.siros.sdk.credentials.SecretSeedDelivery.Advertisement.Valid -> secretSeedAdvertised?.add(issuerUrl to configId)
-            org.siros.sdk.credentials.SecretSeedDelivery.Advertisement.None -> secretSeedAdvertised?.remove(issuerUrl to configId)
+        if (record) {
+            if (!recordAuxiliarySelection(issuerUrl, configId, config)) return null
+        } else if (org.siros.sdk.credentials.AuxiliaryDataShapes.select(config) is org.siros.sdk.credentials.AuxiliarySelection.Malformed) {
+            return null
         }
         val issuerDisplay = metadata.display?.firstOrNull()
         val issuerName = issuerDisplay?.name
@@ -3537,13 +3562,20 @@ class SirosWallet private constructor(
             // than on the display paths, which deliberately swallow failures so
             // a missing card image cannot block issuance - a place that
             // swallows exceptions cannot also be where a refusal is decided.
-            enforceIssuerEntitlement(
-                offer.credentialIssuerIdentifier,
-                issuerEntitlementFor(
-                    offer.credentialIssuerIdentifier,
-                    offer.credentialConfigurationId,
-                ),
-            )
+            val resolvedForStart = resolveIssuerMetadataForStart(offer.credentialIssuerIdentifier, offer.credentialConfigurationId)
+            // A cancelled attempt's late lookup must neither overwrite nor remove the adapter selection of a retry for the same
+            // issuer and configuration: stop BEFORE the shared record is touched.
+            advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_CHECKING_ENTITLEMENT)
+            // OUTSIDE the best-effort lookup above: a malformed current advertisement is a refusal, never swallowed.
+            resolvedForStart?.metadata?.credentialConfigurationsSupported?.get(offer.credentialConfigurationId)?.let { cfg ->
+                if (!recordAuxiliarySelection(offer.credentialIssuerIdentifier, offer.credentialConfigurationId, cfg)) {
+                    throw WalletException(
+                        "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                        errorCode = "auxiliary_data_advertisement_malformed",
+                    )
+                }
+            }
+            enforceIssuerEntitlement(offer.credentialIssuerIdentifier, resolvedForStart?.entitlement)
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_PREPARING_ISSUANCE)
 
             // Lookup results stay local until the epoch is re-checked below: a
@@ -3716,7 +3748,8 @@ class SirosWallet private constructor(
             connectEngineForIssuance(engine, epoch)
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_PREPARING_ISSUANCE)
             val redirectUri = config.redirectUri.ifBlank { null }
-            val displayOffer = resolveOfferForDisplay(offerUri)
+            val resolvedDisplay = resolveOfferForDisplay(offerUri)
+            val displayOffer = resolvedDisplay?.offer
             val displayVctm = displayOffer?.let { offer ->
                 try {
                     vctmFetcher.fetch(
@@ -3732,6 +3765,14 @@ class SirosWallet private constructor(
             // Lookup results are published only after the epoch re-check: a
             // cancelled attempt must not write into a newer attempt's fields.
             advanceIssuanceStart(epoch, WalletState.FlowActive.STEP_STARTING_FLOW)
+            // Only now, with the epoch confirmed current, is the adapter selection published.
+            if (resolvedDisplay != null && !resolvedDisplay.record()) {
+                // The advertisement is malformed NOW: any earlier selection was cleared above, and the issuance is refused.
+                throw WalletException(
+                    "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                    errorCode = "auxiliary_data_advertisement_malformed",
+                )
+            }
             if (displayOffer != null) {
                 activeOffer = displayOffer
                 activeVctm = displayVctm
@@ -3779,14 +3820,27 @@ class SirosWallet private constructor(
      * issuer, issuer doesn't support the offered configuration) rather than
      * throwing - a missing display must never block issuance itself.
      */
-    private suspend fun resolveOfferForDisplay(offerUri: String): CredentialOffer? {
+    /** [offer] is null when the current advertisement is MALFORMED (not a lookup failure); [record] publishes (or, malformed, clears) the selection and says whether it is usable. */
+    private class ResolvedOfferForDisplay(val offer: CredentialOffer?, val record: () -> Boolean)
+
+    private suspend fun resolveOfferForDisplay(offerUri: String): ResolvedOfferForDisplay? {
         return try {
             val offerJson = extractOfferJson(offerUri) ?: return null
             val issuerUrl = offerJson["credential_issuer"]?.jsonPrimitive?.contentOrNull ?: return null
             val configId = offerJson["credential_configuration_ids"]?.jsonArray
                 ?.firstOrNull()?.jsonPrimitive?.contentOrNull ?: return null
             val metadata = getIssuerMetadata(issuerUrl)
-            buildCredentialOfferFromMetadata(issuerUrl, configId, metadata)
+            // The adapter selection stays LOCAL here: the caller records it only after its own epoch check, so a lookup that completes
+            // after a cancel and a retry cannot overwrite or remove the retry's selection.
+            val config = metadata.credentialConfigurationsSupported[configId] ?: return null
+            if (org.siros.sdk.credentials.AuxiliaryDataShapes.select(config) is org.siros.sdk.credentials.AuxiliarySelection.Malformed) {
+                // Kept apart from "no display metadata": issuance must be refused (after the caller's epoch check), not started.
+                return ResolvedOfferForDisplay(null) { recordAuxiliarySelection(issuerUrl, configId, config) }
+            }
+            val offer = buildCredentialOfferFromMetadata(issuerUrl, configId, metadata, record = false) ?: return null
+            ResolvedOfferForDisplay(offer) { recordAuxiliarySelection(issuerUrl, configId, config) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.w(e, "Failed to resolve display metadata for offer")
             null
@@ -4880,6 +4934,7 @@ class SirosWallet private constructor(
                 // Whatever this flow still sends (typically its cancellation error)
                 // must not act on a retry that starts before the socket is replaced.
                 abandonedFlowIds.add(current.flowId)
+                dropHolderCommitments(current.flowId)
                 stopZkSigning(current.flowId, refuse = true)
                 try {
                     engineSession?.cancelFlow(current.flowId)
@@ -5539,6 +5594,21 @@ class SirosWallet private constructor(
      */
     private val pscIssuerByFlow = java.util.concurrent.ConcurrentHashMap<String, String>()
 
+    /** The Auxiliary Data v0.1 commitments sent in a flow's key proofs, until its completion is checked against them (then zeroed). */
+    private val holderCommitmentsByFlow = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+
+    private fun takeHolderCommitments(flowId: String?): List<org.siros.sdk.credentials.HolderCommitment> =
+        flowId?.let { holderCommitmentsByFlow.remove(it) }.orEmpty()
+
+    private fun dropHolderCommitments(flowId: String) {
+        holderCommitmentsByFlow.remove(flowId)?.forEach { it.commitment.fill(0) }
+    }
+
+    /** Session end (logout, destroy): nothing recorded for any flow outlives it. */
+    private fun dropAllHolderCommitments() {
+        holderCommitmentsByFlow.keys.toList().forEach { dropHolderCommitments(it) }
+    }
+
     /**
      * The response-encryption keys of in-flight issuances and what the wallet opened with them. The engine never
      * holds a credential, a delivered seed or a `vp_token`: this wallet generates the key the issuer encrypts to,
@@ -5792,10 +5862,15 @@ class SirosWallet private constructor(
         get() = org.siros.sdk.keystore.DEFAULT_CIRCUIT_ZK_HANDLERS.associateBy { it.functionId }
 
     /** (issuer, configuration) pairs whose issuer metadata advertised a seed: their response must be encrypted. */
-    private val secretSeedAdvertised: MutableSet<Pair<String, String>>? = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val secretSeedAdvertised: MutableMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>? =
+        java.util.concurrent.ConcurrentHashMap()
+
+    /** What the issuer advertised for the configuration: the adapter to read its response with, never one sniffed from the response. */
+    private fun auxiliarySelection(issuer: String?, configurationId: String?): org.siros.sdk.credentials.AuxiliarySelection.Selected? =
+        if (issuer == null || configurationId == null) null else secretSeedAdvertised?.get(issuer to configurationId)
 
     private fun isSecretSeedAdvertised(issuer: String?, configurationId: String?): Boolean =
-        issuer != null && configurationId != null && secretSeedAdvertised?.contains(issuer to configurationId) == true
+        auxiliarySelection(issuer, configurationId)?.advertisement?.toWallet?.isNotEmpty() == true
 
     /**
      * Stores [entries] (verbatim) as credential [id]'s delivered metadata. True when there was nothing to
@@ -5836,6 +5911,8 @@ class SirosWallet private constructor(
         refusal: DeliveredMetadataRefusal,
         /** The WMP transport reports through its peer; null uses the engine [credentialNotifier]. */
         sendFailure: (suspend (flowId: String, notificationId: String) -> Unit)? = null,
+        /** Where and what was wrong (a claim path and a shape, never a value), when the refusal has one. */
+        detail: String? = null,
     ) {
         val ids = notificationIds.distinct()
         Timber.e("Flow $flowId refused: delivered credential metadata rejected (${refusal.name})")
@@ -5854,7 +5931,7 @@ class SirosWallet private constructor(
             }
         }
         val reported = canReport && ids.isNotEmpty()
-        val reason = "The issuer's delivered credential data was rejected: ${refusal.text}" +
+        val reason = "The issuer's delivered credential data was rejected: ${refusal.text}" + (detail?.let { " ($it)" } ?: "") +
             if (reported) "" else " (the issuer could not be notified: no notification channel)"
         // The superseded batch of a renewal stays: nothing replaced it.
         pendingRenewalSourceBatchId = null
@@ -5905,13 +5982,20 @@ class SirosWallet private constructor(
             // the engine never saw it, and a frame-supplied id must not stand in for a missing one.
             engineCreds.mapIndexed { i, c -> c.copy(credential = opened.credentials[i], notificationId = opened.notificationId) }
         }
+        // The WMP completion names no configuration: the one of the offer this wallet started for that very issuer.
+        val wmpConfigurationId = activeOffer?.takeIf { it.credentialIssuerIdentifier == decoded.credentialIssuer }?.credentialConfigurationId
+        val sentCommitments = takeHolderCommitments(flowId)
         val verdict = DeliveredCredentialMetadata.check(
             response = opened ?: PlainDeliveredResponse(decoded.credentialMetadata),
             credentials = creds.map { DeliveredCredential(it.format, it.credential, it.notificationId) },
             secretNamespace = config.secretSeedNamespace,
             canStoreSecret = keystoreCanHoldCredentialMetadata(),
-            advertised = isSecretSeedAdvertised(decoded.credentialIssuer, null),
+            advertised = isSecretSeedAdvertised(decoded.credentialIssuer, wmpConfigurationId),
+            shape = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.shape ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+            advertisement = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.advertisement,
+            holderCommitments = sentCommitments,
         )
+        sentCommitments.forEach { it.commitment.fill(0) }
         return (verdict as? DeliveredMetadataVerdict.Refuse)?.let { it.reason to creds.mapNotNull { c -> c.notificationId } }
     }
 
@@ -6802,6 +6886,9 @@ class SirosWallet private constructor(
         holderCommitments: List<String>? = null,
         credentialType: String? = null,
         credentialIssuer: String? = null,
+        auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
+        /** Receives the commitments put in the proofs (Auxiliary Data v0.1), to be checked against the issued credentials. */
+        onHolderCommitments: ((List<org.siros.sdk.credentials.HolderCommitment>) -> Unit)? = null,
     ): List<GeneratedProofData> {
         val chosen = when {
             !proofTypesSupported.isNullOrEmpty() ->
@@ -6810,7 +6897,16 @@ class SirosWallet private constructor(
             !proofTypeHint.isNullOrBlank() -> proofTypeHint
             else -> "jwt"
         }
-        if (chosen == "attestation" && !holderCommitments.isNullOrEmpty()) {
+        val auxiliarySlots = if (auxiliaryDataToIssuer.isNullOrEmpty()) emptyList() else {
+            if (!holderCommitments.isNullOrEmpty()) {
+                throw WalletException(
+                    "The request asks for holder commitments in two shapes at once",
+                    errorCode = "holder_commitment_unsupported",
+                )
+            }
+            org.siros.sdk.credentials.AuxiliaryDataV01.slotsToAnswer(auxiliaryDataToIssuer)
+        }
+        if (chosen == "attestation" && (!holderCommitments.isNullOrEmpty() || auxiliarySlots.isNotEmpty())) {
             // An attestation proof has no payload to carry the claim; answering
             // without it would be refused by the issuer after the user has waited.
             throw WalletException(
@@ -6832,11 +6928,44 @@ class SirosWallet private constructor(
                 // also runs onWscdOperationEnd (resolveEffectiveKeystoreForIssuance
                 // may have started a hardware operation). Never logged.
                 val witness = effectiveKeystore as? org.siros.sdk.keystore.HolderWitnessSource
-                val commitmentClaims = HolderCommitments.proofClaims(
-                    holderCommitments, credentialType, credentialIssuer,
-                    witness?.let { w -> { type: String, issuer: String -> w.privateSeedCommitment(type, issuer) } },
-                )
+                val derive = witness?.let { w -> { type: String, issuer: String -> w.privateSeedCommitment(type, issuer) } }
+                val commitmentClaims = HolderCommitments.proofClaims(holderCommitments, credentialType, credentialIssuer, derive)
+                // Credential Auxiliary Data v0.1: ONE value, computed once, goes into every proof of the request.
+                val auxiliaryClaims = if (auxiliarySlots.isEmpty()) emptyMap() else {
+                    // The request's credential type and issuer string when it carries them; the offer's otherwise.
+                    val type = credentialType?.takeIf { it.isNotEmpty() }
+                        ?: (activeVctm?.vct ?: activeMddlSchema?.doctype ?: activeOffer?.vct ?: activeOffer?.doctype ?: activeOffer?.credentialConfigurationId)
+                    val issuer = credentialIssuer?.takeIf { it.isNotEmpty() } ?: activeOffer?.credentialIssuerIdentifier
+                    if (type.isNullOrEmpty() || issuer.isNullOrEmpty() || derive == null) {
+                        throw WalletException(
+                            "The issuer asked for a holder commitment this wallet cannot derive here",
+                            errorCode = "holder_commitment_unavailable",
+                        )
+                    }
+                    val value = derive(type, issuer)
+                    try {
+                        onHolderCommitments?.invoke(
+                            auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value.copyOf(), it.encoding) },
+                        )
+                        org.siros.sdk.credentials.AuxiliaryDataV01.placeInProof(
+                            auxiliarySlots.map { org.siros.sdk.credentials.HolderCommitment(it.path, it.alg, it.required, value) },
+                        )
+                    } finally {
+                        value.fill(0)
+                    }
+                }
                 (1..count).map {
+                    if (auxiliaryClaims.isNotEmpty()) {
+                        val proofJwt = effectiveKeystore.generateProofWithJsonClaims(
+                            audience = audience,
+                            nonce = nonce,
+                            freshKey = count > 1,
+                            holderBinding = holderBindingFor(audience),
+                            extraJsonClaims = auxiliaryClaims,
+                        )
+                        val keyId = extractProofKeyId(proofJwt)
+                        return@map GeneratedProofData(proofType = "jwt", jwt = proofJwt, attestedKeyIds = keyId?.let { listOf(it) })
+                    }
                     // The four-argument form when there is nothing to add: a keystore
                     // that predates extra claims keeps working for every issuer that
                     // asked for none.
@@ -7473,6 +7602,8 @@ class SirosWallet private constructor(
                     holderCommitments = params.holderCommitments,
                     credentialType = params.credentialType,
                     credentialIssuer = params.credentialIssuer,
+                    auxiliaryDataToIssuer = params.auxiliaryDataToIssuer,
+                    onHolderCommitments = { holderCommitmentsByFlow[flowId] = it },
                 )
                 // The "attestation" proof type returns a single GeneratedProofData
                 // whose attestedKeyIds already covers the whole batch in order; the
@@ -8261,6 +8392,8 @@ class SirosWallet private constructor(
                                 holderCommitments = params?.holderCommitments,
                                 credentialType = params?.credentialType,
                                 credentialIssuer = params?.credentialIssuer,
+                                auxiliaryDataToIssuer = params?.auxiliaryDataToIssuer,
+                                onHolderCommitments = { holderCommitmentsByFlow[msg.flowId] = it },
                             )
                             // The "attestation" proof type returns a single GeneratedProofData
                 // whose attestedKeyIds already covers the whole batch in order; the
@@ -8270,8 +8403,8 @@ class SirosWallet private constructor(
                 // the first entry's list (as this used to) silently dropped every
                 // index past 0 for a "jwt" batch of more than one credential.
                 activeAttestedKeyIds = generated.flatMap { it.attestedKeyIds.orEmpty() }.ifEmpty { null }
-                            if (!params?.holderCommitments.isNullOrEmpty()) {
-                                params?.credentialIssuer?.let { pscIssuerByFlow[msg.flowId] = it }
+                            if (!params?.holderCommitments.isNullOrEmpty() || !params?.auxiliaryDataToIssuer.isNullOrEmpty()) {
+                                (params?.credentialIssuer?.takeIf { it.isNotEmpty() } ?: activeOffer?.credentialIssuerIdentifier)?.let { pscIssuerByFlow[msg.flowId] = it }
                             }
                             val proofs = generated.map {
                                 ProofObject(proofType = it.proofType, jwt = it.jwt, attestation = it.attestation)
@@ -8875,18 +9008,24 @@ class SirosWallet private constructor(
                 // supersedes the old batch with nothing. The same entries are stored with every credential.
                 val canStoreDelivered = keystoreCanHoldCredentialMetadata()
                 var deliveredEntries: kotlinx.serialization.json.JsonArray? = null
+                val sentCommitments = takeHolderCommitments(msg.flowId)
                 val deliveredVerdict = DeliveredCredentialMetadata.check(
                     response = openedResponse,
                     credentials = msg.credentials.orEmpty().map { DeliveredCredential(it.format, it.credential, it.notificationId) },
                     secretNamespace = config.secretSeedNamespace,
                     canStoreSecret = canStoreDelivered,
                     advertised = isSecretSeedAdvertised(msg.credentialIssuer, msg.selectedCredentialConfigurationId),
+                    shape = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.shape
+                        ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+                    advertisement = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.advertisement,
+                    holderCommitments = sentCommitments,
                 )
+                sentCommitments.forEach { it.commitment.fill(0) }
                 when (deliveredVerdict) {
                     DeliveredMetadataVerdict.None -> Unit
                     is DeliveredMetadataVerdict.Accept -> if (canStoreDelivered) deliveredEntries = deliveredVerdict.entries
                     is DeliveredMetadataVerdict.Refuse -> {
-                        rejectDeliveredMetadata(msg.flowId, msg.credentials.orEmpty().mapNotNull { it.notificationId }, deliveredVerdict.reason)
+                        rejectDeliveredMetadata(msg.flowId, msg.credentials.orEmpty().mapNotNull { it.notificationId }, deliveredVerdict.reason, detail = deliveredVerdict.detail)
                         return@collect
                     }
                 }
@@ -9344,6 +9483,7 @@ class SirosWallet private constructor(
                 stopZkSigning(fid, refuse = false)
                 clearFlowMatchState(fid)
                 pscIssuerByFlow.remove(fid)
+                dropHolderCommitments(fid)
                 blindIssuance.drop(fid)
                 val redirectUri = msg.error.details?.get("redirect_uri")?.jsonPrimitive?.contentOrNull
                 if (!reportPseudonymCommitmentConflict(fid, msg.error.code, msg.error.message)) {
@@ -10789,6 +10929,14 @@ class SirosWallet private constructor(
      * Nothing was issued, so there is nothing to roll back.
      */
     internal fun reportPseudonymCommitmentConflict(flowId: String, code: String?, message: String?): Boolean {
+        AuxiliaryDataRefusedException.fromIssuerMessage(message)?.let {
+            eventListener?.onAuxiliaryDataRefused(flowId, it)
+            return true
+        }
+        if (code == AuxiliaryDataConflictException.FLOW_ERROR_CODE) {
+            eventListener?.onAuxiliaryDataConflict(flowId, AuxiliaryDataConflictException(message.orEmpty()))
+            return true
+        }
         if (code != PseudonymCommitmentConflictException.FLOW_ERROR_CODE) return false
         eventListener?.onPseudonymCommitmentConflict(flowId, PseudonymCommitmentConflictException(message.orEmpty()))
         return true

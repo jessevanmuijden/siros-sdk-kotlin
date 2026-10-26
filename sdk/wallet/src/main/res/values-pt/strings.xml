@@ -14,6 +14,8 @@
     <string name="siros_dcapi_refused_proof_failed">A sua carteira não conseguiu criar a prova, por isso nada foi partilhado. Tente novamente.</string>
     <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
     <string name="siros_psc_conflict">Este emissor já tem registado um compromisso de pseudónimo diferente para si. Se perdeu a sua carteira, peça ao emissor para o repor.</string>
+    <string name="siros_auxiliary_data_conflict">O emissor indica que o seu registo sobre si entra em conflito com o que esta carteira enviou. Tentar de novo não ajuda; contacte o emissor.</string>
+    <string name="siros_auxiliary_data_refused">O emissor recusou os dados de compromisso de identidade da carteira. Tentar de novo não ajuda; contacte o emissor.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->
     <string name="siros_consent_title">Confirmar partilha</string>
     <string name="siros_consent_share">Partilhar</string>
