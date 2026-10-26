@@ -2370,6 +2370,15 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private fun typesPinAheadFor(mode: Fido2TransportMode): Boolean = mode != Fido2TransportMode.USB
 
     /**
+     * The transport an operation will actually use: the one its manager's FIDO2 plugin was REGISTERED with (changing the selection
+     * later does not re-register it), else the current selection. Rotation and issuance use the registered one; enrollment
+     * re-registers from the current selection first, so the selection is its transport.
+     */
+    private fun registeredFido2Mode(manager: WscdManager? = null): Fido2TransportMode = synchronized(fido2RegisteredTransport) {
+        (manager?.let { fido2RegisteredTransport[it] } ?: fido2RegisteredTransport.values.firstOrNull()) ?: _fido2TransportMode.value
+    }
+
+    /**
      * Bridges [org.siros.sdk.keystore.AuthProvider.requestPin] (synchronous,
      * called off the main thread - see [PendingPinEntry]'s doc comment) to
      * a Compose dialog, via [_pendingPinEntry]. `runBlocking` here is safe
@@ -2418,7 +2427,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             try {
                 // See enrollWscd's identical prefetch step for why the PIN
                 // must be collected before any transport work starts.
-                if (activePluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
+                if (activePluginId == "fido2" && typesPinAheadFor(registeredFido2Mode(wallet.wscdManager))) {
                     val pin = awaitFido2PinEntry()
                     if (pin == null) {
                         _errorMessage.value = "Rotation cancelled"
@@ -2742,7 +2751,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             // with no "present your key now" cue for the transport-connect
             // wait that happens first.
             onWscdOperationStart = { pluginId ->
-                if (pluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
+                if (pluginId == "fido2" && typesPinAheadFor(registeredFido2Mode())) {
                     val pin = awaitFido2PinEntry()
                     if (pin != null) {
                         typedAheadPin.hold(pin.toByteArray())
