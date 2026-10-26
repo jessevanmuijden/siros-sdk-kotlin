@@ -1634,6 +1634,81 @@ class SirosWalletTest {
         verify(exactly = 0) { engine.sendFlowAction("flow-auth", "authorization_complete", any()) }
     }
 
+    @Test
+    fun resumingAfterTheBrowser_theSocketItReplacesDoesNotReportTheOriginalFlowAsLost() = runTest(dispatcher) {
+        // Pixel e2e on gdc: "Resuming authorization of flow X ... reconnecting" and 20 ms later "Flow X lost with its engine connection;
+        // ending it locally" plus a failure in the UI, although the resumed flow completed under a new id. The resumption's own forced
+        // reconnect replaces the socket the original flow was first seen on; that must not be reported as a failure of that flow.
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val generations = MutableStateFlow(0)
+        val completeFlow = MutableSharedFlow<FlowCompleteMessage>()
+        val continuations = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val keystore = org.siros.sdk.keystore.JweKeystore()
+        keystore.unlock(ByteArray(32) { it.toByte() }, ByteArray(0), ByteArray(32) { 5 }, "info".toByteArray())
+        val store = KeystoreMirroringStore(keystore, mirror = true)
+        val sessionStore = mockk<SessionStore>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        every { sessionStore.privateDataJwe } returns null
+        coEvery { apiClient.updatePrivateData(any()) } returns buildJsonObject {}
+        val engine = mockEngineConstructor(progressFlow = progressFlow, flowComplete = completeFlow, generations = generations)
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to store,
+            "keystore" to keystore,
+            "sessionStore" to sessionStore,
+            "apiClient" to apiClient,
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "flowContinuations" to continuations,
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        progressFlow.emit(
+            FlowProgressMessage(
+                flowId = "flow-auth",
+                step = "authorization_required",
+                payload = buildJsonObject {
+                    put("authorization_url", "https://issuer.example.com/auth?state=s")
+                    put("expected_redirect_uri", "siros://callback")
+                    put("state", "s")
+                    put("code_verifier", "v")
+                    putJsonObject("credential_offer") { put("credential_issuer", "https://issuer.example.com") }
+                },
+            )
+        )
+        advanceUntilIdle()
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        // the forced reconnect opened a new connection generation: the sweep for flows of the older one runs
+        generations.value = 1
+        advanceUntilIdle()
+
+        verify(exactly = 1) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { listener.onFlowError("flow-auth", any(), any()) }
+
+        // the resumed flow (a new id) completes, which pairs it with the original; a LATER reconnect must not sweep the original either
+        completeFlow.emit(
+            FlowCompleteMessage(
+                flowId = "flow-new",
+                credentials = listOf(CredentialResult(format = "dc+sd-jwt", credential = NymTestCredentials.sdJwt(sscValues = emptyList()), notificationId = "n-1")),
+            ),
+        )
+        advanceUntilIdle()
+        assertEquals("the resumed flow is paired with the original", mapOf("flow-new" to "flow-auth"), continuations.toMap())
+        generations.value = 2
+        advanceUntilIdle()
+        verify(exactly = 0) { listener.onFlowError("flow-auth", any(), any()) }
+    }
+
     /**
      * The whole resumption after the browser: the authorization step hands off, the app comes back with a code, the engine
      * WebSocket is reconnected, ONE stateless flow_start is sent, and the engine completes the issuance under a NEW flow id.
