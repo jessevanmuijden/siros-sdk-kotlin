@@ -40,6 +40,8 @@ sealed interface LogoLoad {
  * - https only, no userinfo, checked on the request and on every redirect hop
  *   (a network interceptor), so a redirect cannot downgrade to http or smuggle
  *   credentials. Redirects between http and https are not followed at all.
+ * - Requests send `Accept-Encoding: identity`; a response with any other
+ *   Content-Encoding is refused unread.
  * - The body is read through a streaming cap of [LogoSanitizer.MAX_DECODED_BYTES]
  *   and never buffered beyond it; a larger Content-Length is refused up front.
  * - A wall-clock [timeoutMillis] covers the whole call (connect to last byte).
@@ -115,7 +117,11 @@ class LogoFetcher(
      * on the job would only fire after the blocking call returned.)
      */
     private suspend fun fetch(url: String): LogoLoad = suspendCancellableCoroutine { cont ->
-        val call = http.newCall(Request.Builder().url(url).build())
+        val call = http.newCall(Request.Builder().url(url)
+            // identity: OkHttp then neither asks for nor transparently decodes gzip, so the
+            // size cap below applies to the bytes on the wire (a gzip header can be huge).
+            .header("Accept-Encoding", "identity")
+            .build())
         cont.invokeOnCancellation { call.cancel() }
         cont.resume(blockingFetch(call))
     }
@@ -126,6 +132,10 @@ class LogoFetcher(
                 when {
                     response.code >= 500 -> LogoLoad.Transient("HTTP ${response.code}")
                     !response.isSuccessful -> LogoLoad.Rejected(LogoRejection.FetchRejected)
+                    // A server that compresses anyway is refused before any body byte is read.
+                    response.header("Content-Encoding")?.trim()?.lowercase()
+                        ?.let { it.isNotEmpty() && it != "identity" } == true ->
+                        LogoLoad.Rejected(LogoRejection.FetchRejected)
                     else -> {
                         val body = response.body ?: return LogoLoad.Rejected(LogoRejection.UndecodableImage)
                         val declared = body.contentLength()

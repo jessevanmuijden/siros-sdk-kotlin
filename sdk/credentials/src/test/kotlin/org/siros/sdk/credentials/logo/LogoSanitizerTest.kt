@@ -224,6 +224,19 @@ class LogoSanitizerTest {
     }
 
     @Test
+    fun `css budget is document wide across style elements and style attributes`() {
+        val chunk = "a{fill:red}".repeat(100) // 1100 chars
+        val n = SvgActiveContentGuard.MAX_STYLE_CHARS / chunk.length + 2
+        val manySheets = svg("<style>$chunk</style>".repeat(n))
+        assertEquals(LogoRejection.ActiveContent, rejected(svgUri(manySheets)))
+        val attr = "fill:red;".repeat(100)
+        val manyAttrs = svg("<rect width='1' height='1' style='$attr'/>".repeat(minOf(n * 2, SvgActiveContentGuard.MAX_ELEMENTS - 1)))
+        assertEquals(LogoRejection.ActiveContent, rejected(svgUri(manyAttrs)))
+        // Under the budget is still fine.
+        image(svgUri(svg("<style>$chunk</style><rect width='4' height='4' style='$attr'/>")))
+    }
+
+    @Test
     fun `a plain stylesheet is still accepted`() {
         image(svgUri(svg("<style>.a{fill:#f00}</style><rect class='a' width='64' height='64'/>")))
     }

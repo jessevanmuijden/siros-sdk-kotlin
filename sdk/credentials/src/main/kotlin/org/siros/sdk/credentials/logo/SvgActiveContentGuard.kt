@@ -53,6 +53,8 @@ internal object SvgActiveContentGuard {
             var gradients = 0
             var stops = 0
             var style: StringBuilder? = null
+            // One document-wide CSS budget: <style> text and style attribute values together.
+            var cssChars = 0
             var event = parser.eventType
             while (event != XmlPullParser.END_DOCUMENT) {
                 when (event) {
@@ -73,7 +75,10 @@ internal object SvgActiveContentGuard {
                         }
                         if (name in FORBIDDEN_ELEMENTS) return LogoRejection.ActiveContent
                         if (name == "style") style = StringBuilder()
-                        if (!attributesAreSafe(parser)) return LogoRejection.ActiveContent
+                        for (i in 0 until parser.attributeCount) {
+                            if (localName(parser.getAttributeName(i)) == "style") cssChars += parser.getAttributeValue(i).length
+                        }
+                        if (cssChars > MAX_STYLE_CHARS || !attributesAreSafe(parser)) return LogoRejection.ActiveContent
                     }
                     XmlPullParser.END_TAG -> {
                         // The element's complete text is validated once, never token by token.
@@ -82,8 +87,10 @@ internal object SvgActiveContentGuard {
                         depth--
                     }
                     XmlPullParser.TEXT -> style?.let {
-                        it.append(parser.text)
-                        if (it.length > MAX_STYLE_CHARS) return LogoRejection.ActiveContent
+                        val text = parser.text
+                        it.append(text)
+                        cssChars += text.length
+                        if (cssChars > MAX_STYLE_CHARS) return LogoRejection.ActiveContent
                     }
                 }
                 event = parser.nextToken()

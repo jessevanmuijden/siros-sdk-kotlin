@@ -220,4 +220,30 @@ class LogoFetcherTest {
         assertTrue("a phantom waiter kept the old flight alive: $later", later is LogoLoad.Loaded)
         assertEquals(2, server.requestCount)
     }
+
+    private fun gzipWithHugeFname(nameBytes: Int, payload: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        out.write(byteArrayOf(0x1f, 0x8b.toByte(), 8, 0x08, 0, 0, 0, 0, 0, 0)) // FLG.FNAME
+        out.write(ByteArray(nameBytes) { 'a'.code.toByte() })
+        out.write(0)
+        val deflater = java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION, true)
+        deflater.setInput(payload)
+        deflater.finish()
+        val buf = ByteArray(1024)
+        while (!deflater.finished()) out.write(buf, 0, deflater.deflate(buf))
+        return out.toByteArray()
+    }
+
+    @Test
+    fun `a compressed response is refused unread and identity is requested`() {
+        val gz = gzipWithHugeFname(8 * 1024 * 1024, png())
+        server.enqueue(body(gz).addHeader("Content-Encoding", "gzip"))
+        val started = System.nanoTime()
+        assertEquals(LogoLoad.Rejected(LogoRejection.FetchRejected), load())
+        assertEquals("identity", server.takeRequest().getHeader("Accept-Encoding"))
+        assertTrue("must not chew through the gzip header", System.nanoTime() - started < 5_000_000_000L)
+        // Same for deflate/br labels.
+        server.enqueue(body(png()).addHeader("Content-Encoding", "br"))
+        assertEquals(LogoLoad.Rejected(LogoRejection.FetchRejected), load())
+    }
 }
