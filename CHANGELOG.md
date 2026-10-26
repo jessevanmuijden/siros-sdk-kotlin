@@ -283,7 +283,8 @@ The entries below are the detailed changes that make up this release.
   `Transient` (network, timeout, 5xx: never remembered).
   - `data:` URIs: strict RFC 2397, base64 only, png/jpeg/webp/gif/svg+xml,
     256 KiB decoded. Rasters are decoded by `BitmapFactory` (max 2048 px per
-    edge, sniffed type must match) and re-encoded to PNG, dropping metadata
+    edge, sniffed type must match), EXIF orientation is applied, and they are
+    re-encoded to PNG, dropping metadata
     and trailing payloads.
   - SVG is never handed on as XML. A pull-parser guard refuses (nothing is
     rewritten): script, foreignObject, `image` (embedded rasters too), `use`,
@@ -302,7 +303,9 @@ The entries below are the detailed changes that make up this release.
     Content-Encoding in a response is refused unread), a validated wall-clock timeout (default 10 s, max 60 s),
     non-https URIs refused before the sanitizer runs, one shared in-flight request per URL that is cancelled when every waiter
     is (the socket is aborted at once), and content routing by Content-Type with an `<svg` sniff as fallback
-    (the guard applies either way).
+    (raster magic numbers first, SVG only with an XML-looking prefix; the guard
+    applies either way). SVG bytes go to AndroidSVG unchanged, so the guard and
+    the renderer read the same document in any encoding.
   - The sample app draws only SDK-produced PNGs (including remote logos, no
     longer fetched by Coil), and shows the issuer initial while loading, on
     rejection and on any failed load.

@@ -21,7 +21,8 @@ internal object SvgRasterizer {
 
     private fun render(svgBytes: ByteArray): ByteArray? {
         val svg = try {
-            SVG.getFromString(String(svgBytes, Charsets.UTF_8))
+            // The original bytes, so the renderer sees the document the guard parsed (same encoding handling).
+            SVG.getFromInputStream(java.io.ByteArrayInputStream(svgBytes))
         } catch (e: Exception) {
             return null
         }

@@ -3,6 +3,9 @@ package org.siros.sdk.credentials.logo
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import androidx.exifinterface.media.ExifInterface
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 /**
@@ -28,8 +31,10 @@ internal object RasterReencoder {
             return LogoResult.Rejected(LogoRejection.DimensionsTooLarge)
         }
         val opts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
             ?: return LogoResult.Rejected(LogoRejection.UndecodableImage)
+        // BitmapFactory ignores EXIF orientation and the re-encode drops it: bake it in first.
+        val bitmap = applyOrientation(decoded, exifOrientation(bytes))
         try {
             val out = ByteArrayOutputStream()
             if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
@@ -39,5 +44,30 @@ internal object RasterReencoder {
         } finally {
             bitmap.recycle()
         }
+    }
+
+    private fun exifOrientation(bytes: ByteArray): Int = try {
+        ExifInterface(ByteArrayInputStream(bytes))
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+    } catch (e: Exception) {
+        ExifInterface.ORIENTATION_NORMAL
+    }
+
+    /** Output is at most as large as the (already capped) source; 90/270 just swap its edges. */
+    private fun applyOrientation(src: Bitmap, orientation: Int): Bitmap {
+        val m = Matrix()
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> m.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> m.postRotate(180f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> m.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> { m.postRotate(90f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
+            ExifInterface.ORIENTATION_TRANSVERSE -> { m.postRotate(270f); m.postScale(-1f, 1f) }
+            ExifInterface.ORIENTATION_ROTATE_270 -> m.postRotate(270f)
+            else -> return src
+        }
+        val out = Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+        if (out !== src) src.recycle()
+        return out
     }
 }

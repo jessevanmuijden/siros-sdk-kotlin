@@ -315,4 +315,69 @@ class LogoSanitizerTest {
         assertFalse(java.util.Arrays.equals(input, img.png) && img.png === input)
         assertArrayEquals(input, input)
     }
+
+    @Test
+    fun `a png whose text chunk mentions svg is still routed as a png`() {
+        val png = encode(Bitmap.CompressFormat.PNG)
+        val text = "Comment\u0000<svg xmlns='x'><script>1</script></svg>".toByteArray()
+        val crc = java.util.zip.CRC32().also { it.update("tEXt".toByteArray()); it.update(text) }.value.toInt()
+        val chunk = java.nio.ByteBuffer.allocate(12 + text.size).putInt(text.size)
+            .put("tEXt".toByteArray()).put(text).putInt(crc).array()
+        val withText = png.copyOfRange(0, 33) + chunk + png.copyOfRange(33, png.size)
+        assertTrue(LogoSanitizer.sanitizeBytes(withText, null) is LogoResult.Accepted)
+        assertTrue(LogoSanitizer.sanitizeBytes(withText, "application/octet-stream") is LogoResult.Accepted)
+    }
+
+    @Test
+    fun `svg routing needs an xml looking prefix`() {
+        val declared = "\uFEFF<?xml version=\"1.0\"?>\n<!-- c -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>"
+        assertTrue(LogoSanitizer.sanitizeBytes(declared.toByteArray(), null) is LogoResult.Accepted)
+        val notSvg = "hello <svg xmlns=\"http://www.w3.org/2000/svg\"/>".toByteArray()
+        assertEquals(
+            LogoRejection.UndecodableImage,
+            (LogoSanitizer.sanitizeBytes(notSvg, null) as LogoResult.Rejected).reason,
+        )
+    }
+
+    @Test
+    fun `exif orientation is baked into the re-encoded jpeg`() {
+        // 40x20: left half red, right half blue. Orientation 6 (rotate 90 cw) must come out 20x40
+        // with red on top and blue at the bottom.
+        val bmp = Bitmap.createBitmap(40, 20, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        c.drawColor(Color.BLUE)
+        c.drawRect(0f, 0f, 20f, 20f, android.graphics.Paint().apply { color = Color.RED })
+        val jpeg = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.JPEG, 100, it) }.toByteArray()
+        val file = java.io.File.createTempFile("exif", ".jpg")
+        try {
+            file.writeBytes(jpeg)
+            androidx.exifinterface.media.ExifInterface(file.absolutePath).apply {
+                setAttribute(androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION, "6")
+                saveAttributes()
+            }
+            val img = image(dataUri("image/jpeg", file.readBytes()))
+            assertEquals(20, img.width)
+            assertEquals(40, img.height)
+            val out = pngOf(img)
+            assertTrue("top should be red", Color.red(out.getPixel(10, 5)) > 200 && Color.blue(out.getPixel(10, 5)) < 80)
+            assertTrue("bottom should be blue", Color.blue(out.getPixel(10, 35)) > 200 && Color.red(out.getPixel(10, 35)) < 80)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `utf-16 and iso-8859-1 svgs are guarded and rendered as the same document`() {
+        val body = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><title>caf\u00e9</title><rect width=\"8\" height=\"8\"/></svg>"
+        val utf16 = ("\uFEFF" + body).toByteArray(Charsets.UTF_16BE)
+        assertTrue(LogoSanitizer.sanitizeBytes(utf16, "image/svg+xml") is LogoResult.Accepted)
+        val latin = ("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>" + body).toByteArray(Charsets.ISO_8859_1)
+        assertTrue(LogoSanitizer.sanitizeBytes(latin, "image/svg+xml") is LogoResult.Accepted)
+        // The guard sees script in UTF-16 too, so the renderer never gets it.
+        val evil = ("\uFEFF" + body.replace("<title>", "<script>").replace("</title>", "</script>")).toByteArray(Charsets.UTF_16BE)
+        assertEquals(
+            LogoRejection.ActiveContent,
+            (LogoSanitizer.sanitizeBytes(evil, "image/svg+xml") as LogoResult.Rejected).reason,
+        )
+    }
 }

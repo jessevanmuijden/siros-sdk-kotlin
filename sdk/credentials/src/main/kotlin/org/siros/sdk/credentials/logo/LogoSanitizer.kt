@@ -163,6 +163,9 @@ object LogoSanitizer {
             val type = when {
                 declared == "image/svg+xml" -> declared
                 declared in ALLOWED_MEDIA_TYPES -> declared
+                // Raster magic numbers win over any text sniff: a PNG whose tEXt chunk
+                // contains "<svg" is still a PNG.
+                hasRasterMagic(bytes) -> null
                 looksLikeSvg(bytes) -> "image/svg+xml"
                 else -> null
             }
@@ -182,9 +185,34 @@ object LogoSanitizer {
         LogoResult.Rejected(LogoRejection.InvalidSvg)
     }
 
+    private fun startsWith(bytes: ByteArray, vararg sig: Int, offset: Int = 0): Boolean =
+        bytes.size >= offset + sig.size && sig.indices.all { (bytes[offset + it].toInt() and 0xff) == sig[it] }
+
+    private fun hasRasterMagic(bytes: ByteArray): Boolean =
+        startsWith(bytes, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A) || // PNG
+            startsWith(bytes, 0xFF, 0xD8, 0xFF) || // JPEG
+            startsWith(bytes, 0x47, 0x49, 0x46, 0x38) || // GIF8
+            (startsWith(bytes, 0x52, 0x49, 0x46, 0x46) && startsWith(bytes, 0x57, 0x45, 0x42, 0x50, offset = 8)) // RIFF....WEBP
+
+    /**
+     * SVG routing only: optional BOM, whitespace, an XML declaration and comments,
+     * then an `<svg` root. Anything else is not routed to the SVG path.
+     */
     private fun looksLikeSvg(bytes: ByteArray): Boolean {
-        val head = String(bytes, 0, minOf(bytes.size, 1024), Charsets.ISO_8859_1)
-        return head.contains("<svg", ignoreCase = true)
+        val charset = when {
+            startsWith(bytes, 0xFE, 0xFF) -> Charsets.UTF_16BE
+            startsWith(bytes, 0xFF, 0xFE) -> Charsets.UTF_16LE
+            else -> Charsets.ISO_8859_1
+        }
+        var head = String(bytes, 0, minOf(bytes.size, 2048), charset).trimStart('\uFEFF', '\u00EF', '\u00BB', '\u00BF')
+        while (true) {
+            head = head.trimStart()
+            head = when {
+                head.startsWith("<?") -> head.substringAfter("?>", "")
+                head.startsWith("<!--") -> head.substringAfter("-->", "")
+                else -> return head.startsWith("<svg", ignoreCase = true)
+            }
+        }
     }
 
     private fun sanitizeSvg(bytes: ByteArray): LogoResult {

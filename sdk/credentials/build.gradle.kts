@@ -100,6 +100,8 @@ dependencies {
     // Rasterizes display-logo SVGs to PNG (no script engine, no network);
     // see org.siros.sdk.credentials.logo.LogoSanitizer.
     implementation(libs.androidsvg)
+    // Reads JPEG/WebP EXIF orientation so re-encoding (which drops metadata) keeps the logo upright.
+    implementation(libs.exifinterface)
     // Real HTTP client for ZkCircuitClient (mirrors sdk/auth's BackendApiClient usage).
     implementation(libs.okhttp)
     // Real CBOR codec for ISO 18013-5 mdoc parsing (claim extraction/display).
