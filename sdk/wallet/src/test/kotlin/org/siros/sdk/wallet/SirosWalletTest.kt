@@ -2981,6 +2981,7 @@ class SirosWalletTest {
         for (c in cases) {
             val signFlow = MutableSharedFlow<SignRequestMessage>()
             fun ks(): KeystoreManager = mockk<KeystoreManager>().also {
+                coEvery { it.isWscdOnboarded() } returns true
                 coEvery { it.generateKeypairs(1) } returns listOf(KeypairInfo(keyId = "key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
                 coEvery { it.attestationChain("key-1") } returns null
                 coEvery { it.securityProperties("key-1") } returns null
@@ -3219,6 +3220,7 @@ class SirosWalletTest {
         // A SOFTWARE default keystore; the policy selects FIDO2 for a credential type that requires the high tier.
         val defaultKeystore = mockk<KeystoreManager>()
         val fido2Keystore = mockk<KeystoreManager>()
+        coEvery { fido2Keystore.isWscdOnboarded() } returns true
         val keypairs = listOf(KeypairInfo(keyId = "fido2-key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
         coEvery { fido2Keystore.generateKeypairs(1) } returns keypairs
         coEvery { fido2Keystore.attestationChain(any()) } returns null
