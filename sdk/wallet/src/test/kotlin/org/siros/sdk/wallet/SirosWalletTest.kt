@@ -52,6 +52,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -3257,6 +3258,182 @@ class SirosWalletTest {
         advanceUntilIdle()
         coVerify(exactly = 1) { fido2Keystore.generateKeypairs(1) }
         assertEquals("the claim of the keystore that generated the keys (FIDO2), not the default's", "fido2", sentPlugin.captured)
+    }
+
+    // -------- the credential catalog as the baseline key-storage tier --------
+
+    private class CatalogFixture(val wallet: SirosWallet, val soft: KeystoreManager, val fido2: KeystoreManager)
+
+    /** A wallet whose default keystore is the SOFT one and which also has an (onboarded unless said otherwise) FIDO2 keystore. */
+    private fun catalogFixture(
+        catalog: org.siros.sdk.credentials.CredentialTierCatalog?,
+        issuerTier: String?,
+        fido2Onboarded: Boolean = true,
+        withOffer: Boolean = true,
+        policy: WscdSelectionPolicy = WscdSelectionPolicy(tofuStore = InMemoryWscdTofuStore()),
+    ): CatalogFixture {
+        val soft = mockk<KeystoreManager>(relaxed = true)
+        coEvery { soft.isWscdOnboarded() } returns true
+        val fido2 = mockk<KeystoreManager>(relaxed = true)
+        coEvery { fido2.isWscdOnboarded() } returns fido2Onboarded
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(
+                backendUrl = "https://wallet.example.com",
+                availableKeystores = mapOf("softkey" to soft, "fido2" to fido2),
+                credentialTierCatalog = catalog,
+            ),
+            "keystore" to soft,
+            "wscdSelectionPolicy" to policy,
+        )
+        if (withOffer) {
+            setField(wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+                credentialConfigurationId = "pid", credentialIssuerIdentifier = "https://issuer.example.com", credentialName = "PID", issuerName = "Issuer",
+            ))
+            setField(wallet, "activeVctm", org.siros.sdk.credentials.Vctm(vct = "urn:eu.europa.ec.eudi:pid:1", requiredKeyStorage = issuerTier))
+        }
+        return CatalogFixture(wallet, soft, fido2)
+    }
+
+    private fun catalogOf(answer: org.siros.sdk.credentials.CatalogTier) = org.siros.sdk.credentials.CredentialTierCatalog { answer }
+    private fun known(tier: String) = catalogOf(org.siros.sdk.credentials.CatalogTier.Known(tier))
+
+    /** The keystore [SirosWallet] resolves for the active issuance, or the exception that refused it. */
+    private fun resolveKeystore(wallet: SirosWallet): Result<KeystoreManager> = runCatching {
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "resolveEffectiveKeystoreForIssuance" }
+        method.isAccessible = true
+        try {
+            kotlinx.coroutines.runBlocking { method.callSuspend(wallet) as KeystoreManager }
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.targetException
+        }
+    }
+
+    @Test
+    fun catalogTier_isTheBaseline_whenTheIssuerDeclaresNone_theGdcPidGap() {
+        // The issuer's metadata says nothing: before, the SOFT default was used. The catalog says high: FIDO2 is.
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null)
+        assertSame(f.fido2, resolveKeystore(f.wallet).getOrThrow())
+    }
+
+    @Test
+    fun theIssuerMayRaiseTheCatalogTier_butNeverLowerIt() {
+        // catalog basic + issuer high: high (the soft keystore would not do)
+        val raised = catalogFixture(known("iso_18045_basic"), issuerTier = "iso_18045_high")
+        assertSame(raised.fido2, resolveKeystore(raised.wallet).getOrThrow())
+        // catalog high + issuer basic: still high
+        val notLowered = catalogFixture(known("iso_18045_high"), issuerTier = "iso_18045_basic")
+        assertSame(notLowered.fido2, resolveKeystore(notLowered.wallet).getOrThrow())
+    }
+
+    @Test
+    fun withoutACatalog_onlyTheIssuersTierCounts_asBefore() {
+        val f = catalogFixture(null, issuerTier = null)
+        assertSame("no tier at all: the default keystore, as before", f.soft, resolveKeystore(f.wallet).getOrThrow())
+    }
+
+    @Test
+    fun aTierTheCatalogCannotGive_refusesAndNeverFallsBackToTheSoftKeystore() {
+        for (catalog in listOf(
+            catalogOf(org.siros.sdk.credentials.CatalogTier.NotListed),
+            catalogOf(org.siros.sdk.credentials.CatalogTier.Unavailable),
+            org.siros.sdk.credentials.CredentialTierCatalog { throw IllegalStateException("catalog crashed") },
+            known("iso_18045_ultra"), // not a known tier
+        )) {
+            val f = catalogFixture(catalog, issuerTier = null)
+            val e = resolveKeystore(f.wallet).exceptionOrNull()
+            assertTrue("expected a refusal, got $e", e is KeyStorageTierUndeterminedException)
+        }
+        // an issuer tier alone does not stand in for a catalog that cannot answer
+        val f = catalogFixture(catalogOf(org.siros.sdk.credentials.CatalogTier.Unavailable), issuerTier = "iso_18045_basic")
+        assertTrue(resolveKeystore(f.wallet).exceptionOrNull() is KeyStorageTierUndeterminedException)
+    }
+
+    @Test
+    fun aCatalogTierNoOnboardedPluginMeets_refuses_notTheSoftKeystore() {
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null, fido2Onboarded = false)
+        val e = resolveKeystore(f.wallet).exceptionOrNull()
+        assertTrue("expected NoOnboardedWscdException, got $e", e is NoOnboardedWscdException)
+    }
+
+    @Test
+    fun aUserOverrideCannotGoBelowTheCatalogTier() {
+        val policy = WscdSelectionPolicy(
+            tofuStore = InMemoryWscdTofuStore(),
+            userOverrideStore = object : WscdUserOverrideStore {
+                override fun get(issuer: String, credentialType: String): String? = null
+                override fun put(issuer: String, credentialType: String, pluginId: String) {}
+                override fun getGlobal(): String? = "softkey"
+                override fun setGlobal(pluginId: String) {}
+            },
+        )
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null, policy = policy)
+        assertSame("the soft override does not meet the catalog tier", f.fido2, resolveKeystore(f.wallet).getOrThrow())
+    }
+
+    @Test
+    fun theResumedAuthorizationPath_hasNoActiveOffer_andWithACatalogIsRefused_notServedBySoft() {
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null, withOffer = false)
+        assertTrue(resolveKeystore(f.wallet).exceptionOrNull() is KeyStorageTierUndeterminedException)
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_restoresTheOfferContext_soTheCatalogTierApplies() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val soft = mockk<KeystoreManager>(relaxed = true)
+        coEvery { soft.isWscdOnboarded() } returns true
+        val fido2 = mockk<KeystoreManager>(relaxed = true)
+        coEvery { fido2.isWscdOnboarded() } returns true
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(
+                backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback",
+                availableKeystores = mapOf("softkey" to soft, "fido2" to fido2),
+                credentialTierCatalog = known("iso_18045_high"),
+            ),
+            "keystore" to soft,
+            "wscdSelectionPolicy" to WscdSelectionPolicy(tofuStore = InMemoryWscdTofuStore()),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        progressFlow.emit(
+            FlowProgressMessage(
+                flowId = "flow-auth",
+                step = "authorization_required",
+                payload = buildJsonObject {
+                    put("authorization_url", "https://issuer.example.com/auth?state=s")
+                    put("expected_redirect_uri", "siros://callback")
+                    put("state", "s")
+                    put("code_verifier", "v")
+                    putJsonObject("credential_offer") {
+                        put("credential_issuer", "https://issuer.example.com")
+                        putJsonArray("credential_configuration_ids") { add(kotlinx.serialization.json.JsonPrimitive("eu.europa.ec.eudi.pid_mdoc")) }
+                    }
+                },
+            )
+        )
+        advanceUntilIdle()
+        // the original flow was ended locally in the meantime: no offer context
+        setField(wallet, "activeOffer", null)
+        assertNull(getField(wallet, "activeOffer"))
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+
+        val offer = getField(wallet, "activeOffer") as org.siros.sdk.credentials.CredentialOffer
+        assertEquals("eu.europa.ec.eudi.pid_mdoc", offer.credentialConfigurationId)
+        assertEquals("https://issuer.example.com", offer.credentialIssuerIdentifier)
+        // and the catalog tier now decides: FIDO2, not the soft default
+        assertSame(fido2, resolveKeystore(wallet).getOrThrow())
     }
 
     /** Both fido2 and r2ps are eligible for the tier but only r2ps is onboarded: it is used, fido2 never touched. */

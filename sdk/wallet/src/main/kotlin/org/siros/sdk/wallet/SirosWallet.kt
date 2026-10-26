@@ -5011,6 +5011,9 @@ class SirosWallet private constructor(
                 engine.forceReconnect()
                 engine.awaitConnected()
                 Timber.i("Engine WebSocket reconnected (${engine.state.value}); sending the resume flow_start for flow $flowId")
+                // The resumed flow needs the same offer context the first one had (the key-storage tier is decided from it); ending the
+                // original flow locally cleared it.
+                restoreOfferContextForResume(pending.offerJson)
                 // Client attestation for the resumed flow arrives the same way
                 // as for a fresh one: go-wallet-backend's Execute() runs its
                 // attestation setup before branching on msg.AuthCode, so it
@@ -7173,6 +7176,87 @@ class SirosWallet private constructor(
         return keystore
     }
 
+    /**
+     * Gives the resumed flow back the offer context of the flow it resumes ([activeOffer], [activeVctm]) when it was cleared in the
+     * meantime, from the `credential_offer` saved at the authorization step: its issuer and configuration id are all the key-storage
+     * tier decision ([resolveEffectiveKeystoreForIssuance]) needs, so an unresolvable display lookup still leaves a minimal offer.
+     * Nothing is replaced when an offer is already active.
+     */
+    private suspend fun restoreOfferContextForResume(offerJson: String?) {
+        if (offerJson == null || activeOffer != null) return
+        val resolved = try {
+            resolveOfferForDisplay(offerJson)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        val offer = resolved?.offer ?: try {
+            val o = json.parseToJsonElement(offerJson).jsonObject
+            val issuer = o["credential_issuer"]?.jsonPrimitive?.contentOrNull
+            val configId = (o["credential_configuration_ids"] as? kotlinx.serialization.json.JsonArray)
+                ?.firstOrNull()?.jsonPrimitive?.contentOrNull
+            if (issuer != null && configId != null) {
+                org.siros.sdk.credentials.CredentialOffer(
+                    credentialConfigurationId = configId,
+                    credentialIssuerIdentifier = issuer,
+                    credentialName = configId,
+                    issuerName = issuer,
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        } ?: run {
+            Timber.w("Resumed flow: the saved credential offer names no issuer and configuration; the key-storage tier cannot be decided from it")
+            return
+        }
+        if (resolved?.offer != null) resolved.record()
+        activeOffer = offer
+        activeVctm = try {
+            vctmFetcher.fetch(
+                issuerUrl = offer.credentialIssuerIdentifier,
+                scope = offer.credentialConfigurationId,
+                registryUrl = registryUrl,
+            )
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * The key-storage tier required for [credentialType]: the credential catalog's, raised (never lowered) by [issuerTier]; just
+     * [issuerTier] when no [WalletConfig.credentialTierCatalog] is configured. Throws [KeyStorageTierUndeterminedException] when a
+     * catalog is configured and the tier cannot be determined.
+     */
+    private suspend fun catalogBaselineTier(issuer: String, credentialType: String, issuerTier: String?): String? {
+        val catalog = config.credentialTierCatalog ?: return issuerTier
+        val baseline = when (val answer = try {
+            catalog.tierFor(credentialType)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            org.siros.sdk.credentials.CatalogTier.Unavailable
+        }) {
+            is org.siros.sdk.credentials.CatalogTier.Known -> answer.tier
+            org.siros.sdk.credentials.CatalogTier.NotListed ->
+                throw KeyStorageTierUndeterminedException(issuer, credentialType, "the catalog does not list the credential type")
+            org.siros.sdk.credentials.CatalogTier.Unavailable ->
+                throw KeyStorageTierUndeterminedException(issuer, credentialType, "the catalog could not be consulted")
+        }
+        if (WscdPluginCapabilities.rankOf(baseline) < 0) {
+            throw KeyStorageTierUndeterminedException(issuer, credentialType, "the catalog states a tier that is not a known ISO 18045 tier")
+        }
+        if (issuerTier == null) return baseline
+        if (WscdPluginCapabilities.rankOf(issuerTier) < 0) {
+            throw KeyStorageTierUndeterminedException(issuer, credentialType, "the issuer states a tier that is not a known ISO 18045 tier")
+        }
+        return if (WscdPluginCapabilities.rankOf(issuerTier) > WscdPluginCapabilities.rankOf(baseline)) issuerTier else baseline
+    }
+
     private suspend fun resolveEffectiveKeystoreForIssuance(): KeystoreManager {
         val available = config.availableKeystores
         if (available.isNullOrEmpty()) {
@@ -7180,6 +7264,10 @@ class SirosWallet private constructor(
             return requireDefaultKeystoreOnboarded("default", null, null, null)
         }
         val offer = activeOffer ?: run {
+            // With a catalog the tier of an unknown credential cannot be decided: refuse rather than use the default keystore.
+            if (config.credentialTierCatalog != null) {
+                throw KeyStorageTierUndeterminedException(null, null, "no credential offer is active")
+            }
             Timber.i("resolveEffectiveKeystoreForIssuance: no activeOffer, using default keystore")
             return requireDefaultKeystoreOnboarded(available.entries.firstOrNull { it.value === keystore }?.key ?: "default", null, null, null)
         }
@@ -7203,8 +7291,11 @@ class SirosWallet private constructor(
         } else {
             null
         }
-        val requiredTier = activeVctm?.requiredKeyStorage ?: mddlSchema?.requiredKeyStorage
+        val issuerTier = activeVctm?.requiredKeyStorage ?: mddlSchema?.requiredKeyStorage
         val credentialType = activeVctm?.vct ?: mddlSchema?.doctype ?: offer.credentialConfigurationId
+        // The catalog's tier is the BASELINE; the issuer's own metadata may raise it, never lower it. With a catalog configured an
+        // undeterminable tier refuses (no fallback to a weaker keystore).
+        val requiredTier = catalogBaselineTier(issuer, credentialType, issuerTier)
 
         // Identify which registered plugin (if any) is already the active
         // default, so WscdSelectionPolicy can prefer it over switching
