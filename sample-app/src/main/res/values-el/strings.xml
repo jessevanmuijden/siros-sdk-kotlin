@@ -314,4 +314,8 @@
     <string name="settings_policy_verifier_ids_add">Προσθήκη</string>
     <string name="settings_policy_verifier_ids_reset">Επαναφορά στην προεπιλογή</string>
     <string name="settings_policy_applies_next">Ισχύει την επόμενη φορά που θα δημιουργηθεί το πορτοφόλι: μετά την Αποσύνδεση ή την επανεκκίνηση της εφαρμογής.</string>
+    <string name="settings_policy_proof_system">Προτιμώμενο σύστημα απόδειξης</string>
+    <string name="settings_policy_proof_system_default">Προεπιλογή (σειρά καταλόγου)</string>
+    <string name="settings_policy_proof_system_longfellow">Μόνο Longfellow</string>
+    <string name="settings_policy_proof_system_vega">Μόνο Vega</string>
 </resources>

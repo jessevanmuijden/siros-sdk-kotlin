@@ -239,6 +239,74 @@ class CircuitZkPresenterTest {
         assertEquals("right", present(presenter(circuits = circuits), request(p = offered)).systemId)
     }
 
+    // -------- the app's proof system preference --------
+
+    private val longfellow = CircuitZkCircuit(
+        "longfellow-libzk-v1", "urn:circuits:longfellow:nym_auth:v1", setOf(docType), functions = setOf("pseudonym", "age_check"),
+        proofSystem = "longfellow-libzk-v1",
+    )
+    private val vega = CircuitZkCircuit(
+        "vega-mc", "urn:circuits:vega:nym_auth:v1", setOf(docType), functions = setOf("pseudonym", "age_check"),
+        proofSystem = "vega-v1",
+    )
+    private fun offering(ids: List<String>, systems: List<String>) =
+        plan(pseudonymFn(), ageFn()).copy(circuitFilter = org.siros.sdk.credentials.CircuitZkCircuitFilter(systems, ids))
+    private val bothOffered get() = offering(
+        listOf("urn:circuits:longfellow:nym_auth:v1", "urn:circuits:vega:nym_auth:v1"),
+        listOf("longfellow-libzk-v1", "vega-v1"),
+    )
+
+    @Test
+    fun `with no preference the first offered circuit in catalog order is used, as before`() {
+        val pr = presenter(circuits = listOf(longfellow, vega))
+        assertEquals("urn:circuits:longfellow:nym_auth:v1", present(pr, request(p = bothOffered)).systemId)
+        assertEquals("urn:circuits:longfellow:nym_auth:v1", present(pr.withProofSystemPreference(emptyList()), request(p = bothOffered)).systemId)
+    }
+
+    @Test
+    fun `a Vega preference chooses Vega when both are offered, and a Longfellow preference Longfellow`() {
+        val vegaFirst = presenter(circuits = listOf(longfellow, vega)).withProofSystemPreference(listOf("urn:circuits:vega:nym_auth:v1"))
+        assertEquals("urn:circuits:vega:nym_auth:v1", present(vegaFirst, request(p = bothOffered)).systemId)
+        // by proof system name too
+        val byName = presenter(circuits = listOf(longfellow, vega)).withProofSystemPreference(listOf("vega-v1"))
+        assertEquals("urn:circuits:vega:nym_auth:v1", present(byName, request(p = bothOffered)).systemId)
+        // and the catalog order does not matter
+        val lf = presenter(circuits = listOf(vega, longfellow)).withProofSystemPreference(listOf("urn:circuits:longfellow:nym_auth:v1"))
+        assertEquals("urn:circuits:longfellow:nym_auth:v1", present(lf, request(p = bothOffered)).systemId)
+    }
+
+    @Test
+    fun `the preference orders the listed systems and never admits an unlisted one`() {
+        val both = listOf(longfellow, vega)
+        val order = presenter(circuits = both).withProofSystemPreference(listOf("vega-v1", "longfellow-libzk-v1"))
+        assertEquals("urn:circuits:vega:nym_auth:v1", present(order, request(p = bothOffered)).systemId)
+        // Vega is not listed: it is never chosen, even when it is the only one the verifier offers
+        val onlyVegaOffered = offering(listOf("urn:circuits:vega:nym_auth:v1"), listOf("vega-v1"))
+        val lfOnly = presenter(circuits = both).withProofSystemPreference(listOf("longfellow-libzk-v1"))
+        assertDenied(CircuitZkStep.CIRCUIT) { present(lfOnly, request(p = onlyVegaOffered)) }
+        // listed first but not offered: the next listed one that IS offered
+        val onlyLfOffered = offering(listOf("urn:circuits:longfellow:nym_auth:v1"), listOf("longfellow-libzk-v1"))
+        assertEquals("urn:circuits:longfellow:nym_auth:v1", present(order, request(p = onlyLfOffered)).systemId)
+    }
+
+    @Test
+    fun `a preference that names only a system the verifier did not offer is refused, and nothing is proved`() {
+        val prover = CountingProver(FakeCircuitZkProver.optIn())
+        val pr = presenter(prover, circuits = listOf(longfellow, vega)).withProofSystemPreference(listOf("vega-v1"))
+        val onlyLfOffered = offering(listOf("urn:circuits:longfellow:nym_auth:v1"), listOf("longfellow-libzk-v1"))
+        assertDenied(CircuitZkStep.CIRCUIT) { present(pr, request(p = onlyLfOffered)) }
+        assertEquals(0, prover.calls)
+    }
+
+    @Test
+    fun `the chosen system and the preference in force are logged, system ids only`() {
+        val pr = presenter(circuits = listOf(longfellow, vega)).withProofSystemPreference(listOf("vega-v1"))
+        present(pr, request(p = bothOffered))
+        val line = logs.single { it.startsWith("circuit_zk proof system chosen") }
+        assertTrue(line, line.contains("vega-v1") && line.contains("urn:circuits:vega:nym_auth:v1") && line.contains("[vega-v1]"))
+        assertFalse(line.contains("rp.example"))
+    }
+
     // -------- the response shape: offered circuit and proof system, issuer chain --------
 
     @Test

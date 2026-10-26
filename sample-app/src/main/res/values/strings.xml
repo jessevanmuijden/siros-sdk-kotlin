@@ -332,4 +332,8 @@
     <string name="settings_policy_verifier_ids_add">Add</string>
     <string name="settings_policy_verifier_ids_reset">Reset to default</string>
     <string name="settings_policy_applies_next">Takes effect the next time the wallet is created: after Disconnect, or an app restart.</string>
+    <string name="settings_policy_proof_system">Preferred proof system</string>
+    <string name="settings_policy_proof_system_default">Default (catalog order)</string>
+    <string name="settings_policy_proof_system_longfellow">Longfellow only</string>
+    <string name="settings_policy_proof_system_vega">Vega only</string>
 </resources>

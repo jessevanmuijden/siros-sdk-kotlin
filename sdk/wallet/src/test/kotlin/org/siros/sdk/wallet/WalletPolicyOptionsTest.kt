@@ -176,4 +176,28 @@ class WalletPolicyOptionsTest {
         assertTrue(CredentialDisclosureGuard.isProtected(NonDisclosurePolicy.NYM_AUTH_DOCTYPE, nymBirth))
         assertFalse(CredentialDisclosureGuard.isProtected("some.other.doctype", nymPsc))
     }
+
+    @Test
+    fun `the proof system choice becomes the SDK preference and survives storage`() {
+        val base = WalletConfig(backendUrl = "https://wallet.example.com")
+        assertEquals(emptyList<String>(), WalletPolicyOptions().applyTo(base).zkProofSystemPreference)
+        val vega = WalletPolicyOptions(proofSystem = ZkProofSystemChoice.VEGA)
+        assertEquals(listOf("urn:circuits:vega:nym_auth:v1", "vega-v1"), vega.applyTo(base).zkProofSystemPreference)
+        val lf = WalletPolicyOptions(proofSystem = ZkProofSystemChoice.LONGFELLOW)
+        assertEquals(listOf("urn:circuits:longfellow:nym_auth:v1", "longfellow-libzk-v1"), lf.applyTo(base).zkProofSystemPreference)
+        val stored = vega.toStored()
+        assertEquals(vega, WalletPolicyOptions.fromStored { stored[it] })
+        assertEquals(ZkProofSystemChoice.DEFAULT, WalletPolicyOptions.fromStored { null }.proofSystem)
+    }
+
+    @Test
+    fun `a blank, repeated or unknown proof system preference is refused when the configuration is built`() {
+        fun build(vararg p: String) = WalletConfig(backendUrl = "https://wallet.example.com", zkProofSystemPreference = p.toList())
+        build()
+        build("vega-v1", "urn:circuits:longfellow:nym_auth:v1")
+        for (bad in listOf(arrayOf(""), arrayOf("  "), arrayOf("vega-v1", "vega-v1"), arrayOf("urn:circuits:other:v1"), arrayOf("vega-v1", "nope"))) {
+            val e = runCatching { build(*bad) }.exceptionOrNull()
+            assertTrue("${bad.toList()} must be refused", e is IllegalArgumentException)
+        }
+    }
 }

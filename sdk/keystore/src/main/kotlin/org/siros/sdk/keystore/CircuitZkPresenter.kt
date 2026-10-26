@@ -322,6 +322,17 @@ class CircuitZkPresenter(
 ) {
     private val handlersById = handlers.associateBy { it.functionId }
 
+    private var proofSystemPreference: List<String> = emptyList()
+
+    /**
+     * The app's ordered allow-list of proof systems ([org.siros.sdk.credentials.ZkProofSystemPreference]); empty (the default) is the
+     * catalog order. Returns this presenter.
+     */
+    fun withProofSystemPreference(preference: List<String>): CircuitZkPresenter {
+        proofSystemPreference = preference.toList()
+        return this
+    }
+
     /** True when the prover is a fake: a host reports this in its capability descriptor. */
     val usesFakeProver: Boolean get() = prover.isFake
 
@@ -467,9 +478,13 @@ class CircuitZkPresenter(
         // 6. A circuit that fits the plan, and that the request OFFERED: a response states a `system_id` from the request's
         // `system_id_values` (and a proof system the request accepts), so a request that offered none (or none of ours) cannot be answered.
         val filter = plan.circuitFilter ?: refuse(CircuitZkStep.CIRCUIT)
-        val circuit = circuits.circuits().firstOrNull {
+        val offered = circuits.circuits().filter {
             it.supports(plan, document.docType, serving) && prover.admits(it, plan) && filter.offeredCircuitId(it) != null && filter.offersProofSystem(it)
-        } ?: refuse(CircuitZkStep.CIRCUIT)
+        }
+        // The app's preference narrows and orders the verifier's offered set; it never widens it.
+        val circuit = org.siros.sdk.credentials.ZkProofSystemPreference.order(offered, proofSystemPreference).firstOrNull()
+            ?: refuse(CircuitZkStep.CIRCUIT)
+        Timber.i("circuit_zk proof system chosen: ${circuit.offeredProofSystem} (circuit ${circuit.circuitId}); preference in force: $proofSystemPreference")
 
         // 6b. The issuer key set the response must carry: ONLY the Document Signer (leaf) certificate, the first of the
         // credential's x5chain (rulebook v0.4: a set of DS certificates, not a chain; the circuits take one issuer key Q, the

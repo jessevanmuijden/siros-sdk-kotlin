@@ -314,4 +314,8 @@
     <string name="settings_policy_verifier_ids_add">Lägg till</string>
     <string name="settings_policy_verifier_ids_reset">Återställ till standard</string>
     <string name="settings_policy_applies_next">Börjar gälla nästa gång plånboken skapas: efter Koppla från, eller en omstart av appen.</string>
+    <string name="settings_policy_proof_system">Önskat bevissystem</string>
+    <string name="settings_policy_proof_system_default">Standard (katalogordning)</string>
+    <string name="settings_policy_proof_system_longfellow">Endast Longfellow</string>
+    <string name="settings_policy_proof_system_vega">Endast Vega</string>
 </resources>
