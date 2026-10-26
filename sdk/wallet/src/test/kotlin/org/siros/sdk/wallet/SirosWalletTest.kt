@@ -5216,7 +5216,8 @@ class SirosWalletTest {
         params: SignRequestParams,
         listener: WalletEventListener? = null,
         config: WalletConfig = WalletConfig(backendUrl = "https://wallet.example.com"),
-    ) {
+        extraFields: Array<Pair<String, Any?>> = emptyArray(),
+    ): SirosWallet {
         val signFlow = MutableSharedFlow<SignRequestMessage>()
         mockEngineConstructor(signRequests = signFlow)
         val wallet = newWallet(
@@ -5226,11 +5227,13 @@ class SirosWalletTest {
             "keystore" to keystore,
             "credentialStore" to FakeCredentialStore(mutableListOf()),
             "eventListener" to listener,
+            *extraFields,
         )
         invokeConnectEngine(wallet, "app-token")
         advanceUntilIdle()
         signFlow.emit(SignRequestMessage(flowId = "flow-psc", action = "generate_proof", params = params))
         advanceUntilIdle()
+        return wallet
     }
 
     @Test
@@ -5281,6 +5284,424 @@ class SirosWalletTest {
         )
         assertEquals(3, captured.size)
         assertTrue(captured.all { it == mapOf("org.siros.psc" to pscClaimFor("eu.europa.ec.eudi.nym_auth.1", "https://issuer.example")) })
+    }
+
+    private fun auxEntry(path: String = """["psc"]""", required: Boolean = true, type: String = "hash_commitment", alg: String = "sha-256") =
+        Json.parseToJsonElement("""{"type":"$type","alg":"$alg","path":$path,"required":$required,"extra":"kept-verbatim"}""").jsonObject
+
+    @Test
+    fun generateProof_withAuxiliaryDataToIssuer_signsOneAuxiliaryDataClaimIdenticalInEveryProof() = runTest(dispatcher) {
+        val asked = mutableListOf<Pair<String, String>>()
+        val keystore = pscKeystore(asked)
+        val captured = mutableListOf<Map<String, kotlinx.serialization.json.JsonElement>>()
+        coEvery { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), capture(captured)) } returns "proof-jwt"
+        generateProofWithCommitments(
+            keystore,
+            SignRequestParams(
+                audience = "aud-1", nonce = "n-1", count = 3, credentialType = "urn:t", credentialIssuer = "https://issuer.example/",
+                auxiliaryDataToIssuer = listOf(auxEntry()),
+            ),
+        )
+        assertEquals(3, captured.size)
+        assertEquals("one value for every proof", 1, captured.toSet().size)
+        assertEquals(setOf("auxiliary_data"), captured.first().keys)
+        val e = (captured.first().getValue("auxiliary_data") as JsonArray).single().jsonObject
+        assertEquals(listOf("psc"), e["path"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(pscClaimFor("urn:t", "https://issuer.example/"), e["commitment"]!!.jsonPrimitive.content)
+        assertEquals("derived once, for the exact issuer string", listOf("urn:t" to "https://issuer.example/"), asked)
+    }
+
+    private val offerWithVct = org.siros.sdk.credentials.CredentialOffer(
+        credentialConfigurationId = "cfg-id", credentialIssuerIdentifier = "https://offer-issuer.example", credentialName = "n",
+        issuerName = "i", vct = "urn:real:vct",
+    )
+
+    @Test
+    fun startIssuanceByOffer_resolvesTheAuxiliarySelectionAtStart_forAnOfferBuiltIndependently() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        val metadata = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}"""))
+                }
+            }
+        }
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } returns buildJsonObject {
+            putJsonObject("context") { put("trust_metadata", metadata) }
+        }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections, // a FRESH wallet: no listing or display lookup happened before
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        // An offer the sample's full-reissuance fallback builds on its own, not through any resolve call.
+        val offer = org.siros.sdk.credentials.CredentialOffer("pid", issuer, "PID", issuerName = "I")
+        wallet.startIssuanceByOffer(offer)
+        advanceUntilIdle()
+        val selected = selections[issuer to "pid"]
+        assertNotNull("the selection was recorded at issuance start", selected)
+        assertEquals(org.siros.sdk.credentials.AuxiliaryDataV01.id, selected!!.shape.id)
+    }
+
+    @Test
+    fun startIssuanceByOffer_abortsWhenTheCurrentAdvertisementIsMalformed_evenForAnOfferListedBefore() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        val metadata = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    // An empty advertisement object: malformed (the offer was valid when it was listed, the CURRENT metadata is not).
+                    put("auxiliary_data_supported", buildJsonObject {})
+                }
+            }
+        }
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } returns buildJsonObject { putJsonObject("context") { put("trust_metadata", metadata) } }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val stateFlow = MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A"))
+        val wallet = newWallet(
+            "_state" to stateFlow,
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        val offer = org.siros.sdk.credentials.CredentialOffer("pid", issuer, "PID", issuerName = "I")
+        try {
+            wallet.startIssuanceByOffer(offer)
+            org.junit.Assert.fail("issuance started although the advertisement is malformed")
+        } catch (e: WalletException) {
+            assertEquals("auxiliary_data_advertisement_malformed", e.errorCode)
+        }
+        advanceUntilIdle()
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertEquals("a new issuance can start afterwards", false, getField(wallet, "issuanceInFlight"))
+    }
+
+    @Test
+    fun aCancelledIssuanceStartsLateMetadataLookup_neverOverwritesTheRetrysAdapterSelection() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        fun metadataWith(advert: kotlinx.serialization.json.JsonElement) = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", advert)
+                }
+            }
+        }
+        val valid = metadataWith(Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}"""))
+        val malformed = metadataWith(buildJsonObject {})
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var call = 0
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } coAnswers {
+            val n = ++call
+            // The FIRST attempt's lookup hangs; it is released after the user cancelled and restarted, with a different answer.
+            if (n == 1) gate.await()
+            buildJsonObject { putJsonObject("context") { put("trust_metadata", if (n == 1) malformed else valid) } }
+        }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        val offer = org.siros.sdk.credentials.CredentialOffer("pid", issuer, "PID", issuerName = "I")
+        // Real time (the start does real IO work on its own dispatcher): wait until the lookup number [n] has been made.
+        suspend fun untilLookup(n: Int) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(10_000) { while (call < n) kotlinx.coroutines.delay(10) }
+        }
+        val first = async { runCatching { wallet.startIssuanceByOffer(offer) } }
+        untilLookup(1)
+        wallet.cancelCurrentFlow()
+        val second = async { runCatching { wallet.startIssuanceByOffer(offer) } }
+        untilLookup(2)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(200) }
+        assertEquals(org.siros.sdk.credentials.AuxiliaryDataV01.id, selections[issuer to "pid"]!!.shape.id)
+        gate.complete(Unit) // the cancelled attempt's lookup finally answers, with a MALFORMED advertisement
+        advanceUntilIdle()
+        val firstFailure = first.await().exceptionOrNull()
+        assertTrue("the cancelled attempt unwinds as a cancellation, not a refusal: $firstFailure", firstFailure is kotlinx.coroutines.CancellationException)
+        assertEquals(
+            "the retry's selection survived the late answer of the cancelled attempt",
+            org.siros.sdk.credentials.AuxiliaryDataV01.id, selections[issuer to "pid"]?.shape?.id,
+        )
+        second.await()
+    }
+
+    @Test
+    fun aCancelledRawOfferStartsLateDisplayLookup_neverOverwritesTheRetrysAdapterSelection() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        fun metadataWith(advert: kotlinx.serialization.json.JsonElement) = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", advert)
+                }
+            }
+        }
+        val valid = metadataWith(Json.parseToJsonElement("""{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"encoding":"base64url"}]}"""))
+        val differentValid = metadataWith(Json.parseToJsonElement("""{"to_issuer":[{"type":"hash_commitment","alg":"sha-256","path":["psc"],"encoding":"base64url"}]}"""))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var call = 0
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } coAnswers {
+            val n = ++call
+            if (n == 1) gate.await() // the FIRST attempt's display lookup hangs and is released after the retry recorded its own
+            buildJsonObject { putJsonObject("context") { put("trust_metadata", if (n == 1) differentValid else valid) } }
+        }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        val offerJson = """{"credential_issuer":"$issuer","credential_configuration_ids":["pid"]}"""
+        suspend fun untilLookup(n: Int) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.withTimeout(10_000) { while (call < n) kotlinx.coroutines.delay(10) }
+        }
+        val first = async { runCatching { wallet.startIssuance(offerJson) } }
+        untilLookup(1)
+        wallet.cancelCurrentFlow()
+        val second = async { runCatching { wallet.startIssuance(offerJson) } }
+        untilLookup(2)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(200) }
+        val retrys = selections[issuer to "pid"]
+        assertEquals("the retry recorded its own selection", listOf(listOf("ssc")), retrys!!.advertisement.toWallet.map { it.path })
+        gate.complete(Unit) // the cancelled attempt's lookup answers late, with a DIFFERENT valid advertisement
+        advanceUntilIdle()
+        first.await()
+        assertEquals(
+            "the late display lookup of the cancelled start did not overwrite the retry's selection",
+            listOf(listOf("ssc")), selections[issuer to "pid"]!!.advertisement.toWallet.map { it.path },
+        )
+        second.await()
+    }
+
+    @Test
+    fun aRawOfferWhoseCurrentAdvertisementIsMalformed_isRefusedAfterTheEpochCheck_andLeavesNoStaleSelection() = runTest(dispatcher) {
+        val issuer = "https://issuer.example"
+        val metadata = buildJsonObject {
+            put("credential_issuer", JsonPrimitive(issuer))
+            putJsonObject("credential_configurations_supported") {
+                putJsonObject("pid") {
+                    put("format", JsonPrimitive("dc+sd-jwt"))
+                    put("auxiliary_data_supported", buildJsonObject {}) // malformed NOW
+                }
+            }
+        }
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        coEvery { apiClient.resolveIssuer(any(), any()) } returns buildJsonObject { putJsonObject("context") { put("trust_metadata", metadata) } }
+        val engine = mockk<WalletEngineSession>(relaxed = true)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        // An earlier, now stale, valid selection for the same issuer/configuration.
+        selections[issuer to "pid"] = org.siros.sdk.credentials.AuxiliarySelection.Selected(
+            org.siros.sdk.credentials.AuxiliaryDataV01,
+            org.siros.sdk.credentials.AuxiliaryAdvertisement(listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("ssc"), "sha-256", false, "base64url")), emptyList()),
+        )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "engineSession" to engine,
+            "apiClient" to apiClient,
+            "secretSeedAdvertised" to selections,
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", redirectUri = "siros-sample://callback"),
+            "json" to Json { ignoreUnknownKeys = true },
+            "httpClient" to OkHttpClient(),
+        )
+        try {
+            wallet.startIssuance("""{"credential_issuer":"$issuer","credential_configuration_ids":["pid"]}""")
+            org.junit.Assert.fail("issuance started although the advertisement is malformed")
+        } catch (e: WalletException) {
+            assertEquals("auxiliary_data_advertisement_malformed", e.errorCode)
+        }
+        advanceUntilIdle()
+        verify(exactly = 0) { engine.startIssuance(any(), any(), any(), any(), any(), any()) }
+        assertEquals("the stale selection was cleared", null, selections[issuer to "pid"])
+        assertEquals(false, getField(wallet, "issuanceInFlight"))
+    }
+
+    @Test
+    fun generateProof_auxiliaryData_derivesFromTheOffersVctAndIssuerWhenTheRequestOmitsThem_andRecordsThatIssuer() = runTest(dispatcher) {
+        val asked = mutableListOf<Pair<String, String>>()
+        val keystore = pscKeystore(asked)
+        coEvery { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) } returns "proof-jwt"
+        val wallet = generateProofWithCommitments(
+            keystore,
+            // An EMPTY issuer counts as absent for the derivation, and the flow must record the string that was used.
+            SignRequestParams(audience = "aud", nonce = "n", credentialType = null, credentialIssuer = "", auxiliaryDataToIssuer = listOf(auxEntry())),
+            extraFields = arrayOf("activeOffer" to offerWithVct),
+        )
+        assertEquals(listOf("urn:real:vct" to "https://offer-issuer.example"), asked)
+        @Suppress("UNCHECKED_CAST")
+        assertEquals(mapOf("flow-psc" to "https://offer-issuer.example"), getField(wallet, "pscIssuerByFlow") as Map<String, String>)
+    }
+
+    @Test
+    fun generateProof_auxiliaryData_rememberTheCommitmentsSoTheCompletionCanBeCheckedAgainstThem() = runTest(dispatcher) {
+        val keystore = pscKeystore(mutableListOf())
+        coEvery { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) } returns "proof-jwt"
+        val wallet = generateProofWithCommitments(
+            keystore,
+            SignRequestParams(audience = "aud", nonce = "n", credentialType = "urn:t", credentialIssuer = "https://i.example", auxiliaryDataToIssuer = listOf(auxEntry())),
+        )
+        @Suppress("UNCHECKED_CAST")
+        val kept = (getField(wallet, "holderCommitmentsByFlow") as Map<String, List<org.siros.sdk.credentials.HolderCommitment>>)["flow-psc"]!!
+        assertEquals(listOf(listOf("psc")), kept.map { it.path })
+        assertEquals(pscClaimFor("urn:t", "https://i.example"), java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(kept.single().commitment))
+    }
+
+    @Test
+    fun wmpCompletion_ofAV01IssuanceIsCheckedWithTheOffersConfigurationId_notAsUnadvertised() = runTest(dispatcher) {
+        val flowId = "flow-wmp-v01"
+        val opening = "8f3b2c9e41d07a65b1e2f4c3d9a08176".chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val b64 = { x: String -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(x.toByteArray()) }
+        val disclosure = b64("""["salt","ssc","JhQM6yeuK84BoGVVSxbLL9HjjeiBERnWHEZSIIMqwd0"]""")
+        val digest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(java.security.MessageDigest.getInstance("SHA-256").digest(disclosure.toByteArray(Charsets.US_ASCII)))
+        val credential = b64("""{"alg":"none"}""") + "." + b64("""{"_sd_alg":"sha-256","_sd":["$digest"]}""") + ".sig~$disclosure~"
+        val blind = BlindIssuance()
+        val jwk = blind.offer(flowId, org.siros.sdk.transport.CredentialResponseEncryptionRequest("ECDH-ES", "A128GCM", false))!!
+        val body = buildJsonObject {
+            put("credentials", kotlinx.serialization.json.JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive(credential)) })))
+            put("notification_id", JsonPrimitive("n9"))
+            put("credential_metadata", Json.parseToJsonElement("""{"auxiliary_data":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"${java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(opening)}"}]}"""))
+        }
+        blind.open(flowId, issuerEncrypt(jwk, "ECDH-ES", "A128GCM", body.toString()), deferred = false)
+        val selections = java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>()
+        selections["https://issuer.example" to "pid"] = org.siros.sdk.credentials.AuxiliarySelection.Selected(
+            org.siros.sdk.credentials.AuxiliaryDataV01,
+            org.siros.sdk.credentials.AuxiliaryAdvertisement(listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("ssc"), "sha-256")), emptyList()),
+        )
+        val wallet = newWallet(
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "keystore" to org.siros.sdk.keystore.JweKeystore(),
+            "blindIssuance" to blind,
+            "secretSeedAdvertised" to selections,
+            "activeOffer" to org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example", "n", issuerName = "i"),
+        )
+        val result = Json.parseToJsonElement(
+            """{"credentials":[{"format":"dc+sd-jwt"}],"credential_response_encrypted":true,"credential_issuer":"https://issuer.example"}""",
+        ).jsonObject
+        assertEquals(null, wallet.wmpDeliveredMetadataRefusal(flowId, result))
+    }
+
+    @Test
+    fun generateProof_withARequiredAuxiliaryEntryItCannotAnswer_isRefusedAndNoProofIsMade() = runTest(dispatcher) {
+        val keystore = pscKeystore(mutableListOf())
+        // A keystore that WOULD make a proof (without the claim): the refusal must come from the wallet, not from a missing stub.
+        coEvery { keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) } returns "proof-jwt"
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        generateProofWithCommitments(
+            keystore,
+            SignRequestParams(
+                audience = "aud-1", nonce = "n-1", credentialType = "urn:t", credentialIssuer = "https://issuer.example/",
+                auxiliaryDataToIssuer = listOf(auxEntry(alg = "sha-512")),
+            ),
+            listener,
+        )
+        verify(exactly = 1) { listener.onFlowError("flow-psc", any(), any()) }
+        coVerify(exactly = 0) { keystore.generateProof(audience = any(), nonce = any(), freshKey = any(), holderBinding = any()) }
+        coVerify(exactly = 0) { keystore.generateProofWithJsonClaims(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun anInvalidProofWithAnAuxiliaryDataDetail_isTypedNonRetryableAndLeaksNoFreeText() = runTest(dispatcher) {
+        val errorFlow = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        mockEngineConstructor(flowErrors = errorFlow)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val cases = mapOf(
+            "auxiliary_data: the key proofs carry different auxiliary_data" to AuxiliaryDataRefusedException.Reason.PROOFS_DIFFER,
+            "auxiliary_data: the entry for [psc] is required" to AuxiliaryDataRefusedException.Reason.ENTRY_REQUIRED,
+            "auxiliary_data: to_issuer lists no entry for [x]" to AuxiliaryDataRefusedException.Reason.NO_SUCH_ENTRY,
+            "auxiliary_data: alg must be sha-256" to AuxiliaryDataRefusedException.Reason.ALG,
+            "auxiliary_data: the entry for [psc] carries only type, alg, path and commitment" to AuxiliaryDataRefusedException.Reason.ENTRY_MEMBERS,
+            "auxiliary_data: the commitment must be a base64url sha-256 hash" to AuxiliaryDataRefusedException.Reason.COMMITMENT_FORMAT,
+            "auxiliary_data: something new SECRET-FREE-TEXT" to AuxiliaryDataRefusedException.Reason.OTHER,
+        )
+        var n = 0
+        for ((text, reason) in cases) {
+            val flow = "flow-aux-${n++}"
+            errorFlow.emit(FlowErrorMessage(flowId = flow, error = org.siros.sdk.transport.engine.FlowError(code = "INVALID_PROOF", message = "invalid_proof: $text")))
+            advanceUntilIdle()
+            val err = slot<AuxiliaryDataRefusedException>()
+            verify(exactly = 1) { listener.onAuxiliaryDataRefused(flow, capture(err)) }
+            assertEquals(reason, err.captured.reason)
+            assertFalse(err.captured.retryable)
+            assertFalse("no issuer free text in the exception", err.captured.message!!.contains("SECRET-FREE-TEXT"))
+            verify(exactly = 0) { listener.onFlowError(flow, any(), any()) }
+        }
+        // An invalid_proof WITHOUT the auxiliary_data prefix is an ordinary flow error.
+        errorFlow.emit(FlowErrorMessage(flowId = "flow-plain", error = org.siros.sdk.transport.engine.FlowError(code = "INVALID_PROOF", message = "invalid_proof: nonce mismatch")))
+        advanceUntilIdle()
+        verify(exactly = 1) { listener.onFlowError("flow-plain", any(), any()) }
+    }
+
+    @Test
+    fun auxiliaryDataConflict_isTypedNonRetryableAndNotAlsoAGenericError() = runTest(dispatcher) {
+        val errorFlow = MutableSharedFlow<FlowErrorMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        mockEngineConstructor(flowErrors = errorFlow)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "u", displayName = "A")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        errorFlow.emit(
+            FlowErrorMessage(
+                flowId = "flow-c",
+                error = org.siros.sdk.transport.engine.FlowError(
+                    code = "AUXILIARY_DATA_CONFLICT", message = "conflict",
+                    details = buildJsonObject { put("error", JsonPrimitive("auxiliary_data_conflict")) },
+                ),
+            )
+        )
+        advanceUntilIdle()
+        val err = slot<AuxiliaryDataConflictException>()
+        verify(exactly = 1) { listener.onAuxiliaryDataConflict("flow-c", capture(err)) }
+        assertFalse(err.captured.retryable)
+        verify(exactly = 0) { listener.onFlowError("flow-c", any(), any()) }
     }
 
     @Test
@@ -11948,6 +12369,9 @@ class SirosWalletTest {
         if (stateFlow != null && "state" !in values) {
             values["state"] = stateFlow.asStateFlow()
         }
+        if ("holderCommitmentsByFlow" !in values) {
+            values["holderCommitmentsByFlow"] = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+        }
         // allocateInstance skips this initializer too; the lost-flow sweeps ask whether a browser authorization is parked.
         if ("pendingAuthorizations" !in values) {
             values["pendingAuthorizations"] = mutableMapOf<String, Any>()
@@ -12061,6 +12485,17 @@ class SirosWalletTest {
         }
         return wallet
     }
+
+    /** What the wallet's advertisement record holds: the legacy adapter for the one configuration, or nothing. */
+    private fun advertisedSelections(advertised: Boolean): java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected> =
+        java.util.concurrent.ConcurrentHashMap<Pair<String, String>, org.siros.sdk.credentials.AuxiliarySelection.Selected>().also {
+            if (advertised) it["https://issuer.example" to "nym"] = org.siros.sdk.credentials.AuxiliarySelection.Selected(
+                org.siros.sdk.credentials.LegacyOrgSirosShape,
+                org.siros.sdk.credentials.AuxiliaryAdvertisement(
+                    listOf(org.siros.sdk.credentials.AuxiliaryAdvertisement.Slot(listOf("org.siros.nym_auth"), "sha-256")), emptyList(),
+                ),
+            )
+        }
 
     private fun setField(target: Any, fieldName: String, value: Any?) {
         val field = target.javaClass.getDeclaredField(fieldName)
@@ -13171,9 +13606,7 @@ class SirosWalletTest {
             "sessionStore" to sessionStore,
             "apiClient" to apiClient,
             "eventListener" to listener,
-            "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>().also {
-                if (advertised) it.add("https://issuer.example" to "nym")
-            },
+            "secretSeedAdvertised" to advertisedSelections(advertised),
         )
         if (renewalSourceBatchId != null) fields += "pendingRenewalSourceBatchId" to renewalSourceBatchId
         if (withOffer) {
@@ -13465,9 +13898,7 @@ class SirosWalletTest {
                 "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
                 "keystore" to org.siros.sdk.keystore.JweKeystore(),
                 "blindIssuance" to blind,
-                "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>().also {
-                    if (advertised) it.add("https://issuer.example" to "nym")
-                },
+                "secretSeedAdvertised" to advertisedSelections(advertised),
             )
         }
         val encrypted = Json.parseToJsonElement(
@@ -13521,7 +13952,7 @@ class SirosWalletTest {
     fun anAdvertisementWithAValueInPublicIssuerMetadata_makesTheConfigurationNotOffered() = runTest(dispatcher) {
         val wallet = newWallet(
             "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
-            "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>(),
+            "secretSeedAdvertised" to advertisedSelections(false),
         )
         fun offer(secretSeed: String?): Any? {
             val member = if (secretSeed != null) ""","org.siros.secret_seed":$secretSeed""" else ""
@@ -13566,7 +13997,7 @@ class SirosWalletTest {
             "sessionStore" to sessionStore,
             "apiClient" to apiClient,
             "eventListener" to listener,
-            "secretSeedAdvertised" to java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<String, String>>(),
+            "secretSeedAdvertised" to advertisedSelections(false),
         )
         invokeConnectEngine(wallet, "app-token")
         advanceUntilIdle()
@@ -14028,6 +14459,43 @@ class SirosWalletTest {
         )
         wallet.logout()
         assertBlindEmpty(blind)
+    }
+
+    private fun recordedCommitment() = listOf(org.siros.sdk.credentials.HolderCommitment(listOf("psc"), "sha-256", true, ByteArray(32) { 7 }))
+
+    @Test
+    fun logout_dropsAndZeroesEveryRecordedHolderCommitment() = runTest(dispatcher) {
+        val recorded = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+        val c = recordedCommitment()
+        recorded["f1"] = c
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to mockk<KeystoreManager>(relaxed = true),
+            "sessionStore" to mockk<SessionStore>(relaxed = true),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "holderCommitmentsByFlow" to recorded,
+        )
+        wallet.logout()
+        assertTrue(recorded.isEmpty())
+        assertTrue("zeroed, not merely forgotten", c.single().commitment.all { it == 0.toByte() })
+    }
+
+    @Test
+    fun cancellingAnIssuanceDropsAndZeroesItsRecordedHolderCommitments() = runTest(dispatcher) {
+        val recorded = java.util.concurrent.ConcurrentHashMap<String, List<org.siros.sdk.credentials.HolderCommitment>>()
+        val c = recordedCommitment()
+        recorded["flow-x"] = c
+        recorded["other"] = recordedCommitment()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.FlowActive(userId = "user-1", displayName = "Alice", flowId = "flow-x", flowType = "issuance", status = "s")),
+            "engineSession" to mockk<WalletEngineSession>(relaxed = true),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "holderCommitmentsByFlow" to recorded,
+        )
+        wallet.cancelCurrentFlow()
+        assertEquals(setOf("other"), recorded.keys)
+        assertTrue(c.single().commitment.all { it == 0.toByte() })
     }
 
     @Test

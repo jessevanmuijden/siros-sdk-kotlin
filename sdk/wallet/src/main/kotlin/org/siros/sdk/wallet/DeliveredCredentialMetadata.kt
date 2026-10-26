@@ -4,6 +4,11 @@ package org.siros.sdk.wallet
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import org.siros.sdk.credentials.AuxiliaryDataShape
+import org.siros.sdk.credentials.AuxiliaryDataShapes
+import org.siros.sdk.credentials.AuxiliaryParse
+import org.siros.sdk.credentials.LegacyOrgSirosShape
+import org.siros.sdk.credentials.SecretDelivery
 import org.siros.sdk.credentials.SecretSeedCommitment
 import org.siros.sdk.credentials.SecretSeedDelivery
 import org.siros.sdk.transport.DeliveredResponseMetadata
@@ -44,6 +49,12 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
      */
     RESPONSE_UNAVAILABLE("the encrypted credential response is not available in this wallet"),
 
+    /** The credential does not carry, at the path the issuer asked for, the commitment this wallet sent in the proofs. */
+    HOLDER_COMMITMENT_MISSING("the credential does not hold the holder commitment that was sent"),
+
+    /** A commitment claim in the credential is not in a representation this wallet can read (padded base64, hex, a text string in an mdoc, ...). */
+    COMMITMENT_UNREADABLE("a commitment claim in the credential is not in a readable representation"),
+
     /** A response key was offered for the flow but the completion is plain: an encrypted response is never silently downgraded. */
     PLAIN_RESPONSE("the issuer answered in clear although an encrypted response was requested"),
 }
@@ -67,7 +78,11 @@ internal sealed class DeliveredMetadataVerdict {
     }
 
     /** The response must not be stored: not one of its credentials. */
-    class Refuse(val reason: DeliveredMetadataRefusal) : DeliveredMetadataVerdict()
+    class Refuse(
+        val reason: DeliveredMetadataRefusal,
+        /** Where and what (a claim path and a shape, type and length only: NEVER a value); null when [reason] says it all. */
+        val detail: String? = null,
+    ) : DeliveredMetadataVerdict()
 }
 
 /** Whether [c] commits to a seed (carries an `ssc`): a credential that cannot be used for its pseudonym without it. */
@@ -101,7 +116,14 @@ internal object DeliveredCredentialMetadata {
         canStoreSecret: Boolean,
         /** The issuer metadata of the configuration advertised a seed (`namespaces`): the response must have been encrypted. */
         advertised: Boolean = false,
+        /** The adapter the issuer's advertisement selected (never sniffed from the response). */
+        shape: AuxiliaryDataShape = LegacyOrgSirosShape,
+        /** What the issuer advertised for the configuration (slots), when known: a shape may require the delivery to match it. */
+        advertisement: org.siros.sdk.credentials.AuxiliaryAdvertisement? = null,
+        /** The commitments this wallet put in the key proofs of the request (Auxiliary Data v0.1): the credentials must hold them. */
+        holderCommitments: List<org.siros.sdk.credentials.HolderCommitment> = emptyList(),
     ): DeliveredMetadataVerdict {
+        holdsHolderCommitments(credentials, holderCommitments)?.let { return it }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         }
@@ -114,7 +136,13 @@ internal object DeliveredCredentialMetadata {
         if (metadata.malformed) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         // The entries as received: one per member, member values verbatim.
         val all = JsonArray(metadata.members.map { (member, value) -> JsonObject(mapOf("type" to JsonPrimitive(member), "value" to value)) })
-        val seedMember = metadata.members[SecretSeedDelivery.MEMBER] ?: return when {
+        val members = JsonObject(metadata.members)
+        // A secret in a shape the issuer did not advertise is never stored uninterpreted, and no other adapter is guessed from it.
+        // (Also when another shape WAS advertised: a response may carry only the advertised shape's secret.)
+        if (AuxiliaryDataShapes.all.any { it.id != shape.id && it.carriesSecret(members) }) {
+            return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
+        }
+        if (!shape.carriesSecret(members)) return when {
             advertised -> DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.SEED_UNAVAILABLE)
             metadata.members.isEmpty() -> DeliveredMetadataVerdict.None
             else -> DeliveredMetadataVerdict.Accept(all)
@@ -122,25 +150,74 @@ internal object DeliveredCredentialMetadata {
         if (response.deferredResponse) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.DEFERRED_SEED)
         // Plain JSON never carries a secret: only a response this wallet decrypted itself counts as encrypted.
         if (!response.credentialMetadataEncryptedResponse) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
-        val seeds = SecretSeedDelivery.parseDelivery(seedMember) ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
-        if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
-        if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
-        val hex = seeds[secretNamespace] ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NAMESPACE_ABSENT)
-        val seed = SecretSeedCommitment.seedFromHex(hex) ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
+        val deliveries = (shape.parseDeliveries(members) as? AuxiliaryParse.Parsed)?.deliveries
+            ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         try {
+            // A secret needs a notification id and somewhere to be kept; a response whose only entries are ignored extensions has none.
+            if (deliveries.isNotEmpty()) {
+                if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
+                if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
+            }
+            val toVerify = shape.deliveriesToVerify(deliveries, secretNamespace, advertisement)
+                ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NAMESPACE_ABSENT)
+            return verifyAll(shape, toVerify, credentials, all)
+        } finally {
+            deliveries.forEach { it.bytes.fill(0) }
+        }
+    }
+
+    /**
+     * Spec: after issuance the wallet MUST check that the claim at each `to_issuer` path holds the commitment it sent. A claim that is
+     * absent or different on any credential refuses the response (an optional entry the issuer left out entirely is allowed).
+     */
+    private fun holdsHolderCommitments(credentials: List<DeliveredCredential>, sent: List<org.siros.sdk.credentials.HolderCommitment>): DeliveredMetadataVerdict.Refuse? {
+        val missing = DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.HOLDER_COMMITMENT_MISSING)
+        for (h in sent) {
             for (c in credentials) {
-                val ssc = when {
-                    c.format.equals("mso_mdoc", ignoreCase = true) -> SecretSeedCommitment.sscOfMdoc(c.credential)
-                    c.format.contains("sd-jwt", ignoreCase = true) -> SecretSeedCommitment.sscOfSdJwt(c.credential)
-                    else -> null
-                } ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_COMMITMENT)
-                val ok = SecretSeedCommitment.opens(seed, ssc)
-                ssc.fill(0)
+                when (val claim = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, h.path, h.encoding)) {
+                    // Only a genuinely absent OPTIONAL claim is skipped; a malformed or ambiguous one is refused either way.
+                    org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Absent -> if (h.required) return missing
+                    is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid -> return unreadable(h.path, claim.shape)
+                    is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Value -> {
+                        val same = java.security.MessageDigest.isEqual(claim.bytes, h.commitment)
+                        claim.bytes.fill(0)
+                        if (!same) return missing
+                    }
+                }
+            }
+        }
+        return null
+    }
+
+    /** The refusal of a commitment claim this wallet cannot read: names the path and the SHAPE found (never the value). */
+    private fun unreadable(path: List<String>, shape: String): DeliveredMetadataVerdict.Refuse {
+        val detail = "claim at path $path is $shape"
+        timber.log.Timber.w("Delivered credential refused: $detail")
+        return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.COMMITMENT_UNREADABLE, detail)
+    }
+
+    private fun verifyAll(
+        shape: AuxiliaryDataShape,
+        toVerify: List<SecretDelivery>,
+        credentials: List<DeliveredCredential>,
+        all: JsonArray,
+    ): DeliveredMetadataVerdict {
+        for (delivery in toVerify) {
+            for (c in credentials) {
+                val commitment = shape.commitmentOf(c.format, c.credential, delivery) ?: run {
+                    // Absent stays "no commitment"; a claim that is there but unreadable names its path and shape.
+                    val status = org.siros.sdk.credentials.AuxiliaryDataV01.claimStatus(c.format, c.credential, delivery.path, delivery.encoding)
+                    return if (shape.id == org.siros.sdk.credentials.AuxiliaryDataV01.id && status is org.siros.sdk.credentials.AuxiliaryDataV01.Claim.Invalid) {
+                        unreadable(delivery.path, status.shape)
+                    } else {
+                        DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_COMMITMENT)
+                    }
+                }
+                val ok = SecretSeedCommitment.opens(delivery.bytes, commitment)
+                commitment.fill(0)
                 if (!ok) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MISMATCH)
             }
-            return DeliveredMetadataVerdict.Accept(all)
-        } finally {
-            seed.fill(0)
         }
+        return DeliveredMetadataVerdict.Accept(all)
     }
 }

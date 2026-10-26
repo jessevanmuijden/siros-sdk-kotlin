@@ -9,6 +9,7 @@ import com.nimbusds.jose.Payload
 import com.nimbusds.jose.crypto.ECDHEncrypter
 import com.nimbusds.jose.jwk.ECKey
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -164,6 +165,32 @@ class BlindIssuanceTest {
         val jwk2 = b2.offer("g", request)!!
         b2.open("g", issuer(jwk2, response("c") { mapOf("notification_id" to JsonPrimitive("n"), "credential_metadata" to seed) }), deferred = false)
         assertNotNull(b2.take("g")!!.credentialMetadata)
+    }
+
+    @Test
+    fun aDeferredResponseWithOnlyUnrecognisedAuxiliaryEntriesIsAccepted_aRecognisedOrMalformedOneIsRefused() {
+        val ext = """{"type":"future_kind","alg":"sha-256","path":["x"],"opening":"ignored"}"""
+        val recognised = """{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"AAAAAAAAAAAAAAAAAAAAAA"}"""
+        fun body(entries: String) = buildJsonObject {
+            put("credentials", kotlinx.serialization.json.JsonArray(listOf(buildJsonObject { put("credential", JsonPrimitive("late")) })))
+            put("notification_id", JsonPrimitive("n"))
+            put("credential_metadata", Json.parseToJsonElement("""{"auxiliary_data":$entries}"""))
+        }
+        // Only an extension: ignored, as in a non-deferred delivery.
+        val ok = BlindIssuance()
+        val jwk = ok.offer("f", request)!!
+        ok.open("f", issuer(jwk, buildJsonObject { put("transaction_id", JsonPrimitive("tx")) }), deferred = false)
+        ok.open("f", issuer(jwk, body("[$ext]")), deferred = true)
+        assertNotNull(ok.take("f"))
+        // A recognised secret, or a malformed member, is refused (with the notification id), nothing retained.
+        for (entries in listOf("[$ext,$recognised]", """{"not":"an array"}""", """[{"type":"hash_commitment","path":["ssc"]}]""")) {
+            val b = BlindIssuance()
+            val k = b.offer("f", request)!!
+            b.open("f", issuer(k, buildJsonObject { put("transaction_id", JsonPrimitive("tx")) }), deferred = false)
+            val e = assertThrows(BlindIssuanceException::class.java) { b.open("f", issuer(k, body(entries)), deferred = true) }
+            assertEquals("n", e.notificationId)
+            assertNull(b.take("f"))
+        }
     }
 
     @Test

@@ -78,8 +78,11 @@ object SecretSeedDelivery {
         return Advertisement.Valid(names)
     }
 
-    /** [response] without the [MEMBER]: the only form of a response `credential_metadata` that display code may see. */
-    fun stripped(response: JsonObject): JsonObject = JsonObject(response - MEMBER)
+    /**
+     * [response] without any secret-bearing member of any supported shape (this legacy [MEMBER], Auxiliary Data v0.1's
+     * `auxiliary_data`, ...): the only form of a response `credential_metadata` that display code may see.
+     */
+    fun stripped(response: JsonObject): JsonObject = AuxiliaryDataShapes.all.fold(response) { acc, shape -> shape.stripFromMetadata(acc) }
 
     /**
      * Display metadata: the issuer's `credential_metadata` ([issuer], null for none) overwritten member by member by the
