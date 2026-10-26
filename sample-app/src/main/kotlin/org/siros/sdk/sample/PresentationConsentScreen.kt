@@ -147,8 +147,8 @@ fun PresentationConsentScreen(
             Box(modifier = Modifier.weight(1f)) {
                 when {
                     currentStep == 0 -> PreviewStep(request, exhaustedQueryIds, presentationHistory, availableKeyIds)
-                    currentStep <= request.matchResults.size -> {
-                        val matchResult = request.matchResults[currentStep - 1]
+                    currentStep <= request.consentMatchResults.size -> {
+                        val matchResult = request.consentMatchResults[currentStep - 1]
                         ClaimSelectionStep(
                             matchResult = matchResult,
                             claimSelections = claimSelections,
