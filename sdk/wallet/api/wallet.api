@@ -494,6 +494,7 @@ public final class org/siros/sdk/wallet/PresentationRequest {
 	public static synthetic fun copy$default (Lorg/siros/sdk/wallet/PresentationRequest;Ljava/lang/String;Lorg/siros/sdk/wallet/TrustResult;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lorg/siros/sdk/wallet/PresentationRequest;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getCandidates ()Ljava/util/List;
+	public final fun getConsentMatchResults ()Ljava/util/List;
 	public final fun getConsentStepCount ()I
 	public final fun getCredentialSets ()Ljava/util/List;
 	public final fun getDisclosesNoClaims ()Z
