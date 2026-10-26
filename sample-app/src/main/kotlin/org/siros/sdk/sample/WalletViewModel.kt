@@ -105,6 +105,8 @@ data class PendingWscdChoice(
  */
 data class PendingPinEntry(
     val pluginId: String,
+    /** What the SDK is asking (enter / choose / confirm, and why again): the dialog only renders it. */
+    val request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter(pluginId),
     /** Call with the entered PIN to submit, or null to cancel. */
     val respond: (pin: String?) -> Unit,
 )
@@ -1621,7 +1623,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * user backing out of [Fido2PresentKeyGuide] instead of presenting the
      * key. Cancelling the job still runs its `finally` block (resetting
      * [wscdLifecycleBusy]/[fido2AwaitingPresentation] and clearing
-     * [prefetchedFido2Pin]), so this can't leave the screen stuck the way an
+     * [typedAheadPin]), so this can't leave the screen stuck the way an
      * unbounded hang used to.
      */
     fun cancelWscdLifecycleOp() {
@@ -1863,7 +1865,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                         _errorMessage.value = "Enrollment cancelled"
                         return@launch
                     }
-                    prefetchedFido2Pin = pin.toByteArray()
+                    typedAheadPin.hold(pin.toByteArray())
                     _fido2AwaitingPresentation.value = true
                 }
                 // A hard ceiling on the WHOLE operation, not just its
@@ -1924,6 +1926,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 Log.e(MainActivity.WSCA_TEST_TAG, """{"action":"enroll","status":"error","error":"${e.message?.replace("\"", "'")}"}""")
                 _errorMessage.value = if (e is kotlinx.coroutines.TimeoutCancellationException) {
                     "Enrollment timed out - no security key detected in time"
+                } else if (e is org.siros.sdk.keystore.WscdPinException) {
+                    // The SDK's own short localised text; nothing to interpret here.
+                    activity.getString(e.failure.messageRes)
                 } else {
                     "Enrollment failed: ${e.message}"
                 }
@@ -1931,7 +1936,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 _enrollmentInProgress.value = false
                 _wscdLifecycleBusy.value = false
                 _fido2AwaitingPresentation.value = false
-                prefetchedFido2Pin = null
+                typedAheadPin.clear()
             }
         }
     }
@@ -2326,10 +2331,13 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * forced the user to set the key down to type, which could drop the
      * NFC session entirely.
      */
-    private suspend fun awaitFido2PinEntry(): String? = withContext(Dispatchers.Main.immediate) {
+    private suspend fun awaitFido2PinEntry(
+        request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2"),
+    ): String? = withContext(Dispatchers.Main.immediate) {
         suspendCancellableCoroutine { continuation ->
             val pending = PendingPinEntry(
                 pluginId = "fido2",
+                request = request,
                 respond = { pin ->
                     _pendingPinEntry.value = null
                     if (continuation.isActive) {
@@ -2352,8 +2360,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * in place. Cleared in the `finally` block of whichever operation set
      * it, so a PIN never outlives the one operation it was collected for.
      */
-    @Volatile
-    private var prefetchedFido2Pin: ByteArray? = null
+    private val typedAheadPin = org.siros.sdk.keystore.TypedAheadPin()
 
     /**
      * Bridges [org.siros.sdk.keystore.AuthProvider.requestPin] (synchronous,
@@ -2361,17 +2368,18 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * a Compose dialog, via [_pendingPinEntry]. `runBlocking` here is safe
      * for the same reason it's safe in [Ctap2TransportBridge].
      *
-     * Prefers [prefetchedFido2Pin] when set (the normal case for
+     * Prefers [typedAheadPin] when set (the normal case for
      * [enrollWscd]/[rotateLifecycle], which prefetch it up front - see that
      * field's doc comment) so this returns instantly without ever showing a
      * dialog mid-ceremony. Falls back to the blocking dialog for any call
      * path that didn't prefetch (e.g. a FIDO2 signature requested during
      * real credential presentation, outside the dev-screen flows).
      */
-    private fun requestFido2Pin(): ByteArray {
-        prefetchedFido2Pin?.let { return it }
+    private fun requestFido2Pin(request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2")): ByteArray {
+        // The SDK decides: the typed-ahead PIN answers the FIRST request only (and only a first ENTER), then it is gone.
+        typedAheadPin.take(request)?.let { return it }
         return kotlinx.coroutines.runBlocking(Dispatchers.Main.immediate) {
-            val pin = awaitFido2PinEntry()
+            val pin = awaitFido2PinEntry(request)
             pin ?: throw RuntimeException("PIN entry cancelled")
         }.toByteArray()
     }
@@ -2409,7 +2417,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                         _errorMessage.value = "Rotation cancelled"
                         return@launch
                     }
-                    prefetchedFido2Pin = pin.toByteArray()
+                    typedAheadPin.hold(pin.toByteArray())
                     _fido2AwaitingPresentation.value = true
                 }
                 kotlinx.coroutines.withTimeout(WSCD_LIFECYCLE_OP_TIMEOUT_MS) {
@@ -2442,7 +2450,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             } finally {
                 _wscdLifecycleBusy.value = false
                 _fido2AwaitingPresentation.value = false
-                prefetchedFido2Pin = null
+                typedAheadPin.clear()
             }
         }
     }
@@ -2609,6 +2617,12 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                             else -> "test-pin-1234".toByteArray()
                         }
                     }
+                    // The SDK does the confirmation, the length check and the retry; this only shows what it asks.
+                    override fun requestPin(request: org.siros.sdk.keystore.PinRequest): ByteArray = when (request.pluginId) {
+                        "fido2" -> requestFido2Pin(request)
+                        else -> requestPin(request.pluginId)
+                    }
+
                     override fun requestWebauthnAssertion(
                         pluginId: String,
                         challenge: ByteArray,
@@ -2724,14 +2738,14 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 if (pluginId == "fido2") {
                     val pin = awaitFido2PinEntry()
                     if (pin != null) {
-                        prefetchedFido2Pin = pin.toByteArray()
+                        typedAheadPin.hold(pin.toByteArray())
                         _fido2AwaitingPresentation.value = true
                     }
                 }
             },
             onWscdOperationEnd = {
                 _fido2AwaitingPresentation.value = false
-                prefetchedFido2Pin = null
+                typedAheadPin.clear()
             },
         )
         // The user's request-policy settings (non-disclosure, circuit_zk, DC API origin rules, verifier ids).

@@ -839,4 +839,25 @@ class WscdKeystoreAdapterTest {
         val plain = adapter.generateProof("https://issuer.example", "n-2", false, null)
         assertFalse(jwtClaims(plain).containsKey("org.siros.psc"))
     }
+
+    /**
+     * The onboarding gate (#297) belongs to ISSUANCE: a token with no key yet is exactly what enrolment (register/activate, where
+     * the authenticator is asked to set its PIN) is for, so those calls must reach the signer without consulting
+     * `isWscdOnboarded()`.
+     */
+    @Test
+    fun enrolmentOfATokenThatIsNotOnboardedYetIsNotGated() = runTest {
+        val signer = mockk<Signer>(relaxed = true, moreInterfaces = arrayOf(WscdManager::class))
+        coEvery { signer.isWscdOnboarded() } returns false
+        val manager = signer as WscdManager
+        val adapter = WscdKeystoreAdapter(signer)
+
+        adapter.registerLifecycle(mockk(relaxed = true))
+        adapter.activateLifecycle(mockk(relaxed = true))
+
+        coVerify(exactly = 1) { manager.registerLifecycle(any()) }
+        coVerify(exactly = 1) { manager.activateLifecycle(any()) }
+        coVerify(exactly = 0) { signer.isWscdOnboarded() }
+        assertFalse(adapter.isWscdOnboarded())
+    }
 }

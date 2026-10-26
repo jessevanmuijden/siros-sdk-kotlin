@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="siros_nfc_hce_description">Envolvimento de dispositivo mdoc ISO 18013-5</string>
+    <string name="siros_pin_choose_title">Escolha um PIN para a sua chave de segurança</string>
+    <string name="siros_pin_confirm_title">Confirme o PIN</string>
+    <string name="siros_pin_notice_too_short">O PIN deve ter pelo menos %1$d caracteres.</string>
+    <string name="siros_pin_notice_too_long">Esse PIN é demasiado longo.</string>
+    <string name="siros_pin_notice_not_accepted">A chave de segurança não aceita esse PIN. Escolha outro.</string>
+    <string name="siros_pin_notice_mismatch">Os dois PIN não coincidem. Tente novamente.</string>
+    <string name="siros_pin_notice_wrong">PIN incorreto. Tente novamente.</string>
+    <string name="siros_pin_error_blocked">A chave de segurança está bloqueada e tem de ser reposta.</string>
+    <string name="siros_pin_error_replug">Desligue a chave de segurança, volte a ligá-la e tente novamente.</string>
+    <string name="siros_pin_error_internal">A chave de segurança está num estado inesperado. Tente novamente.</string>
+    <string name="siros_pin_error_too_many">Demasiadas tentativas de PIN. Tente mais tarde.</string>
 </resources>

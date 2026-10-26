@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="siros_nfc_hce_description">ISO 18013-5 mdoc-laitesitoutuminen</string>
+    <string name="siros_pin_choose_title">Valitse suojausavaimelle PIN-koodi</string>
+    <string name="siros_pin_confirm_title">Vahvista PIN-koodi</string>
+    <string name="siros_pin_notice_too_short">PIN-koodin on oltava vähintään %1$d merkkiä.</string>
+    <string name="siros_pin_notice_too_long">PIN-koodi on liian pitkä.</string>
+    <string name="siros_pin_notice_not_accepted">Suojausavain ei hyväksy tätä PIN-koodia. Valitse toinen.</string>
+    <string name="siros_pin_notice_mismatch">PIN-koodit eivät täsmänneet. Yritä uudelleen.</string>
+    <string name="siros_pin_notice_wrong">Väärä PIN-koodi. Yritä uudelleen.</string>
+    <string name="siros_pin_error_blocked">Suojausavain on lukittu ja se on nollattava.</string>
+    <string name="siros_pin_error_replug">Irrota suojausavain, liitä se uudelleen ja yritä uudelleen.</string>
+    <string name="siros_pin_error_internal">Suojausavain on odottamattomassa tilassa. Yritä uudelleen.</string>
+    <string name="siros_pin_error_too_many">Liian monta PIN-yritystä. Yritä myöhemmin uudelleen.</string>
 </resources>
