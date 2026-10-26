@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A resumed authorization no longer shows a "Flow failed: the connection to the engine was lost" dialog for the flow it resumes.** After the browser step, `completeAuthorization` takes the saved context out of the pending authorizations and forces a fresh engine WebSocket; the new socket generation then swept the original flow as "lost with its engine connection" and told the app it had failed (a Cancel / Try Again dialog), 1-20 ms before the resumed flow (a new flow id) completed and stored the credential. A flow whose own resumption is under way is now left alone by that sweep; if the resume itself fails, `onFlowError` still reports it. Reproduced on a Pixel against the gdc nym_auth issuer (2 of 2 runs).
+
 ## [0.21.4] - 2026-10-26
 
 Adds the proof-system preference (https://github.com/sirosfoundation/siros-sdk-kotlin/issues/304) so a wallet can be told to prove with Vega or Longfellow when a verifier offers both. Follow-ups from its review are tracked for the next release.

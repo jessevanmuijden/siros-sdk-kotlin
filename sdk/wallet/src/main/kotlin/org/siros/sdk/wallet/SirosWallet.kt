@@ -7410,6 +7410,10 @@ class SirosWallet private constructor(
         // A browser authorization in progress is resumable on a new flow and socket (completeAuthorization): not lost, and the context
         // it will resume with must stay.
         if (pendingAuthorizations.containsKey(flowId)) return
+        // The flow whose authorization is being resumed right now: its OWN resumption replaces the socket (completeAuthorization takes
+        // the saved context out of [pendingAuthorizations] and then reconnects), so the replacement must not report it as failed - the
+        // resumed flow continues under a new id and answers for the user.
+        if (resumingFlowIds?.contains(flowId) == true) return
         if (!lostFlowIds.add(flowId)) return
         Timber.w("Flow $flowId lost with its engine connection; ending it locally")
         terminatedFlowIds.add(flowId)
