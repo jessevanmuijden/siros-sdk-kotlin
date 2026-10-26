@@ -274,6 +274,44 @@ The entries below are the detailed changes that make up this release.
     `response_jwe`, `error`, and `CredentialResult.credential` defaulting to empty.
 
 ### Added
+- **`LogoSanitizer` and `LogoFetcher`: display logos given as `data:` URIs
+  or https URLs are loaded safely** (sirosfoundation/siros-sdk-kotlin#300).
+  `LogoSanitizer.sanitize(uri)` / `sanitizeBytes(bytes, contentType)` return
+  `LogoResult.Accepted(DisplayLogo.Remote | DisplayLogo.Image)` or a typed
+  `LogoRejection`, and fail closed. `LogoFetcher.load(url)` fetches an https
+  logo and yields `LogoLoad.Loaded` (a clean PNG), `Rejected` (permanent) or
+  `Transient` (network, timeout, 5xx: never remembered). `DisplayLogo.Remote`
+  is only a validated URL, not sanitized content: load it with
+  `LogoFetcher.load` and render only the `Loaded` PNG, never via your own
+  image loader.
+  - `data:` URIs: strict RFC 2397, base64 only, png/jpeg/webp/gif/svg+xml,
+    256 KiB decoded. Rasters are decoded by `BitmapFactory` (max 2048 px per
+    edge, sniffed type must match), EXIF orientation is applied, and they are
+    re-encoded to PNG, dropping metadata
+    and trailing payloads.
+  - SVG is never handed on as XML. A pull-parser guard refuses (nothing is
+    rewritten): script, foreignObject, `image` (embedded rasters too), `use`,
+    `a`, animation, nested `svg`, `clipPath`/`mask`/`pattern`/`filter`/
+    `marker`/`symbol`/`textPath` and `clip-path`/`mask`/`filter` attributes
+    (a clipPath applied to many elements ran AndroidSVG for over a minute),
+    event handlers, any `href`/`xlink:href`/`src` (gradient inheritance chains made AndroidSVG recurse until StackOverflowError; a StackOverflowError is now also caught and turned into a rejection), non-local `url()`, `@import`,
+    `@font-face`, DOCTYPE and entities, CDATA, comments and backslash escapes
+    in CSS (a `<style>` element's whole text is validated once), plus more than 500 elements, depth 24,
+    32 gradients, 64 stops or 32 KiB of CSS in total (all `<style>` text and
+    style attributes together). What passes is rasterized by
+    AndroidSVG (no script engine) to PNG.
+  - `LogoFetcher`: https only and no userinfo on the request and on every
+    redirect hop, no http/https redirects, body read through a streaming
+    256 KiB cap (requests send `Accept-Encoding: identity`; any
+    Content-Encoding in a response is refused unread), a validated wall-clock timeout (default 10 s, max 60 s),
+    non-https URIs refused before the sanitizer runs, one shared in-flight request per URL that is cancelled when every waiter
+    is (the socket is aborted at once), and content routing by Content-Type with an `<svg` sniff as fallback
+    (raster magic numbers first, SVG only with an XML-looking prefix; the guard
+    applies either way). SVG bytes go to AndroidSVG unchanged, so the guard and
+    the renderer read the same document in any encoding.
+  - The sample app draws only SDK-produced PNGs (including remote logos, no
+    longer fetched by Coil), and shows the issuer initial while loading, on
+    rejection and on any failed load.
 - **`UnsupportedSchemaVersionException`** (`errorCode` `unsupported_schema_version`; `kind`
   `STATE_VERSION`, `EVENT_VERSION` or `EVENT_TYPE`). `JweKeystore.exportEncryptedContainer()`
   throws it, before building or storing anything, when the unlocked container has an

@@ -25,6 +25,10 @@ android {
         jvmTarget = "17"
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     // The matcher's zkp_req planner vectors (spec/zkp-req-vectors/zkp_req)
     // are read by the instrumented planner test as assets of the test APK.
     sourceSets.getByName("androidTest").assets.srcDir("../../spec")
@@ -93,6 +97,11 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.nimbus.jose.jwt)
     implementation(libs.timber)
+    // Rasterizes display-logo SVGs to PNG (no script engine, no network);
+    // see org.siros.sdk.credentials.logo.LogoSanitizer.
+    implementation(libs.androidsvg)
+    // Reads JPEG/WebP EXIF orientation so re-encoding (which drops metadata) keeps the logo upright.
+    implementation(libs.exifinterface)
     // Real HTTP client for ZkCircuitClient (mirrors sdk/auth's BackendApiClient usage).
     implementation(libs.okhttp)
     // Real CBOR codec for ISO 18013-5 mdoc parsing (claim extraction/display).
@@ -157,6 +166,9 @@ dependencies {
     androidTestImplementation(libs.kotlinx.coroutines.test)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.okhttp.tls)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlinx.coroutines.test)
 }
