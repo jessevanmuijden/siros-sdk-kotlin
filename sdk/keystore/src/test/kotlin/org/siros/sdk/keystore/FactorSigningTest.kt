@@ -82,6 +82,7 @@ class FactorSigningTest {
             handedOut += p
             return p
         }
+        override fun requestNewPin(pluginId: String, minLength: UInt): ByteArray = throw FfiWscdException.AuthCancelled("no new pin")
         override fun requestWebauthnAssertion(pluginId: String, challenge: ByteArray, rpId: String, allowedCredentials: List<ByteArray>): ByteArray =
             throw FfiWscdException.AuthCancelled("no webauthn")
         val asked get() = handedOut.size
@@ -283,6 +284,7 @@ class FactorSigningTest {
         )) {
             val cb = object : FfiAuthCallback {
                 override fun requestPin(pluginId: String): ByteArray = cancel()
+                override fun requestNewPin(pluginId: String, minLength: UInt): ByteArray = throw FfiWscdException.AuthCancelled("no new pin")
                 override fun requestWebauthnAssertion(pluginId: String, challenge: ByteArray, rpId: String, allowedCredentials: List<ByteArray>): ByteArray = ByteArray(0)
             }
             val e = runCatching { FactorSigning(FakeBackend { outcome() }, cb).begin("k") }.exceptionOrNull()
@@ -295,6 +297,7 @@ class FactorSigningTest {
         var calls = 0
         val cb = object : FfiAuthCallback {
             override fun requestPin(pluginId: String): ByteArray = if (calls++ == 0) "123456".toByteArray() else throw IllegalStateException("dialog crashed")
+            override fun requestNewPin(pluginId: String, minLength: UInt): ByteArray = throw FfiWscdException.AuthCancelled("no new pin")
             override fun requestWebauthnAssertion(pluginId: String, challenge: ByteArray, rpId: String, allowedCredentials: List<ByteArray>): ByteArray = ByteArray(0)
         }
         // the plugin asks twice; the second request reaches the failing host prompt
@@ -307,6 +310,7 @@ class FactorSigningTest {
         var asks = 0
         val cb2 = object : FfiAuthCallback {
             override fun requestPin(pluginId: String): ByteArray = if (asks++ == 0) "123456".toByteArray() else throw FfiWscdException.AuthCancelled("user cancelled")
+            override fun requestNewPin(pluginId: String, minLength: UInt): ByteArray = throw FfiWscdException.AuthCancelled("no new pin")
             override fun requestWebauthnAssertion(pluginId: String, challenge: ByteArray, rpId: String, allowedCredentials: List<ByteArray>): ByteArray = ByteArray(0)
         }
         val wrapping = FakeBackend(pinRequests = 2) { outcome() }

@@ -4,4 +4,15 @@
          host-card-emulation service. A host app can override it by defining
          a string with the same name. -->
     <string name="siros_nfc_hce_description">ISO 18013-5 mdoc device engagement</string>
+    <string name="siros_pin_choose_title">Choose a PIN for your security key</string>
+    <string name="siros_pin_confirm_title">Confirm the PIN</string>
+    <string name="siros_pin_notice_too_short">The PIN must be at least %1$d characters.</string>
+    <string name="siros_pin_notice_too_long">That PIN is too long.</string>
+    <string name="siros_pin_notice_not_accepted">The security key does not accept that PIN. Choose another.</string>
+    <string name="siros_pin_notice_mismatch">The two PINs did not match. Try again.</string>
+    <string name="siros_pin_notice_wrong">Wrong PIN. Try again.</string>
+    <string name="siros_pin_error_blocked">The security key is blocked and has to be reset.</string>
+    <string name="siros_pin_error_replug">Unplug the security key, plug it in again and retry.</string>
+    <string name="siros_pin_error_internal">The security key is in an unexpected state. Try again.</string>
+    <string name="siros_pin_error_too_many">Too many PIN attempts. Try again later.</string>
 </resources>

@@ -654,6 +654,9 @@ internal interface UniffiCallbackInterfaceFfiAuthCallbackMethod0 : com.sun.jna.C
     fun callback(`uniffiHandle`: Long,`pluginId`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFfiAuthCallbackMethod1 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`pluginId`: RustBuffer.ByValue,`minLength`: Int,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceFfiAuthCallbackMethod2 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`pluginId`: RustBuffer.ByValue,`challenge`: RustBuffer.ByValue,`rpId`: RustBuffer.ByValue,`allowedCredentials`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
 internal interface UniffiCallbackInterfaceFfiCtap2TransportMethod0 : com.sun.jna.Callback {
@@ -665,24 +668,27 @@ internal interface UniffiCallbackInterfaceFfiHttpTransportMethod0 : com.sun.jna.
 internal interface UniffiCallbackInterfaceFfiProgressCallbackMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`progress`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "requestPin", "requestWebauthnAssertion")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "requestPin", "requestNewPin", "requestWebauthnAssertion")
 internal open class UniffiVTableCallbackInterfaceFfiAuthCallback(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
     @JvmField internal var `requestPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod0? = null,
-    @JvmField internal var `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod1? = null,
+    @JvmField internal var `requestNewPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod1? = null,
+    @JvmField internal var `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod2? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `requestPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod0? = null,
-        `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod1? = null,
-    ): UniffiVTableCallbackInterfaceFfiAuthCallback(`uniffiFree`,`uniffiClone`,`requestPin`,`requestWebauthnAssertion`,), Structure.ByValue
+        `requestNewPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod1? = null,
+        `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod2? = null,
+    ): UniffiVTableCallbackInterfaceFfiAuthCallback(`uniffiFree`,`uniffiClone`,`requestPin`,`requestNewPin`,`requestWebauthnAssertion`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceFfiAuthCallback) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `requestPin` = other.`requestPin`
+        `requestNewPin` = other.`requestNewPin`
         `requestWebauthnAssertion` = other.`requestWebauthnAssertion`
     }
 
@@ -822,6 +828,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new(
     ): Int
     external fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin(
+    ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_new_pin(
     ): Int
     external fun uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion(
     ): Int
@@ -1116,10 +1124,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_siros_wscd_manager_checksum_constructor_ffiwscdmanager_new() and 0xFFFF) != 9101) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() and 0xFFFF) != 23519) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_pin() and 0xFFFF) != 7366) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() and 0xFFFF) != 26184) {
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_new_pin() and 0xFFFF) != 9600) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiauthcallback_request_webauthn_assertion() and 0xFFFF) != 47617) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_siros_wscd_manager_checksum_method_ffictap2transport_ctap2_send_command() and 0xFFFF) != 35187) {
@@ -3793,6 +3804,166 @@ public object FfiConverterTypeFfiOperationProgress : FfiConverterRustBuffer<FfiO
 
 
 
+/**
+ * See [`crate::error::PinFailure`].
+ */
+sealed class FfiPinFailure {
+    
+    data class TooShort(
+        val `minLength`: kotlin.UInt) : FfiPinFailure()
+        
+    {
+        
+
+        companion object
+    }
+    
+    object TooLong : FfiPinFailure()
+    
+    
+    object InvalidEncoding : FfiPinFailure()
+    
+    
+    object PolicyViolation : FfiPinFailure()
+    
+    
+    object Invalid : FfiPinFailure()
+    
+    
+    object Blocked : FfiPinFailure()
+    
+    
+    object AuthBlocked : FfiPinFailure()
+    
+    
+    object NotSet : FfiPinFailure()
+    
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiPinFailure : FfiConverterRustBuffer<FfiPinFailure>{
+    override fun read(buf: ByteBuffer): FfiPinFailure {
+        return when(buf.getInt()) {
+            1 -> FfiPinFailure.TooShort(
+                FfiConverterUInt.read(buf),
+                )
+            2 -> FfiPinFailure.TooLong
+            3 -> FfiPinFailure.InvalidEncoding
+            4 -> FfiPinFailure.PolicyViolation
+            5 -> FfiPinFailure.Invalid
+            6 -> FfiPinFailure.Blocked
+            7 -> FfiPinFailure.AuthBlocked
+            8 -> FfiPinFailure.NotSet
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: FfiPinFailure): ULong = when(value) {
+        is FfiPinFailure.TooShort -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterUInt.allocationSize(value.`minLength`)
+            )
+        }
+        is FfiPinFailure.TooLong -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiPinFailure.InvalidEncoding -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiPinFailure.PolicyViolation -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiPinFailure.Invalid -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiPinFailure.Blocked -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiPinFailure.AuthBlocked -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiPinFailure.NotSet -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: FfiPinFailure, buf: ByteBuffer) {
+        when(value) {
+            is FfiPinFailure.TooShort -> {
+                buf.putInt(1)
+                FfiConverterUInt.write(value.`minLength`, buf)
+                Unit
+            }
+            is FfiPinFailure.TooLong -> {
+                buf.putInt(2)
+                Unit
+            }
+            is FfiPinFailure.InvalidEncoding -> {
+                buf.putInt(3)
+                Unit
+            }
+            is FfiPinFailure.PolicyViolation -> {
+                buf.putInt(4)
+                Unit
+            }
+            is FfiPinFailure.Invalid -> {
+                buf.putInt(5)
+                Unit
+            }
+            is FfiPinFailure.Blocked -> {
+                buf.putInt(6)
+                Unit
+            }
+            is FfiPinFailure.AuthBlocked -> {
+                buf.putInt(7)
+                Unit
+            }
+            is FfiPinFailure.NotSet -> {
+                buf.putInt(8)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
 
 
 sealed class FfiWscdException: kotlin.Exception() {
@@ -3877,6 +4048,20 @@ sealed class FfiWscdException: kotlin.Exception() {
             get() = "msg=${ `msg` }"
     }
     
+    /**
+     * A CTAP2 PIN set/use was refused; `reason` says why so the host can
+     * re-prompt. `msg` never contains PIN material.
+     */
+    class Pin(
+        
+        val `reason`: FfiPinFailure, 
+        
+        val `msg`: kotlin.String
+        ) : FfiWscdException() {
+        override val message
+            get() = "reason=${ `reason` }, msg=${ `msg` }"
+    }
+    
 
     
 
@@ -3924,6 +4109,10 @@ public object FfiConverterTypeFfiWscdError : FfiConverterRustBuffer<FfiWscdExcep
                 FfiConverterString.read(buf),
                 )
             10 -> FfiWscdException.Crypto(
+                FfiConverterString.read(buf),
+                )
+            11 -> FfiWscdException.Pin(
+                FfiConverterTypeFfiPinFailure.read(buf),
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
@@ -3982,6 +4171,12 @@ public object FfiConverterTypeFfiWscdError : FfiConverterRustBuffer<FfiWscdExcep
                 4UL
                 + FfiConverterString.allocationSize(value.`msg`)
             )
+            is FfiWscdException.Pin -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterTypeFfiPinFailure.allocationSize(value.`reason`)
+                + FfiConverterString.allocationSize(value.`msg`)
+            )
         }
     }
 
@@ -4037,6 +4232,12 @@ public object FfiConverterTypeFfiWscdError : FfiConverterRustBuffer<FfiWscdExcep
                 FfiConverterString.write(value.`msg`, buf)
                 Unit
             }
+            is FfiWscdException.Pin -> {
+                buf.putInt(11)
+                FfiConverterTypeFfiPinFailure.write(value.`reason`, buf)
+                FfiConverterString.write(value.`msg`, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
@@ -4048,7 +4249,20 @@ public object FfiConverterTypeFfiWscdError : FfiConverterRustBuffer<FfiWscdExcep
 
 public interface FfiAuthCallback {
     
+    /**
+     * Ask the user to ENTER the PIN already set on the authenticator (or
+     * the OPAQUE PIN for r2ps).
+     */
     fun `requestPin`(`pluginId`: kotlin.String): kotlin.ByteArray
+    
+    /**
+     * Ask the user to CHOOSE a new PIN for an authenticator that has none
+     * (CTAP2 `clientPin: false`). Show "Choose a PIN" (ideally with
+     * confirmation) and enforce `min_length` characters; the value is sent
+     * to the authenticator's setPIN. Called instead of `request_pin`, never
+     * in addition to it, within one ceremony.
+     */
+    fun `requestNewPin`(`pluginId`: kotlin.String, `minLength`: kotlin.UInt): kotlin.ByteArray
     
     fun `requestWebauthnAssertion`(`pluginId`: kotlin.String, `challenge`: kotlin.ByteArray, `rpId`: kotlin.String, `allowedCredentials`: List<kotlin.ByteArray>): kotlin.ByteArray
     
@@ -4076,7 +4290,25 @@ internal object uniffiCallbackInterfaceFfiAuthCallback {
             )
         }
     }
-    internal object `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod1 {
+    internal object `requestNewPin`: UniffiCallbackInterfaceFfiAuthCallbackMethod1 {
+        override fun callback(`uniffiHandle`: Long,`pluginId`: RustBuffer.ByValue,`minLength`: Int,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeFfiAuthCallback.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`requestNewPin`(
+                    FfiConverterString.lift(`pluginId`),
+                    FfiConverterUInt.lift(`minLength`),
+                )
+            }
+            val writeReturn = { value: kotlin.ByteArray -> uniffiOutReturn.setValue(FfiConverterByteArray.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: FfiWscdException -> FfiConverterTypeFfiWscdError.lower(e) }
+            )
+        }
+    }
+    internal object `requestWebauthnAssertion`: UniffiCallbackInterfaceFfiAuthCallbackMethod2 {
         override fun callback(`uniffiHandle`: Long,`pluginId`: RustBuffer.ByValue,`challenge`: RustBuffer.ByValue,`rpId`: RustBuffer.ByValue,`allowedCredentials`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeFfiAuthCallback.handleMap.get(uniffiHandle)
             val makeCall = { ->
@@ -4113,6 +4345,7 @@ internal object uniffiCallbackInterfaceFfiAuthCallback {
         uniffiFree,
         uniffiClone,
         `requestPin`,
+        `requestNewPin`,
         `requestWebauthnAssertion`,
     )
 

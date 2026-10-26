@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="siros_nfc_hce_description">ISO 18013-5 mdoc-enhetsengagemang</string>
+    <string name="siros_pin_choose_title">Välj en PIN-kod för din säkerhetsnyckel</string>
+    <string name="siros_pin_confirm_title">Bekräfta PIN-koden</string>
+    <string name="siros_pin_notice_too_short">PIN-koden måste vara minst %1$d tecken.</string>
+    <string name="siros_pin_notice_too_long">PIN-koden är för lång.</string>
+    <string name="siros_pin_notice_not_accepted">Säkerhetsnyckeln godtar inte den PIN-koden. Välj en annan.</string>
+    <string name="siros_pin_notice_mismatch">PIN-koderna stämde inte överens. Försök igen.</string>
+    <string name="siros_pin_notice_wrong">Fel PIN-kod. Försök igen.</string>
+    <string name="siros_pin_error_blocked">Säkerhetsnyckeln är spärrad och måste återställas.</string>
+    <string name="siros_pin_error_replug">Dra ut säkerhetsnyckeln, sätt i den igen och försök på nytt.</string>
+    <string name="siros_pin_error_internal">Säkerhetsnyckeln är i ett oväntat tillstånd. Försök igen.</string>
+    <string name="siros_pin_error_too_many">För många PIN-försök. Försök igen senare.</string>
 </resources>

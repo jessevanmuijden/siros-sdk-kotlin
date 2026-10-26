@@ -31,6 +31,21 @@ interface AuthProvider {
     fun requestPin(pluginId: String): ByteArray
 
     /**
+     * The WSCD's PIN question with its context: ENTER the PIN of an authenticator that has one ([PinRequest.Enter]) or
+     * CHOOSE one for an authenticator that has none ([PinRequest.Choose], asked twice by the SDK - once with `confirm`
+     * false, once true - and compared by the SDK). Also carries why the user is asked again ([PinRequest.notice]).
+     *
+     * The default answers [PinRequest.Enter] through [requestPin] (so an existing implementation keeps working for every
+     * authenticator that already has a PIN) and refuses [PinRequest.Choose]: an app that does not override this cannot set a
+     * PIN, and enrolling a fresh authenticator fails with a cancelled-authentication error instead of sending a guess.
+     * Return the PIN as UTF-8 bytes; throw to cancel.
+     */
+    fun requestPin(request: PinRequest): ByteArray = when (request) {
+        is PinRequest.Enter -> requestPin(request.pluginId)
+        is PinRequest.Choose -> throw UnsupportedOperationException("This AuthProvider cannot ask the user to choose a PIN")
+    }
+
+    /**
      * Request a WebAuthn assertion for the given parameters.
      *
      * @param pluginId Which registered WSCD plugin is asking - see

@@ -105,6 +105,8 @@ data class PendingWscdChoice(
  */
 data class PendingPinEntry(
     val pluginId: String,
+    /** What the SDK is asking (enter / choose / confirm, and why again): the dialog only renders it. */
+    val request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter(pluginId),
     /** Call with the entered PIN to submit, or null to cancel. */
     val respond: (pin: String?) -> Unit,
 )
@@ -1924,6 +1926,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 Log.e(MainActivity.WSCA_TEST_TAG, """{"action":"enroll","status":"error","error":"${e.message?.replace("\"", "'")}"}""")
                 _errorMessage.value = if (e is kotlinx.coroutines.TimeoutCancellationException) {
                     "Enrollment timed out - no security key detected in time"
+                } else if (e is org.siros.sdk.keystore.WscdPinException) {
+                    // The SDK's own short localised text; nothing to interpret here.
+                    activity.getString(e.failure.messageRes)
                 } else {
                     "Enrollment failed: ${e.message}"
                 }
@@ -2326,10 +2331,13 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * forced the user to set the key down to type, which could drop the
      * NFC session entirely.
      */
-    private suspend fun awaitFido2PinEntry(): String? = withContext(Dispatchers.Main.immediate) {
+    private suspend fun awaitFido2PinEntry(
+        request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2"),
+    ): String? = withContext(Dispatchers.Main.immediate) {
         suspendCancellableCoroutine { continuation ->
             val pending = PendingPinEntry(
                 pluginId = "fido2",
+                request = request,
                 respond = { pin ->
                     _pendingPinEntry.value = null
                     if (continuation.isActive) {
@@ -2368,10 +2376,13 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * path that didn't prefetch (e.g. a FIDO2 signature requested during
      * real credential presentation, outside the dev-screen flows).
      */
-    private fun requestFido2Pin(): ByteArray {
-        prefetchedFido2Pin?.let { return it }
+    private fun requestFido2Pin(request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2")): ByteArray {
+        // The typed-ahead PIN answers the FIRST ENTER only: a re-prompt (wrong PIN) or a CHOOSE (a fresh key) asks the user.
+        if (request is org.siros.sdk.keystore.PinRequest.Enter && request.notice == null) {
+            prefetchedFido2Pin?.let { return it }
+        }
         return kotlinx.coroutines.runBlocking(Dispatchers.Main.immediate) {
-            val pin = awaitFido2PinEntry()
+            val pin = awaitFido2PinEntry(request)
             pin ?: throw RuntimeException("PIN entry cancelled")
         }.toByteArray()
     }
@@ -2609,6 +2620,12 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                             else -> "test-pin-1234".toByteArray()
                         }
                     }
+                    // The SDK does the confirmation, the length check and the retry; this only shows what it asks.
+                    override fun requestPin(request: org.siros.sdk.keystore.PinRequest): ByteArray = when (request.pluginId) {
+                        "fido2" -> requestFido2Pin(request)
+                        else -> requestPin(request.pluginId)
+                    }
+
                     override fun requestWebauthnAssertion(
                         pluginId: String,
                         challenge: ByteArray,

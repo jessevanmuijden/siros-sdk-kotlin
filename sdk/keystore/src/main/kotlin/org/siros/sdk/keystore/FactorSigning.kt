@@ -161,6 +161,19 @@ internal class FactorSigning(
                 return answer
             }
 
+            // A fresh authenticator is asked to CHOOSE a PIN: never answered from the typed-ahead PIN (that one was typed to ENTER
+            // a PIN, unconfirmed), always from the host.
+            override fun requestNewPin(pluginId: String, minLength: UInt): ByteArray {
+                val answer = try {
+                    callbacks.requestNewPin(pluginId, minLength)
+                } catch (e: Exception) {
+                    promptFailed = true
+                    throw if (e is FfiWscdException) e else FfiWscdException.AuthCancelled("The PIN prompt failed")
+                }
+                handedOut += answer
+                return answer
+            }
+
             override fun requestWebauthnAssertion(
                 pluginId: String,
                 challenge: ByteArray,

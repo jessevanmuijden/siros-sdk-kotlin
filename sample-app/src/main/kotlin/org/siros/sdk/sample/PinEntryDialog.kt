@@ -1,6 +1,7 @@
 // Copyright 2026 SIROS Foundation. BSD 2-Clause License.
 package org.siros.sdk.sample
 
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Visibility
@@ -23,6 +24,9 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.res.stringResource
+import org.siros.sdk.keystore.PinRequest
+import org.siros.sdk.keystore.R as KeystoreR
 
 /**
  * Shown when [WalletViewModel]'s `requestFido2Pin` bridge fires - the
@@ -46,8 +50,23 @@ fun PinEntryDialog(pending: PendingPinEntry, onSubmit: (String?) -> Unit) {
 
     AlertDialog(
         onDismissRequest = { onSubmit(null) },
-        title = { Text("Enter security key PIN") },
+        title = {
+            val request = pending.request
+            Text(
+                when {
+                    request is PinRequest.Choose && request.confirm -> stringResource(KeystoreR.string.siros_pin_confirm_title)
+                    request is PinRequest.Choose -> stringResource(KeystoreR.string.siros_pin_choose_title)
+                    else -> "Enter security key PIN"
+                },
+            )
+        },
         text = {
+            Column {
+            // Why the user is asked again; the SDK's own short localised text.
+            pending.request.notice?.let { notice ->
+                val minLength = (pending.request as? PinRequest.Choose)?.minLength ?: 0
+                Text(stringResource(notice.messageRes, minLength))
+            }
             OutlinedTextField(
                 value = pin,
                 onValueChange = { pin = it },
@@ -65,6 +84,7 @@ fun PinEntryDialog(pending: PendingPinEntry, onSubmit: (String?) -> Unit) {
                 },
                 modifier = androidx.compose.ui.Modifier.focusRequester(focusRequester),
             )
+            }
         },
         confirmButton = {
             Button(onClick = { onSubmit(pin) }, enabled = pin.isNotEmpty()) { Text("Submit") }

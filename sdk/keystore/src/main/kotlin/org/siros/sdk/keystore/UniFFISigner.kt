@@ -132,23 +132,23 @@ class UniFFISigner(
 
     override suspend fun generateKey(algorithm: String): String = withContext(Dispatchers.IO) {
         val ffiAlgorithm = algorithm.toFfiAlgorithm()
-        val result: FfiGeneratedKey = ffi.generateKey(
-            ffiAlgorithm,
-            authCallbackBridge(),
-            noOpProgress(),
-        )
+        val result: FfiGeneratedKey = withPinAuth { auth ->
+            ffi.generateKey(ffiAlgorithm, auth, noOpProgress())
+        }
         publicKeyCache[result.kid] = result.publicKeyJwk.toByteArray(Charsets.UTF_8)
         result.kid
     }
 
     override suspend fun sign(keyId: String, data: ByteArray): ByteArray = withContext(Dispatchers.IO) {
-        val result = ffi.sign(
-            keyId,
-            data,
-            FfiAlgorithm.ES256, // algorithm is inferred from the key by the manager
-            authCallbackBridge(),
-            noOpProgress(),
-        )
+        val result = withPinAuth { auth ->
+            ffi.sign(
+                keyId,
+                data,
+                FfiAlgorithm.ES256, // algorithm is inferred from the key by the manager
+                auth,
+                noOpProgress(),
+            )
+        }
         result.data
     }
 
@@ -357,7 +357,7 @@ class UniFFISigner(
 
     override suspend fun migrateKey(keyId: String, targetPlugin: String): MigrationResult =
         withContext(Dispatchers.IO) {
-            when (val result = ffi.migrateKey(keyId, targetPlugin, authCallbackBridge())) {
+            when (val result = withPinAuth { auth -> ffi.migrateKey(keyId, targetPlugin, auth) }) {
                 is FfiMigrationResult.Migrated -> MigrationResult.Migrated(result.newKid)
                 is FfiMigrationResult.ReEnrollmentRequired -> MigrationResult.ReEnrollmentRequired(result.oldKid)
             }
@@ -381,38 +381,22 @@ class UniFFISigner(
 
     override suspend fun registerLifecycle(request: RegisterLifecycleRequest): RegistrationOutcome =
         withContext(Dispatchers.IO) {
-            ffi.registerLifecycle(
-                request.toFfiRequest(),
-                authCallbackBridge(),
-                noOpProgress(),
-            ).toSdkRegistrationOutcome()
+            withPinAuth { auth -> ffi.registerLifecycle(request.toFfiRequest(), auth, noOpProgress()) }.toSdkRegistrationOutcome()
         }
 
     override suspend fun activateLifecycle(request: ActivateLifecycleRequest): ActivationOutcome =
         withContext(Dispatchers.IO) {
-            ffi.activateLifecycle(
-                request.toFfiRequest(),
-                authCallbackBridge(),
-                noOpProgress(),
-            ).toSdkActivationOutcome()
+            withPinAuth { auth -> ffi.activateLifecycle(request.toFfiRequest(), auth, noOpProgress()) }.toSdkActivationOutcome()
         }
 
     override suspend fun rotateLifecycle(request: RotateLifecycleRequest): RotationOutcome =
         withContext(Dispatchers.IO) {
-            ffi.rotateLifecycle(
-                request.toFfiRequest(),
-                authCallbackBridge(),
-                noOpProgress(),
-            ).toSdkRotationOutcome()
+            withPinAuth { auth -> ffi.rotateLifecycle(request.toFfiRequest(), auth, noOpProgress()) }.toSdkRotationOutcome()
         }
 
     override suspend fun destroyLifecycle(request: DestroyLifecycleRequest): DestructionOutcome =
         withContext(Dispatchers.IO) {
-            ffi.destroyLifecycle(
-                request.toFfiRequest(),
-                authCallbackBridge(),
-                noOpProgress(),
-            ).toSdkDestructionOutcome()
+            withPinAuth { auth -> ffi.destroyLifecycle(request.toFfiRequest(), auth, noOpProgress()) }.toSdkDestructionOutcome()
         }
 
     /**
@@ -430,23 +414,16 @@ class UniFFISigner(
 
     // ─── Auth callback bridge ────────────────────────────────────────────────
 
-    private fun authCallbackBridge(): FfiAuthCallback = object : FfiAuthCallback {
-        override fun requestPin(pluginId: String): ByteArray {
-            val provider = authProvider
-                ?: throw FfiWscdException.AuthCancelled("No AuthProvider configured")
-            return provider.requestPin(pluginId)
-        }
+    private fun authCallbackBridge(): FfiAuthCallback = AuthCallbackBridge(authProvider)
 
-        override fun requestWebauthnAssertion(
-            pluginId: String,
-            challenge: ByteArray,
-            rpId: String,
-            allowedCredentials: List<ByteArray>,
-        ): ByteArray {
-            val provider = authProvider
-                ?: throw FfiWscdException.AuthCancelled("No AuthProvider configured")
-            return provider.requestWebauthnAssertion(pluginId, challenge, rpId, allowedCredentials)
-        }
+    /**
+     * One WSCD call that may ask for a PIN: runs it with a fresh [AuthCallbackBridge] and re-runs it (bounded by
+     * [PinPrompter.MAX_PIN_ATTEMPTS]) after a PIN the authenticator refused for a reason the user can fix; a blocked key or one
+     * that needs replugging ends it with [WscdPinException].
+     */
+    private fun <T> withPinAuth(call: (FfiAuthCallback) -> T): T {
+        val bridge = AuthCallbackBridge(authProvider)
+        return bridge.prompter.run { call(bridge) }
     }
 
     private fun noOpProgress(): FfiProgressCallback = object : FfiProgressCallback {

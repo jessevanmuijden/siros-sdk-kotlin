@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="siros_nfc_hce_description">Δέσμευση συσκευής mdoc ISO 18013-5</string>
+    <string name="siros_pin_choose_title">Επιλέξτε PIN για το κλειδί ασφαλείας σας</string>
+    <string name="siros_pin_confirm_title">Επιβεβαιώστε το PIN</string>
+    <string name="siros_pin_notice_too_short">Το PIN πρέπει να έχει τουλάχιστον %1$d χαρακτήρες.</string>
+    <string name="siros_pin_notice_too_long">Αυτό το PIN είναι πολύ μεγάλο.</string>
+    <string name="siros_pin_notice_not_accepted">Το κλειδί ασφαλείας δεν δέχεται αυτό το PIN. Επιλέξτε άλλο.</string>
+    <string name="siros_pin_notice_mismatch">Τα δύο PIN δεν ταιριάζουν. Δοκιμάστε ξανά.</string>
+    <string name="siros_pin_notice_wrong">Λάθος PIN. Δοκιμάστε ξανά.</string>
+    <string name="siros_pin_error_blocked">Το κλειδί ασφαλείας είναι κλειδωμένο και πρέπει να επαναφερθεί.</string>
+    <string name="siros_pin_error_replug">Αποσυνδέστε το κλειδί ασφαλείας, συνδέστε το ξανά και δοκιμάστε πάλι.</string>
+    <string name="siros_pin_error_internal">Το κλειδί ασφαλείας βρίσκεται σε μη αναμενόμενη κατάσταση. Δοκιμάστε ξανά.</string>
+    <string name="siros_pin_error_too_many">Πάρα πολλές προσπάθειες PIN. Δοκιμάστε ξανά αργότερα.</string>
 </resources>
