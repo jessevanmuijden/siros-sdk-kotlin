@@ -3876,14 +3876,29 @@ class SirosWallet private constructor(
      */
     suspend fun startPresentation(requestUri: String) {
         val engine = engineSession ?: throw WalletException(NOT_CONNECTED)
-        ensureEngineConnected(engine)
-        val declare = isTransactionDataEffectivelyEnabled
-        engineFlowDeclaredTransactionData = declare
-        engine.startPresentation(
-            requestUri = requestUri,
-            features = TransactionDataSupport.engineFeatures(declare),
-        )
+        // The same link delivered again (an issuer's page re-firing its request on the way back, an intent delivered twice) is not a
+        // new request: no second flow, no second consent screen.
+        if (presentationLinks?.admit(requestUri) == false) {
+            Timber.i("A presentation request identical to one started moments ago was delivered again; ignoring the duplicate")
+            return
+        }
+        try {
+            ensureEngineConnected(engine)
+            val declare = isTransactionDataEffectivelyEnabled
+            engineFlowDeclaredTransactionData = declare
+            engine.startPresentation(
+                requestUri = requestUri,
+                features = TransactionDataSupport.engineFeatures(declare),
+            )
+        } catch (e: Exception) {
+            // A start that did not happen can be retried at once.
+            presentationLinks?.release(requestUri)
+            throw e
+        }
     }
+
+    // Nullable like [resumingFlowIds]: a test that builds a wallet without running initialisers leaves it null (no dedupe).
+    private val presentationLinks: PresentationLinkLedger? = PresentationLinkLedger()
 
     /**
      * The final payload to hand back to the OS/browser for a W3C Digital
@@ -4916,6 +4931,7 @@ class SirosWallet private constructor(
      * issuance was ever in flight, so it's always safe to call from here.
      */
     fun cancelCurrentFlow() {
+        presentationLinks?.releaseAll()
         // Invalidate any start still suspended in network work: it stops at its
         // next step instead of sending the engine a flow that was cancelled.
         issuanceStartEpoch.incrementAndGet()

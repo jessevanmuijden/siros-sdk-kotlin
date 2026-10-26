@@ -1634,6 +1634,37 @@ class SirosWalletTest {
         verify(exactly = 0) { engine.sendFlowAction("flow-auth", "authorization_complete", any()) }
     }
 
+    @Test
+    fun startPresentation_aRedeliveredIdenticalLinkStartsNoSecondFlow_butARetryAfterAFailedStartDoes() = runTest(dispatcher) {
+        val engine = mockEngineConstructor()
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val link = "openid4vp://?client_id=issuer.example.com&request_uri=https%3A%2F%2Fissuer.example.com%2Fr%2F1&response_code=DMEpnhz"
+
+        wallet.startPresentation(link)
+        wallet.startPresentation(link) // the issuer's page re-fires it on the way back
+        verify(exactly = 1) { engine.startPresentation(any(), any(), any()) }
+
+        wallet.startPresentation("$link&x=other") // a different request is a different flow
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+
+        // a start that failed is not remembered: the retry goes through
+        var calls = 0
+        every { engine.startPresentation(any(), any(), any()) } answers { if (calls++ == 0) throw IllegalStateException("socket down") }
+        val retry = "$link&y=retry"
+        runCatching { wallet.startPresentation(retry) }
+        wallet.startPresentation(retry)
+        verify(exactly = 4) { engine.startPresentation(any(), any(), any()) }
+    }
+
     /**
      * The whole resumption after the browser: the authorization step hands off, the app comes back with a code, the engine
      * WebSocket is reconnected, ONE stateless flow_start is sent, and the engine completes the issuance under a NEW flow id.

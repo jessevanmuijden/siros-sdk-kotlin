@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A presentation request link delivered twice starts one flow, not two.** An issuer that wants a presentation before it issues sends the OpenID4VP request to the wallet's redirect URI from its web page; after the credential was stored, the same request (same `response_code`) arrived again and opened a second Credential Request screen (Pixel on gdc, twice; the host logs it as `openid4vp://null`, which is the URI's missing host, not a null link). `SirosWallet.startPresentation` now ignores a link identical to one started within the last minute (`PresentationLinkLedger`: digests only, 16 at most; a start that failed, or `cancelCurrentFlow`, forgets it so a retry goes through). The sample app also stops re-delivering its launching intent when the activity is recreated.
+
 ## [0.21.4] - 2026-10-26
 
 Adds the proof-system preference (https://github.com/sirosfoundation/siros-sdk-kotlin/issues/304) so a wallet can be told to prove with Vega or Longfellow when a verifier offers both. Follow-ups from its review are tracked for the next release.
