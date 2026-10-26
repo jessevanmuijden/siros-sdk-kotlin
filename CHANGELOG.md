@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The consent stepper no longer iterates DCQL alternatives the wallet could not match.** A request with one `dcql_query` of five alternatives (mdl, photoid, pid_1_5, pid_1_8, pid_mdoc, each asking for the same claims, in `credential_sets` options with `required: false`) showed five claim-selection steps although the wallet matched only pid_1_8 (the matcher logged "0 matches" for the other four). `PresentationRequest.consentMatchResults` (only the queries with at least one candidate) now drives `consentStepCount` and `disclosesNoClaims`, and the sample app's stepper walks it: no step and no card for an unmatched query, an unmatched optional set is skipped, not an empty step. `matchResults` still lists every query.
+
 ## [0.21.4] - 2026-10-26
 
 Adds the proof-system preference (https://github.com/sirosfoundation/siros-sdk-kotlin/issues/304) so a wallet can be told to prove with Vega or Longfellow when a verifier offers both. Follow-ups from its review are tracked for the next release.
