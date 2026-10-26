@@ -2374,9 +2374,13 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * later does not re-register it), else the current selection. Rotation and issuance use the registered one; enrollment
      * re-registers from the current selection first, so the selection is its transport.
      */
-    private fun registeredFido2Mode(manager: WscdManager? = null): Fido2TransportMode = synchronized(fido2RegisteredTransport) {
-        (manager?.let { fido2RegisteredTransport[it] } ?: fido2RegisteredTransport.values.firstOrNull()) ?: _fido2TransportMode.value
+    private fun registeredFido2Mode(manager: WscdManager?): Fido2TransportMode = synchronized(fido2RegisteredTransport) {
+        // THAT manager's registration only: another keystore's entry (a different signer's USB registration, say) says nothing about it.
+        manager?.let { fido2RegisteredTransport[it] } ?: _fido2TransportMode.value
     }
+
+    /** The keystore adapter built for each plugin of the current [WalletConfig.availableKeystores]: the one an issuance with it signs through. */
+    private val wscdAdapterByPlugin = java.util.concurrent.ConcurrentHashMap<String, WscdManager>()
 
     /**
      * Bridges [org.siros.sdk.keystore.AuthProvider.requestPin] (synchronous,
@@ -2656,7 +2660,14 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             }
             Log.i(TAG, "WSCD keystore initialized with plugin: $pluginId")
             if (trackAsDiagnosticSigner) wscdSigner = signer
-            WscdKeystoreAdapter(signer)
+            val adapter = WscdKeystoreAdapter(signer)
+            // The plugin was registered on the signer; the wallet reaches it through this adapter (and enrollment/rotation re-register
+            // through it), so the registered transport is recorded for the adapter too.
+            synchronized(fido2RegisteredTransport) {
+                fido2RegisteredTransport[signer]?.let { fido2RegisteredTransport[adapter] = it }
+            }
+            wscdAdapterByPlugin[pluginId] = adapter
+            adapter
         } catch (e: Exception) {
             Log.w(TAG, "Failed to initialize WSCD keystore for plugin $pluginId, falling back to default", e)
             null
@@ -2751,7 +2762,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             // with no "present your key now" cue for the transport-connect
             // wait that happens first.
             onWscdOperationStart = { pluginId ->
-                if (pluginId == "fido2" && typesPinAheadFor(registeredFido2Mode())) {
+                if (pluginId == "fido2" && typesPinAheadFor(registeredFido2Mode(wscdAdapterByPlugin["fido2"]))) {
                     val pin = awaitFido2PinEntry()
                     if (pin != null) {
                         typedAheadPin.hold(pin.toByteArray())
