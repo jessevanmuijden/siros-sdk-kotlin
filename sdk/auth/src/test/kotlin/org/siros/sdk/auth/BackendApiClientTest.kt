@@ -216,6 +216,28 @@ class BackendApiClientTest {
     }
 
     @Test
+    fun requestKeyAttestation_sendsTheClaimedPluginAsSecurityPropertiesPlugin_andNeverAltersTheOtherProperties() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"key_attestation": "signed-jwt"}"""))
+        server.enqueue(MockResponse().setBody("""{"key_attestation": "signed-jwt"}"""))
+        server.enqueue(MockResponse().setBody("""{"key_attestation": "signed-jwt"}"""))
+        val client = newClient()
+        val props = org.siros.sdk.credentials.SignerSecurityProperties(keyStorage = listOf("software"), userAuthentication = listOf("pin"))
+        val jwk = buildJsonObject { put("kty", "EC") }
+        client.requestKeyAttestation(listOf(jwk), "n", securityProperties = props, plugin = "soft")
+        client.requestKeyAttestation(listOf(jwk), "n", securityProperties = props)
+        client.requestKeyAttestation(listOf(jwk), "n", securityProperties = null, plugin = "soft")
+        fun sp() = kotlinx.serialization.json.Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject["security_properties"]?.jsonObject
+        val withPlugin = sp()!!
+        assertEquals("soft", withPlugin["plugin"]!!.jsonPrimitive.content)
+        assertEquals(listOf("software"), withPlugin["key_storage"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("pin"), withPlugin["user_authentication"]!!.jsonArray.map { it.jsonPrimitive.content })
+        // Unset: no plugin member at all.
+        assertEquals(null, sp()!!["plugin"])
+        // Only the claim, no properties from the keystore: just {"plugin": "soft"}.
+        assertEquals(setOf("plugin"), sp()!!.keys)
+    }
+
+    @Test
     fun requestKeyAttestation_omitsCredentialIssuer_whenNotProvided() = runBlocking {
         server.enqueue(MockResponse().setBody("""{"key_attestation": "signed-jwt"}"""))
 

@@ -7049,6 +7049,10 @@ class SirosWallet private constructor(
                     securityProperties = securityProps,
                     credentialIssuer = audience,
                     walletInstanceId = currentWalletInstanceId(),
+                    // Only the claim of the keystore that actually generated these keys: located by identity in the registry, so a
+                    // keystore with no entry (or not registered) sends nothing and never borrows another keystore's claim.
+                    plugin = config.availableKeystores?.entries?.firstOrNull { it.value === effectiveKeystore }?.key
+                        ?.let { config.wscdPluginClaims[it] },
                 )
                 // keypairs[i]'s key is exactly attested_keys[i] in the JWT just
                 // built (jwks preserves list order) - the issuer is expected to
