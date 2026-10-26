@@ -36,11 +36,18 @@ internal interface FactorSigningBackend {
  */
 internal class FactorSigning(
     private val backend: FactorSigningBackend,
-    /** The host's authentication callbacks (PIN, WebAuthn); a PIN the user typed ahead is served before this is asked again. */
-    private val callbacks: FfiAuthCallback,
+    /**
+     * The host's authentication callbacks (PIN, WebAuthn) for ONE sign session, asked once per session so the session's PIN
+     * prompt state (why the user is asked again, how many tries are left) is its own. A PIN the user typed ahead is served
+     * before this is asked again.
+     */
+    private val sessionCallbacks: () -> FfiAuthCallback,
     /** Whether the host configured a way to ask for a PIN; without one a PIN-based sign is already known to be impossible. */
     private val canAskForPin: Boolean = true,
 ) {
+    constructor(backend: FactorSigningBackend, callbacks: FfiAuthCallback, canAskForPin: Boolean = true) :
+        this(backend, { callbacks }, canAskForPin)
+
     fun capability(kid: String): ScaAuthenticationCapability = try {
         val c = backend.capability(kid)
         when {
@@ -69,10 +76,10 @@ internal class FactorSigning(
             "fido2" -> AuthenticationFactor(AuthenticationCategory.POSSESSION, "key_in_local_external_wscd")
             else -> throw ScaSignSession.insufficient("The '$pluginId' plugin establishes no possession factor")
         }
-        return pinSession(kid, pluginId, possession)
+        return pinSession(kid, pluginId, possession, sessionCallbacks())
     }
 
-    private fun pinSession(kid: String, pluginId: String, possession: AuthenticationFactor): ScaSignSession {
+    private fun pinSession(kid: String, pluginId: String, possession: AuthenticationFactor, callbacks: FfiAuthCallback): ScaSignSession {
         val pin = try {
             callbacks.requestPin(pluginId)
         } catch (e: Exception) {
@@ -82,7 +89,7 @@ internal class FactorSigning(
         try {
             val method = classifySecret(pin)
                 ?: throw ScaSignSession.insufficient("The class of the entered secret cannot be determined")
-            return Session(kid, listOf(possession, AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, method)), pin)
+            return Session(kid, listOf(possession, AuthenticationFactor(AuthenticationCategory.KNOWLEDGE, method)), pin, callbacks)
         } catch (e: Throwable) {
             pin.fill(0)
             throw e
@@ -94,8 +101,12 @@ internal class FactorSigning(
         override val declaredFactors: List<AuthenticationFactor>,
         /** The PIN typed for this sign; served once to the plugin, wiped on close. */
         private var pin: ByteArray?,
+        private val callbacks: FfiAuthCallback,
     ) : ScaSignSession {
         private var used = false
+
+        /** This session's PIN failure state: the one its callbacks prompt with, or a plain one when the host's callbacks are not the SDK's. */
+        private val prompter: PinPrompter = (callbacks as? AuthCallbackBridge)?.prompter ?: PinPrompter(null)
 
         /** Set when the host's PIN prompt failed or was cancelled during the sign, however the native layer wraps the error. */
         private var promptFailed = false
@@ -106,21 +117,31 @@ internal class FactorSigning(
             // Always a fresh user authentication; the host never supplies a factor (the manager refuses
             // a fresh sign for exactly the signers that would need one, and the capability says so up front).
             val options = FfiSignOptions(requireFreshUserAuthentication = true, hostVerifiedFactor = null)
-            val handedToPlugin = mutableListOf<ByteArray>()
-            val outcome = try {
-                backend.signWithFactors(kid, data, options, oneShotPin(handedToPlugin))
-            } catch (e: FfiWscdException.AuthCancelled) {
-                throw declined()
-            } catch (e: FfiWscdException.Unsupported) {
-                throw ScaSignSession.insufficient("This authenticator cannot guarantee a fresh user authentication for the sign")
-            } catch (e: FfiWscdException) {
-                // The native bridge wraps a callback failure in its own error kind, so ask the callback, not the type.
-                if (promptFailed) throw declined()
-                throw e
-            } finally {
-                // The native call copies a returned PIN and never clears ours: wipe every buffer given to it.
-                handedToPlugin.forEach { it.fill(0) }
+            var attempt = 1
+            var signed: FfiSignOutcome? = null
+            while (signed == null) {
+                val handedToPlugin = mutableListOf<ByteArray>()
+                try {
+                    signed = backend.signWithFactors(kid, data, options, oneShotPin(handedToPlugin))
+                } catch (e: FfiWscdException.AuthCancelled) {
+                    throw declined()
+                } catch (e: FfiWscdException.Unsupported) {
+                    throw ScaSignSession.insufficient("This authenticator cannot guarantee a fresh user authentication for the sign")
+                } catch (e: FfiWscdException.Pin) {
+                    // A PIN the key refused: asked for again (bounded, the notice says why) or a typed [WscdPinException];
+                    // the PIN typed ahead was served to the first request and is gone, so the retry asks the user.
+                    prompter.onPinFailure(e, attempt)
+                    attempt++
+                } catch (e: FfiWscdException) {
+                    // The native bridge wraps a callback failure in its own error kind, so ask the callback, not the type.
+                    if (promptFailed) throw declined()
+                    throw e
+                } finally {
+                    // The native call copies a returned PIN and never clears ours: wipe every buffer given to it.
+                    handedToPlugin.forEach { it.fill(0) }
+                }
             }
+            val outcome: FfiSignOutcome = signed
             val applied = try {
                 outcome.factors.factors.map { AuthenticationFactor(it.category.toSdk(), it.method) }
             } catch (e: IllegalArgumentException) {

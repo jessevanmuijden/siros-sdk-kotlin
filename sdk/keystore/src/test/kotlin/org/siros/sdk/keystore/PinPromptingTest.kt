@@ -226,4 +226,70 @@ class PinPromptingTest {
         assertEquals(4, PinPrompter.codePoints("ab😀c".toByteArray()))
         assertNull(PinPrompter.codePoints(byteArrayOf(0xC3.toByte())))
     }
+
+    // ── a PIN typed ahead of the ceremony ──
+
+    /** What the sample does: the SDK's [TypedAheadPin] answers the first request, the user answers the rest. */
+    private class TypedAheadHost(val typedAhead: TypedAheadPin, vararg answers: String) : AuthProvider {
+        private val queue = ArrayDeque(answers.toList())
+        val requests = mutableListOf<PinRequest>()
+        override fun requestPin(pluginId: String): ByteArray = error("the request-carrying overload is used")
+        override fun requestPin(request: PinRequest): ByteArray {
+            requests += request
+            typedAhead.take(request)?.let { return it }
+            return (queue.removeFirstOrNull() ?: throw IllegalStateException("user cancelled")).toByteArray()
+        }
+        override fun requestWebauthnAssertion(pluginId: String, challenge: ByteArray, rpId: String, allowedCredentials: List<ByteArray>): ByteArray =
+            throw UnsupportedOperationException()
+    }
+
+    @Test
+    fun `a typed-ahead PIN the key rejected is never sent again, by the retry or by a following signer call`() {
+        val typedAhead = TypedAheadPin()
+        typedAhead.hold("0000".toByteArray())
+        val host = TypedAheadHost(typedAhead, "4321", "4321")
+        val sent = mutableListOf<String>()
+        fun ceremony(auth: uniffi.siros_wscd_manager.FfiAuthCallback) {
+            val pin = String(auth.requestPin("fido2"))
+            sent += pin
+            if (pin != "4321") throw FfiWscdException.Pin(FfiPinFailure.Invalid, "wrong")
+        }
+        // first call: the typed-ahead PIN is rejected, the user corrects it
+        var b = AuthCallbackBridge(host)
+        b.prompter.run { ceremony(b) }
+        // a following signer call of the same flow (its own bridge, no notice)
+        b = AuthCallbackBridge(host)
+        b.prompter.run { ceremony(b) }
+
+        assertEquals(listOf("0000", "4321", "4321"), sent)
+        assertEquals(PinPromptNotice.WRONG_PIN, (host.requests[1] as PinRequest.Enter).notice)
+    }
+
+    @Test
+    fun `a typed-ahead PIN is wiped when the first request cannot use it`() {
+        for (request in listOf<PinRequest>(PinRequest.Choose("fido2", 4, confirm = false), PinRequest.Enter("fido2", PinPromptNotice.WRONG_PIN))) {
+            val typedAhead = TypedAheadPin()
+            val pin = "0000".toByteArray()
+            typedAhead.hold(pin)
+            assertNull(typedAhead.take(request))
+            assertTrue("wiped", pin.all { it == 0.toByte() })
+            assertNull("and gone", typedAhead.take(PinRequest.Enter("fido2")))
+        }
+    }
+
+    @Test
+    fun `a PIN refused for its encoding on ENTER asks again with an ENTER notice and never reuses the typed-ahead one`() {
+        val typedAhead = TypedAheadPin()
+        typedAhead.hold("12\u00003".toByteArray()) // a NUL: the plugin answers InvalidEncoding
+        val host = TypedAheadHost(typedAhead, "1234")
+        val sent = mutableListOf<String>()
+        val b = AuthCallbackBridge(host)
+        b.prompter.run {
+            val pin = String(b.requestPin("fido2"))
+            sent += pin
+            if (pin.contains('\u0000')) throw FfiWscdException.Pin(FfiPinFailure.InvalidEncoding, "NUL")
+        }
+        assertEquals(PinPromptNotice.NOT_ACCEPTED, (host.requests[1] as PinRequest.Enter).notice)
+        assertEquals(listOf("12\u00003", "1234"), sent)
+    }
 }

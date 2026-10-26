@@ -165,7 +165,7 @@ class UniFFISigner(
                     auth: FfiAuthCallback,
                 ) = ffi.signWithFactors(kid, data, FfiAlgorithm.ES256, options, auth, noOpProgress())
             },
-            authCallbackBridge(),
+            { authCallbackBridge() },
             canAskForPin = authProvider != null,
         )
     }
@@ -414,7 +414,7 @@ class UniFFISigner(
 
     // ─── Auth callback bridge ────────────────────────────────────────────────
 
-    private fun authCallbackBridge(): FfiAuthCallback = AuthCallbackBridge(authProvider)
+    private fun authCallbackBridge(): AuthCallbackBridge = AuthCallbackBridge(authProvider)
 
     /**
      * One WSCD call that may ask for a PIN: runs it with a fresh [AuthCallbackBridge] and re-runs it (bounded by

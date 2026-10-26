@@ -75,9 +75,13 @@ internal class PinPrompter(private val provider: AuthProvider?) {
     private var enterNotice: PinPromptNotice? = null
     private var chooseNotice: PinPromptNotice? = null
 
+    /** What the last prompt asked: the authenticator's answer to a PIN does not say whether it was typed to ENTER or to CHOOSE. */
+    private var lastAskedEnter = false
+
     /** The notice for the next ENTER prompt, set by [onPinFailure]. */
     fun enter(pluginId: String): ByteArray {
         val p = provider ?: throw FfiWscdException.AuthCancelled("No AuthProvider configured")
+        lastAskedEnter = true
         return p.requestPin(PinRequest.Enter(pluginId, enterNotice))
     }
 
@@ -88,6 +92,7 @@ internal class PinPrompter(private val provider: AuthProvider?) {
      */
     fun choose(pluginId: String, minLength: Int): ByteArray {
         val p = provider ?: throw FfiWscdException.AuthCancelled("No AuthProvider configured")
+        lastAskedEnter = false
         var notice = chooseNotice
         repeat(MAX_CHOOSE_ROUNDS) {
             val first = p.requestPin(PinRequest.Choose(pluginId, minLength, confirm = false, notice = notice))
@@ -128,9 +133,15 @@ internal class PinPrompter(private val provider: AuthProvider?) {
             is FfiPinFailure.Blocked -> throw WscdPinException(WscdPinFailure.KEY_BLOCKED, e)
             is FfiPinFailure.AuthBlocked -> throw WscdPinException(WscdPinFailure.REPLUG_REQUIRED, e)
             is FfiPinFailure.NotSet -> throw WscdPinException(WscdPinFailure.INTERNAL, e)
-            is FfiPinFailure.TooShort -> chooseNotice = PinPromptNotice.TOO_SHORT
-            is FfiPinFailure.TooLong -> chooseNotice = PinPromptNotice.TOO_LONG
-            is FfiPinFailure.PolicyViolation, is FfiPinFailure.InvalidEncoding -> chooseNotice = PinPromptNotice.NOT_ACCEPTED
+            // A PIN refused for what it is (not for being wrong): a NEW PIN is asked for again with the specific notice; one typed
+            // to ENTER (a NUL in it, say) is asked for again with an ENTER notice, which also makes the next ENTER ineligible
+            // for a PIN typed ahead - that one is the PIN just refused.
+            is FfiPinFailure.TooShort ->
+                if (lastAskedEnter) enterNotice = PinPromptNotice.NOT_ACCEPTED else chooseNotice = PinPromptNotice.TOO_SHORT
+            is FfiPinFailure.TooLong ->
+                if (lastAskedEnter) enterNotice = PinPromptNotice.NOT_ACCEPTED else chooseNotice = PinPromptNotice.TOO_LONG
+            is FfiPinFailure.PolicyViolation, is FfiPinFailure.InvalidEncoding ->
+                if (lastAskedEnter) enterNotice = PinPromptNotice.NOT_ACCEPTED else chooseNotice = PinPromptNotice.NOT_ACCEPTED
             is FfiPinFailure.Invalid -> enterNotice = PinPromptNotice.WRONG_PIN
         }
         if (attempt >= MAX_PIN_ATTEMPTS) throw WscdPinException(WscdPinFailure.TOO_MANY_ATTEMPTS, e)
@@ -214,5 +225,39 @@ internal class AuthCallbackBridge(
     ): ByteArray {
         val host = provider ?: throw FfiWscdException.AuthCancelled("No AuthProvider configured")
         return host.requestWebauthnAssertion(pluginId, challenge, rpId, allowedCredentials)
+    }
+}
+
+/**
+ * A PIN the user typed BEFORE the ceremony started (a host that cannot ask mid-ceremony, e.g. while an NFC key is held in
+ * place). It answers the FIRST PIN request of the ceremony and is gone after it, whatever the request: used when that is a
+ * first ENTER, wiped otherwise. A PIN the key refused is therefore never sent a second time (each submission costs a try on
+ * the authenticator's own counter), and a retry - which carries a notice - always asks the user.
+ */
+class TypedAheadPin {
+    private var held: ByteArray? = null
+
+    /** Holds [pin] for the next ceremony; a PIN still held is wiped. */
+    @Synchronized
+    fun hold(pin: ByteArray) {
+        held?.fill(0)
+        held = pin
+    }
+
+    /** The held PIN when [request] is a first ENTER (and then it is no longer held), else null; either way it is gone. */
+    @Synchronized
+    fun take(request: PinRequest): ByteArray? {
+        val pin = held ?: return null
+        held = null
+        if (request is PinRequest.Enter && request.notice == null) return pin
+        pin.fill(0)
+        return null
+    }
+
+    /** Wipes what is still held, when the ceremony ends. */
+    @Synchronized
+    fun clear() {
+        held?.fill(0)
+        held = null
     }
 }
