@@ -900,6 +900,12 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val fido2StateRestored: MutableSet<WscdManager> =
         java.util.Collections.newSetFromMap(java.util.IdentityHashMap<WscdManager, Boolean>())
 
+    // Declared BEFORE [wallet]: its initializer builds the WalletConfig, which fills this (buildWscdKeystore). Kotlin initializes properties
+    // in textual order, so a declaration below [wallet] is not yet initialized then (an NPE that buildWscdKeystore's catch turns into a
+    // dropped keystore).
+    /** The keystore adapter built for each plugin of the current [WalletConfig.availableKeystores]: the one an issuance with it signs through. */
+    private val wscdAdapterByPlugin = java.util.concurrent.ConcurrentHashMap<String, WscdManager>()
+
     // ── Wallet ──────────────────────────────────────────────────────
 
     private var wallet: SirosWallet = SirosWallet.create(
@@ -2379,8 +2385,6 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
         manager?.let { fido2RegisteredTransport[it] } ?: _fido2TransportMode.value
     }
 
-    /** The keystore adapter built for each plugin of the current [WalletConfig.availableKeystores]: the one an issuance with it signs through. */
-    private val wscdAdapterByPlugin = java.util.concurrent.ConcurrentHashMap<String, WscdManager>()
 
     /**
      * Bridges [org.siros.sdk.keystore.AuthProvider.requestPin] (synchronous,
