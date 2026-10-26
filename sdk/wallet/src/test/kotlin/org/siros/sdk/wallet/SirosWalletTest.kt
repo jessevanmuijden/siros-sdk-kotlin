@@ -3208,6 +3208,50 @@ class SirosWalletTest {
         coVerify(exactly = 0) { defaultKeystore.generateKeypairs(any()) }
     }
 
+    @Test
+    fun requestBackendKeyAttestation_sendsTheClaimOfThePolicySelectedKeystore_notTheDefaultsClaim() = runTest(dispatcher) {
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        // A SOFTWARE default keystore; the policy selects FIDO2 for a credential type that requires the high tier.
+        val defaultKeystore = mockk<KeystoreManager>()
+        val fido2Keystore = mockk<KeystoreManager>()
+        val keypairs = listOf(KeypairInfo(keyId = "fido2-key-1", publicKeyJWK = buildJsonObject { put("kty", "EC") }))
+        coEvery { fido2Keystore.generateKeypairs(1) } returns keypairs
+        coEvery { fido2Keystore.attestationChain(any()) } returns null
+        coEvery { fido2Keystore.securityProperties("fido2-key-1") } returns null
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        val sentPlugin = slot<String?>()
+        coEvery { apiClient.requestKeyAttestation(any(), any(), any(), any(), any(), captureNullable(sentPlugin)) } returns "jwt"
+        mockEngineConstructor(signRequests = signFlow)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            // DISTINCT claims: the default's is "soft", the selected one's is "fido2".
+            "config" to WalletConfig(
+                backendUrl = "https://wallet.example.com",
+                availableKeystores = mapOf("softkey" to defaultKeystore, "fido2" to fido2Keystore),
+                wscdPluginClaims = mapOf("softkey" to "soft", "fido2" to "fido2"),
+            ),
+            "keystore" to defaultKeystore,
+            "wscdSelectionPolicy" to WscdSelectionPolicy(tofuStore = InMemoryWscdTofuStore()),
+        )
+        setField(wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+            credentialConfigurationId = "pid", credentialIssuerIdentifier = "https://issuer.example.com", credentialName = "PID", issuerName = "Issuer",
+        ))
+        setField(wallet, "activeVctm", org.siros.sdk.credentials.Vctm(vct = "urn:eu.europa.ec.eudi:pid:1", requiredKeyStorage = "iso_18045_high"))
+        invokeConnectEngine(wallet, "app-token")
+        setField(wallet, "apiClient", apiClient)
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-sign", action = "generate_proof",
+                params = SignRequestParams(audience = "https://issuer.example.com", nonce = "nonce-1", count = 1, proofTypesSupported = buildJsonObject { putJsonObject("attestation") {} }),
+            ),
+        )
+        advanceUntilIdle()
+        coVerify(exactly = 1) { fido2Keystore.generateKeypairs(1) }
+        assertEquals("the claim of the keystore that generated the keys (FIDO2), not the default's", "fido2", sentPlugin.captured)
+    }
+
     /**
      * Reproduces a real bug found via live testing: the `jwt` proof branch
      * (preferred over `attestation` whenever an issuer supports it - the
