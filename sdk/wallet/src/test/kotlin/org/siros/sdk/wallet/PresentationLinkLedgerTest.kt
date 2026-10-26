@@ -38,4 +38,16 @@ class PresentationLinkLedgerTest {
         assertTrue("the oldest was forgotten", l.admit("1"))
         assertFalse(l.admit("3"))
     }
+
+    @Test
+    fun `a completed link is kept for a full window from its completion`() {
+        val l = ledger()
+        l.admit("a")
+        now += 50_000
+        l.markCompleted("a")
+        now += 50_000 // 100 s after the start, 50 s after the answer
+        assertFalse("still inside the window of the answer", l.admit("a"))
+        now += 10_001
+        assertTrue(l.admit("a"))
+    }
 }

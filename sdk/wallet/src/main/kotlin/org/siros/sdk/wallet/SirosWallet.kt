@@ -3874,14 +3874,15 @@ class SirosWallet private constructor(
      *
      * @param requestUri the OID4VP request URI.
      */
-    suspend fun startPresentation(requestUri: String) {
+    suspend fun startPresentation(requestUri: String): Boolean {
         val engine = engineSession ?: throw WalletException(NOT_CONNECTED)
         // The same link delivered again (an issuer's page re-firing its request on the way back, an intent delivered twice) is not a
-        // new request: no second flow, no second consent screen.
+        // new request: no second flow, no second consent screen. The caller is told (false) so it can clear a "starting" indicator.
         if (presentationLinks?.admit(requestUri) == false) {
             Timber.i("A presentation request identical to one started moments ago was delivered again; ignoring the duplicate")
-            return
+            return false
         }
+        presentationLinkInFlight = requestUri
         try {
             ensureEngineConnected(engine)
             val declare = isTransactionDataEffectivelyEnabled
@@ -3890,14 +3891,28 @@ class SirosWallet private constructor(
                 requestUri = requestUri,
                 features = TransactionDataSupport.engineFeatures(declare),
             )
+            return true
         } catch (e: Exception) {
             // A start that did not happen can be retried at once.
             presentationLinks?.release(requestUri)
+            presentationLinkInFlight = null
             throw e
         }
     }
 
-    // Nullable like [resumingFlowIds]: a test that builds a wallet without running initialisers leaves it null (no dedupe).
+    /** The link of the presentation started last, until it is answered or fails: released on an error, kept when answered. */
+    private var presentationLinkInFlight: String? = null
+
+    private fun presentationFailedBeforeAnswer() {
+        presentationLinkInFlight?.let { presentationLinks?.release(it) }
+        presentationLinkInFlight = null
+    }
+
+    private fun presentationAnswered() {
+        presentationLinkInFlight?.let { presentationLinks?.markCompleted(it) }
+        presentationLinkInFlight = null
+    }
+
     private val presentationLinks: PresentationLinkLedger? = PresentationLinkLedger()
 
     /**
@@ -7427,6 +7442,7 @@ class SirosWallet private constructor(
         // it will resume with must stay.
         if (pendingAuthorizations.containsKey(flowId)) return
         if (!lostFlowIds.add(flowId)) return
+        presentationFailedBeforeAnswer()
         Timber.w("Flow $flowId lost with its engine connection; ending it locally")
         terminatedFlowIds.add(flowId)
         // Shared issuance state is reset only when this flow owns it: a presentation lost while a new issuance has just claimed the
@@ -9014,6 +9030,7 @@ class SirosWallet private constructor(
                 // An encrypted response is read only from what the wallet decrypted; a plain one may relay display-only members.
                 val openedResponse: DeliveredResponseMetadata = filled.opened ?: PlainDeliveredResponse(msg.credentialMetadata)
                 noteFlowId(msg.flowId)
+                presentationAnswered()
                 Timber.i("Flow ${msg.flowId} complete" + (flowContinuations?.get(msg.flowId)?.let { " (the resumption of flow $it)" } ?: ""))
                 terminatedFlowIds.add(msg.flowId)
                 stopZkSigning(msg.flowId, refuse = false)
@@ -9477,6 +9494,7 @@ class SirosWallet private constructor(
         scope.launch {
             engine.flowErrors().collect { msg ->
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
+                presentationFailedBeforeAnswer()
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
                 // An error for a flow already ended locally as lost (one buffered before the loss): the app was told once, and a second

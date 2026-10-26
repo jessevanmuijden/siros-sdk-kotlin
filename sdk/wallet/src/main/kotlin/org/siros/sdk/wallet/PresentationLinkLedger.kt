@@ -11,8 +11,9 @@ import java.security.MessageDigest
  * receives the identical link a second time, after the first presentation was already answered. A second flow for it is a duplicate
  * consent screen for a request that is done (and that the verifier would refuse anyway: its nonce is spent).
  *
- * A link is [admit]ted once per [ttlMillis]; the same link inside the window is not. [release] forgets it, so a start that failed or
- * was cancelled can be retried at once. Only a digest of the link is kept (it can carry a nonce), at most [capacity] of them.
+ * A link is [admit]ted once per [ttlMillis]; the same link inside the window is not. [release] forgets it, so a start that failed, was
+ * cancelled or ended in an error before an answer was sent can be retried at once; [markCompleted] keeps an answered one for a full
+ * window. Only a digest of the link is kept (it can carry a nonce), at most [capacity] of them.
  */
 class PresentationLinkLedger(
     private val ttlMillis: Long = DEFAULT_TTL_MILLIS,
@@ -31,6 +32,13 @@ class PresentationLinkLedger(
         seen[key] = now
         while (seen.size > capacity) seen.remove(seen.keys.first())
         return true
+    }
+
+    /** [link] was answered: it stays recorded for a full window from now, so its redelivery after the answer is ignored. */
+    @Synchronized
+    fun markCompleted(link: String) {
+        val key = digest(link)
+        if (seen.remove(key) != null) seen[key] = clock()
     }
 
     /** Forgets [link]: a retry of it is admitted again. */
