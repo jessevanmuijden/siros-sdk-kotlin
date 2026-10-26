@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **NFC enrollment right after the PIN dialog no longer gives up: reader mode is armed again while Android refuses it.** `NfcAdapter.enableReaderMode` throws `IllegalStateException` while the Activity is not resumed, which is exactly the moment the PIN dialog (typed ahead of the ceremony) has just closed. The NFC branch of `CompositeCtap2Transport` died with it within ~10 ms and the USB branch then waited 30 s for a key that was held to the phone (YubiKey 5 NFC on a Pixel, twice). `NfcCtap2Transport.connect` now retries arming every 100 ms inside the tag-wait timeout (any other failure is not retried). The sample app no longer types the PIN ahead over USB (the key is plugged in when the PIN is needed, so it is asked after the key is connected); NFC and AUTO keep the typed-ahead PIN. Not verified on hardware.
+
 ## [0.21.4] - 2026-10-26
 
 Adds the proof-system preference (https://github.com/sirosfoundation/siros-sdk-kotlin/issues/304) so a wallet can be told to prove with Vega or Longfellow when a verifier offers both. Follow-ups from its review are tracked for the next release.

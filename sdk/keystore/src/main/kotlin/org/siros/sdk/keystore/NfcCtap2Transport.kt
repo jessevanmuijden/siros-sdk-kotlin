@@ -57,6 +57,9 @@ class NfcCtap2Transport internal constructor(
         internal const val TAG_WAIT_TIMEOUT_MS = 30_000L
         private const val ISODEP_TIMEOUT_MS = 20_000
 
+        /** How long to wait before asking Android to arm reader mode again after it refused. */
+        internal const val READER_MODE_RETRY_MS = 100L
+
     }
 
     override suspend fun isAvailable(): Boolean = reader.isEnabled
@@ -73,7 +76,6 @@ class NfcCtap2Transport internal constructor(
     override suspend fun connect() {
         if (!reader.isEnabled) throw Ctap2TransportException.NotAvailable()
         val tags = Channel<NfcTagHandle>(Channel.UNLIMITED)
-        reader.enableReaderMode { tag -> tags.trySend(tag) }
         var lastFailure: Throwable? = null
         // The tag whose session this call opened: published to [isoDep] only when the wait ended in success, so a connect/SELECT
         // that finishes AFTER the timeout or a cancellation fired never leaves a connected session behind.
@@ -81,6 +83,7 @@ class NfcCtap2Transport internal constructor(
         try {
             Timber.i("$TAG: waiting for NFC tap - present the security key")
             withTimeout(tagWaitTimeoutMs) {
+                armReaderMode(tags)
                 while (true) {
                     val tag = tags.receive()
                     try {
@@ -110,6 +113,27 @@ class NfcCtap2Transport internal constructor(
             throw e
         } finally {
             tags.close()
+        }
+    }
+
+    /**
+     * Arms reader mode, and tries again while Android refuses with [IllegalStateException]: `enableReaderMode` needs a RESUMED
+     * Activity, and the moment a dialog (the PIN dialog typed ahead of the ceremony) closes the Activity is briefly not resumed. Giving
+     * up there left the NFC branch dead within milliseconds of the dialog closing and the user holding a key to nothing. The retry runs
+     * inside the tag-wait timeout, so it ends with it; any other failure is not retried.
+     */
+    private suspend fun armReaderMode(tags: Channel<NfcTagHandle>) {
+        var attempt = 0
+        while (true) {
+            try {
+                reader.enableReaderMode { tag -> tags.trySend(tag) }
+                if (attempt > 0) Timber.i("$TAG: reader mode armed after ${attempt} refusals (the Activity was not resumed yet)")
+                return
+            } catch (e: IllegalStateException) {
+                attempt++
+                if (attempt == 1) Timber.w("$TAG: reader mode refused (${e.javaClass.simpleName}: Activity not resumed); retrying until the wait ends")
+                kotlinx.coroutines.delay(READER_MODE_RETRY_MS)
+            }
         }
     }
 

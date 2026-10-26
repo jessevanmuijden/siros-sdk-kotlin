@@ -1859,7 +1859,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 // - see _fido2AwaitingPresentation's doc comment for why
                 // this can't happen mid-ceremony (the old behavior) without
                 // forcing the user to set an NFC key down to type.
-                if (activePluginId == "fido2") {
+                if (activePluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
                     val pin = awaitFido2PinEntry()
                     if (pin == null) {
                         _errorMessage.value = "Enrollment cancelled"
@@ -2363,6 +2363,13 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val typedAheadPin = org.siros.sdk.keystore.TypedAheadPin()
 
     /**
+     * Whether the PIN is typed BEFORE the ceremony: for NFC (and AUTO, which may end up on NFC) because holding a key to the phone
+     * leaves no hand for typing. Over USB the key is plugged in already when the PIN is needed, so it is asked AFTER the key is
+     * connected, mid-ceremony, not typed ahead.
+     */
+    private fun typesPinAheadFor(mode: Fido2TransportMode): Boolean = mode != Fido2TransportMode.USB
+
+    /**
      * Bridges [org.siros.sdk.keystore.AuthProvider.requestPin] (synchronous,
      * called off the main thread - see [PendingPinEntry]'s doc comment) to
      * a Compose dialog, via [_pendingPinEntry]. `runBlocking` here is safe
@@ -2411,7 +2418,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             try {
                 // See enrollWscd's identical prefetch step for why the PIN
                 // must be collected before any transport work starts.
-                if (activePluginId == "fido2") {
+                if (activePluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
                     val pin = awaitFido2PinEntry()
                     if (pin == null) {
                         _errorMessage.value = "Rotation cancelled"
@@ -2735,7 +2742,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             // with no "present your key now" cue for the transport-connect
             // wait that happens first.
             onWscdOperationStart = { pluginId ->
-                if (pluginId == "fido2") {
+                if (pluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
                     val pin = awaitFido2PinEntry()
                     if (pin != null) {
                         typedAheadPin.hold(pin.toByteArray())
