@@ -107,6 +107,9 @@ object LogoSanitizer {
         LogoResult.Rejected(LogoRejection.UndecodableImage)
     } catch (e: OutOfMemoryError) {
         LogoResult.Rejected(LogoRejection.DimensionsTooLarge)
+    } catch (e: StackOverflowError) {
+        // A parser/renderer recursing on hostile input must never take the app down.
+        LogoResult.Rejected(LogoRejection.InvalidSvg)
     }
 
     private fun sanitizeUnchecked(uri: String?): LogoResult {
@@ -174,6 +177,9 @@ object LogoSanitizer {
         LogoResult.Rejected(LogoRejection.UndecodableImage)
     } catch (e: OutOfMemoryError) {
         LogoResult.Rejected(LogoRejection.DimensionsTooLarge)
+    } catch (e: StackOverflowError) {
+        // A parser/renderer recursing on hostile input must never take the app down.
+        LogoResult.Rejected(LogoRejection.InvalidSvg)
     }
 
     private fun looksLikeSvg(bytes: ByteArray): Boolean {

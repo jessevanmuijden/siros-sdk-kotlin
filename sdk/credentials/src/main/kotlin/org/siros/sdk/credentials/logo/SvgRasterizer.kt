@@ -13,7 +13,13 @@ import java.io.ByteArrayOutputStream
  * vector content survives.
  */
 internal object SvgRasterizer {
-    fun rasterize(svgBytes: ByteArray): ByteArray? {
+    fun rasterize(svgBytes: ByteArray): ByteArray? = try {
+        render(svgBytes)
+    } catch (e: StackOverflowError) {
+        null
+    }
+
+    private fun render(svgBytes: ByteArray): ByteArray? {
         val svg = try {
             SVG.getFromString(String(svgBytes, Charsets.UTF_8))
         } catch (e: Exception) {

@@ -110,9 +110,10 @@ internal object SvgActiveContentGuard {
             if (attr.startsWith("on") || attr in FORBIDDEN_ATTRIBUTES) return false
             if (value.contains("javascript:", ignoreCase = true)) return false
             if (cssIsUnsafe(value)) return false
-            if (attr == "href" || attr == "src") {
-                if (!value.trim().startsWith("#")) return false
-            }
+            // No href/src at all. Gradient inheritance (`href="#other"`) was the last use of
+            // one; AndroidSVG 1.4 only detects a cycle back to the first gradient, so
+            // a -> b -> c -> b recursed until StackOverflowError.
+            if (attr == "href" || attr == "src") return false
         }
         return true
     }

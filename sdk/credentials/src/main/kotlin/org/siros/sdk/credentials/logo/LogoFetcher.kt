@@ -82,6 +82,11 @@ class LogoFetcher(
     }
 
     suspend fun load(uri: String): LogoLoad {
+        // Cheap pre-check: a data: (or any non-https) URI must not be decoded, compressed or
+        // rendered by the sanitizer just to be discarded here.
+        if (!uri.trim().startsWith("https://", ignoreCase = true)) {
+            return LogoLoad.Rejected(LogoRejection.UnsupportedScheme)
+        }
         val remote = when (val r = LogoSanitizer.sanitize(uri)) {
             is LogoResult.Rejected -> return LogoLoad.Rejected(r.reason)
             is LogoResult.Accepted -> r.logo as? DisplayLogo.Remote

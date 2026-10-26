@@ -177,6 +177,7 @@ class LogoSanitizerTest {
             svg("""<rect width="1" height="1" onclick="alert(1)"/>""", ""),
             svg("""<use xlink:href="https://evil.example/x.svg#a"/>"""),
             svg("""<use href="#a"/>"""),
+            svg("""<linearGradient id="a" href="#b"/>"""),
             svg("""<image href="https://evil.example/track.png" width="8" height="8"/>"""),
             svg("""<image xlink:href="http://evil.example/track.png" width="8" height="8"/>"""),
             svg("""<a href="javascript:alert(1)"><rect width="1" height="1"/></a>"""),
@@ -234,6 +235,17 @@ class LogoSanitizerTest {
         assertEquals(LogoRejection.ActiveContent, rejected(svgUri(manyAttrs)))
         // Under the budget is still fine.
         image(svgUri(svg("<style>$chunk</style><rect width='4' height='4' style='$attr'/>")))
+    }
+
+    @Test
+    fun `gradient inheritance chain with a cycle not through the first gradient is refused`() {
+        val s = svg(
+            "<linearGradient id='a' xlink:href='#b'/><linearGradient id='b' xlink:href='#c'/>" +
+                "<linearGradient id='c' xlink:href='#b'/><rect width='9' height='9' fill='url(#a)'/>",
+        )
+        assertEquals(LogoRejection.ActiveContent, rejected(svgUri(s)))
+        // Defence in depth: even if such a document reached the renderer, it must not throw.
+        SvgRasterizer.rasterize(s.toByteArray())
     }
 
     @Test

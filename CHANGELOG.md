@@ -287,7 +287,7 @@ The entries below are the detailed changes that make up this release.
     `a`, animation, nested `svg`, `clipPath`/`mask`/`pattern`/`filter`/
     `marker`/`symbol`/`textPath` and `clip-path`/`mask`/`filter` attributes
     (a clipPath applied to many elements ran AndroidSVG for over a minute),
-    event handlers, non-`#fragment` hrefs, non-local `url()`, `@import`,
+    event handlers, any `href`/`xlink:href`/`src` (gradient inheritance chains made AndroidSVG recurse until StackOverflowError; a StackOverflowError is now also caught and turned into a rejection), non-local `url()`, `@import`,
     `@font-face`, DOCTYPE and entities, CDATA, comments and backslash escapes
     in CSS (a `<style>` element's whole text is validated once), plus more than 500 elements, depth 24,
     32 gradients, 64 stops or 32 KiB of CSS in total (all `<style>` text and
@@ -297,7 +297,7 @@ The entries below are the detailed changes that make up this release.
     redirect hop, no http/https redirects, body read through a streaming
     256 KiB cap (requests send `Accept-Encoding: identity`; any
     Content-Encoding in a response is refused unread), a validated wall-clock timeout (default 10 s, max 60 s),
-    one shared in-flight request per URL that is cancelled when every waiter
+    non-https URIs refused before the sanitizer runs, one shared in-flight request per URL that is cancelled when every waiter
     is (the socket is aborted at once), and content routing by Content-Type with an `<svg` sniff as fallback
     (the guard applies either way).
   - The sample app draws only SDK-produced PNGs (including remote logos, no

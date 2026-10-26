@@ -246,4 +246,11 @@ class LogoFetcherTest {
         server.enqueue(body(png()).addHeader("Content-Encoding", "br"))
         assertEquals(LogoLoad.Rejected(LogoRejection.FetchRejected), load())
     }
+
+    @Test
+    fun `a data uri never reaches the sanitizer`() {
+        // The sanitizer would answer MalformedDataUri for this; the fetcher must refuse by scheme first.
+        assertEquals(LogoLoad.Rejected(LogoRejection.UnsupportedScheme), load(u = "data:image/png;base64,@@@"))
+        assertEquals(LogoLoad.Rejected(LogoRejection.UnsupportedScheme), load(u = "  DATA:image/png;base64,@@@"))
+    }
 }
