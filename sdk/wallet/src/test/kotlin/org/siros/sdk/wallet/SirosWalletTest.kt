@@ -3428,6 +3428,10 @@ class SirosWalletTest {
 
         wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
         advanceUntilIdle()
+        // the display lookup does real IO off the test scheduler: wait (in real time) for the offer context to be restored
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            repeat(100) { if (getField(wallet, "activeOffer") == null) kotlinx.coroutines.delay(50) }
+        }
 
         val offer = getField(wallet, "activeOffer") as org.siros.sdk.credentials.CredentialOffer
         assertEquals("eu.europa.ec.eudi.pid_mdoc", offer.credentialConfigurationId)
