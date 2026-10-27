@@ -7170,7 +7170,7 @@ class SirosWalletTest {
             engine.sendCredentialsMatched(
                 "flow-nomatch",
                 emptyList(),
-                match<String> { it.contains("urn:eu.europa.ec.eudi:pid:1") },
+                match<String> { it == "no_matching_credential" },
             )
         }
         verify(exactly = 0) { engine.sendFlowAction("flow-nomatch", "decline", any()) }
@@ -7274,7 +7274,7 @@ class SirosWalletTest {
             engine.sendMatchResponse(
                 "flow-nm",
                 emptyList(),
-                match<String> { it.contains("urn:eu.europa.ec.eudi:pid:1") },
+                match<String> { it == "no_matching_credential" },
             )
         }
         verify(exactly = 1) {
@@ -7323,10 +7323,8 @@ class SirosWalletTest {
 
         val missingResult = invokeWmpMatchRequest(wallet, "flow-wmp", vctQueryPayload("urn:example:absent"))
         assertTrue(missingResult.matches.isEmpty())
-        assertTrue(
-            "The reason must name what was asked for: ${missingResult.noMatchReason}",
-            missingResult.noMatchReason!!.contains("urn:example:absent"),
-        )
+        // only a CODE reaches the engine: nothing of what was asked for, nothing of what is stored
+        assertEquals("no_matching_credential", missingResult.noMatchReason)
     }
 
     /**
@@ -9108,7 +9106,7 @@ class SirosWalletTest {
                 advanceUntilIdle()
                 val reason = slot<String>()
                 verify(exactly = 1) { e.engine.sendCredentialsMatched("f1", emptyList(), capture(reason)) }
-                assertTrue("$code: ${reason.captured}", reason.captured.contains(text))
+                assertEquals("$code ($text): only a code reaches the engine", "request_not_answerable", reason.captured)
                 // The code is logged (and only the code: nothing of the request).
                 assertTrue(code, czkLogs.any { it.contains("code=$code") })
                 verify(exactly = 0) { e.engine.sendFlowAction("f1", "consent", any()) }

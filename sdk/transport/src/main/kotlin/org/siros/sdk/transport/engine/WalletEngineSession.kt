@@ -708,9 +708,8 @@ class WalletEngineSession(
     /**
      * Send a credential matching response back to the server.
      *
-     * [noMatchReason] is the wallet's own account of why [matches] is empty.
-     * [MatchResponseMessage] has always declared the field and nothing ever
-     * populated it, so the reason never left the device.
+     * [noMatchReason] is a [NoMatchCodes] code for why [matches] is empty (anything else is sent as `unspecified`). Only the query id of
+     * each match leaves the device ([MatchRef]).
      */
     fun sendMatchResponse(
         flowId: String,
@@ -719,8 +718,8 @@ class WalletEngineSession(
     ) {
         send(MatchResponseMessage.serializer(), MatchResponseMessage(
             flowId = flowId,
-            matches = matches,
-            noMatchReason = noMatchReason,
+            matches = matches.map { MatchRef(it.credentialQueryId) },
+            noMatchReason = NoMatchCodes.wire(noMatchReason),
         ))
     }
 
@@ -747,11 +746,12 @@ class WalletEngineSession(
         noMatchReason: String? = null,
     ) {
         val payload = kotlinx.serialization.json.buildJsonObject {
+            // Only the query ids: the engine reads the number of matches and the reason code, nothing about the credentials.
             put("matches", json.encodeToJsonElement(
-                kotlinx.serialization.builtins.ListSerializer(CredentialMatch.serializer()),
-                matches,
+                kotlinx.serialization.builtins.ListSerializer(MatchRef.serializer()),
+                matches.map { MatchRef(it.credentialQueryId) },
             ))
-            noMatchReason?.let { put("no_match_reason", kotlinx.serialization.json.JsonPrimitive(it)) }
+            NoMatchCodes.wire(noMatchReason)?.let { put("no_match_reason", kotlinx.serialization.json.JsonPrimitive(it)) }
         }
         sendFlowAction(flowId = flowId, action = "credentials_matched", payload = payload)
     }

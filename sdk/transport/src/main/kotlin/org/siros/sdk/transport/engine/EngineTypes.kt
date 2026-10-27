@@ -279,7 +279,9 @@ data class ProofObject(
 data class MatchResponseMessage(
     val type: String = MessageTypes.MATCH_RESPONSE,
     @SerialName("flow_id") val flowId: String,
-    val matches: List<CredentialMatch>,
+    /** Only the query ids the wallet can answer ([MatchRef]): nothing about the credentials themselves. */
+    val matches: List<MatchRef>,
+    /** A [NoMatchCodes] code, never free text. */
     @SerialName("no_match_reason") val noMatchReason: String? = null,
     val error: String? = null,
     val timestamp: String? = null,
