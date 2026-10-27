@@ -1621,6 +1621,16 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _fido2AwaitingPresentation = MutableStateFlow(false)
     val fido2AwaitingPresentation: StateFlow<Boolean> = _fido2AwaitingPresentation
 
+    /**
+     * Enrolment's FIRST tap is discovering the key (the SDK's `describe`, no PIN yet): `fido2AwaitingPresentation` only
+     * turns on from `onSecondTap`, so without this the user who just accepted an auto-enroll offer sees nothing at all
+     * until either a PIN dialog or (for a key without one) the ceremony's own activity - discovery can silently time
+     * out with no indication the wallet is waiting for anything. Cleared on the first PIN prompt (tap 1 resolved) or,
+     * for a key without PIN support, when the ceremony itself starts; always cleared in `enrollWscd`'s `finally`.
+     */
+    private val _fido2EnrolmentDiscovering = MutableStateFlow(false)
+    val fido2EnrolmentDiscovering: StateFlow<Boolean> = _fido2EnrolmentDiscovering
+
     /** The currently in-flight enroll/rotate coroutine, if any - lets [cancelWscdLifecycleOp] abort it. */
     private var wscdLifecycleJob: kotlinx.coroutines.Job? = null
 
@@ -1883,13 +1893,18 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 if (pluginId == "fido2") {
                     // Discover, then ask: the SDK describes the key (no PIN dialog), shows the dialog that fits it, re-describes
                     // on the second tap and runs the ceremony. The app only shows the dialogs and the hints.
+                    _fido2EnrolmentDiscovering.value = true
                     val session = org.siros.sdk.keystore.Fido2EnrolmentSession(manager) { request ->
+                        // Tap 1 resolved: a PIN dialog takes over from here.
+                        _fido2EnrolmentDiscovering.value = false
                         awaitFido2PinEntry(request)?.toByteArray()
                     }
                     fido2Enrolment = session
                     val enrolment = session.enrol(
                         onSecondTap = { _fido2AwaitingPresentation.value = typesPinAheadFor(_fido2TransportMode.value) },
                     ) {
+                        // A key without PIN support never raises a PIN prompt: discovery's own dialog ends once the ceremony starts.
+                        _fido2EnrolmentDiscovering.value = false
                         // A hard ceiling on the CEREMONY (not on the user typing): see enrollCeremony.
                         kotlinx.coroutines.withTimeout(WSCD_LIFECYCLE_OP_TIMEOUT_MS) { enrollCeremony(manager, pluginId) }
                     }
@@ -1916,6 +1931,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 _enrollmentInProgress.value = false
                 _wscdLifecycleBusy.value = false
                 _fido2AwaitingPresentation.value = false
+                _fido2EnrolmentDiscovering.value = false
                 typedAheadPin.clear()
             }
         }
@@ -1929,7 +1945,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * reset). Without an outer bound, that kind of hang is unrecoverable without restarting the app.
      */
     private suspend fun enrollCeremony(manager: WscdManager, pluginId: String) {
-        val contextId = lifecycleContextId
+        // The context of the CAPTURED pluginId, never the live tab (see contextIdFor's doc comment): registerFido2OnSigner and
+        // the describe/ask ceremony above already ran against this plugin, however long that took.
+        val contextId = contextIdFor(pluginId)
         val factorKind = when (pluginId) {
             "r2ps" -> FactorKind.Opaque
             else -> FactorKind.RawSign
@@ -2116,7 +2134,16 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * accumulate multiple simultaneous enrollments per plugin.
      */
     private val lifecycleContextId: String
-        get() = "ctx-$activePluginId"
+        get() = contextIdFor(activePluginId)
+
+    /**
+     * The context ID of [pluginId] specifically - for a coroutine that captured a plugin ID earlier (e.g. [enrollWscd]'s
+     * `pluginId`) and must keep using THAT one even if the user switches tabs while the operation (discovery, a PIN
+     * ceremony) is in flight. [lifecycleContextId] reads the CURRENT tab and must not be used once a plugin ID has been
+     * captured - a tab switch mid-enrolment used to register/activate the key under the new tab's context, which no
+     * later status/rotation/destruction call (all keyed on the captured session's own plugin) would ever look up.
+     */
+    private fun contextIdFor(pluginId: String) = "ctx-$pluginId"
 
     /** The plugin ID used for the current lifecycle session. */
     private val activePluginId: String
