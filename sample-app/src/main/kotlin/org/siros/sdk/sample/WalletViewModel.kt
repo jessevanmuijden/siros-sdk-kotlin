@@ -900,6 +900,12 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val fido2StateRestored: MutableSet<WscdManager> =
         java.util.Collections.newSetFromMap(java.util.IdentityHashMap<WscdManager, Boolean>())
 
+    // Declared BEFORE [wallet]: its initializer builds the WalletConfig, which fills this (buildWscdKeystore). Kotlin initializes properties
+    // in textual order, so a declaration below [wallet] is not yet initialized then (an NPE that buildWscdKeystore's catch turns into a
+    // dropped keystore).
+    /** The keystore adapter built for each plugin of the current [WalletConfig.availableKeystores]: the one an issuance with it signs through. */
+    private val wscdAdapterByPlugin = java.util.concurrent.ConcurrentHashMap<String, WscdManager>()
+
     // ── Wallet ──────────────────────────────────────────────────────
 
     private var wallet: SirosWallet = SirosWallet.create(
@@ -1859,7 +1865,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 // - see _fido2AwaitingPresentation's doc comment for why
                 // this can't happen mid-ceremony (the old behavior) without
                 // forcing the user to set an NFC key down to type.
-                if (activePluginId == "fido2") {
+                if (activePluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
                     val pin = awaitFido2PinEntry()
                     if (pin == null) {
                         _errorMessage.value = "Enrollment cancelled"
@@ -2363,6 +2369,24 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val typedAheadPin = org.siros.sdk.keystore.TypedAheadPin()
 
     /**
+     * Whether the PIN is typed BEFORE the ceremony: for NFC (and AUTO, which may end up on NFC) because holding a key to the phone
+     * leaves no hand for typing. Over USB the key is plugged in already when the PIN is needed, so it is asked AFTER the key is
+     * connected, mid-ceremony, not typed ahead.
+     */
+    private fun typesPinAheadFor(mode: Fido2TransportMode): Boolean = mode != Fido2TransportMode.USB
+
+    /**
+     * The transport an operation will actually use: the one its manager's FIDO2 plugin was REGISTERED with (changing the selection
+     * later does not re-register it), else the current selection. Rotation and issuance use the registered one; enrollment
+     * re-registers from the current selection first, so the selection is its transport.
+     */
+    private fun registeredFido2Mode(manager: WscdManager?): Fido2TransportMode = synchronized(fido2RegisteredTransport) {
+        // THAT manager's registration only: another keystore's entry (a different signer's USB registration, say) says nothing about it.
+        manager?.let { fido2RegisteredTransport[it] } ?: _fido2TransportMode.value
+    }
+
+
+    /**
      * Bridges [org.siros.sdk.keystore.AuthProvider.requestPin] (synchronous,
      * called off the main thread - see [PendingPinEntry]'s doc comment) to
      * a Compose dialog, via [_pendingPinEntry]. `runBlocking` here is safe
@@ -2411,7 +2435,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             try {
                 // See enrollWscd's identical prefetch step for why the PIN
                 // must be collected before any transport work starts.
-                if (activePluginId == "fido2") {
+                if (activePluginId == "fido2" && typesPinAheadFor(registeredFido2Mode(wallet.wscdManager))) {
                     val pin = awaitFido2PinEntry()
                     if (pin == null) {
                         _errorMessage.value = "Rotation cancelled"
@@ -2540,13 +2564,15 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                     }
                     is DeepLinkType.PresentationRequest -> {
                         Log.i(TAG, "Routing to presentation")
-                        wallet.startPresentation(link.uri)
+                        // false: the SDK ignored a redelivered duplicate of a request already started; nothing will come through
+                        // the wallet state for this attempt, so its "contacting the verifier" indicator must not stay up.
+                        if (!wallet.startPresentation(link.uri)) _flowStarting.value = null
                     }
                     else -> {
                         // Fallback: treat unclassified URIs as presentation requests
                         // (covers plain https://...?request_uri= patterns from QR codes)
                         Log.i(TAG, "Routing to presentation (unclassified)")
-                        wallet.startPresentation(uri)
+                        if (!wallet.startPresentation(uri)) _flowStarting.value = null
                     }
                 }
             } catch (e: Exception) {
@@ -2640,7 +2666,14 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             }
             Log.i(TAG, "WSCD keystore initialized with plugin: $pluginId")
             if (trackAsDiagnosticSigner) wscdSigner = signer
-            WscdKeystoreAdapter(signer)
+            val adapter = WscdKeystoreAdapter(signer)
+            // The plugin was registered on the signer; the wallet reaches it through this adapter (and enrollment/rotation re-register
+            // through it), so the registered transport is recorded for the adapter too.
+            synchronized(fido2RegisteredTransport) {
+                fido2RegisteredTransport[signer]?.let { fido2RegisteredTransport[adapter] = it }
+            }
+            wscdAdapterByPlugin[pluginId] = adapter
+            adapter
         } catch (e: Exception) {
             Log.w(TAG, "Failed to initialize WSCD keystore for plugin $pluginId, falling back to default", e)
             null
@@ -2735,7 +2768,7 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
             // with no "present your key now" cue for the transport-connect
             // wait that happens first.
             onWscdOperationStart = { pluginId ->
-                if (pluginId == "fido2") {
+                if (pluginId == "fido2" && typesPinAheadFor(registeredFido2Mode(wscdAdapterByPlugin["fido2"]))) {
                     val pin = awaitFido2PinEntry()
                     if (pin != null) {
                         typedAheadPin.hold(pin.toByteArray())

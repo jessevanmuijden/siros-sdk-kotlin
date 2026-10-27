@@ -22,12 +22,18 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class NfcCtap2TransportTest {
-    class FakeReader(override var isEnabled: Boolean = true) : NfcReader {
+    class FakeReader(override var isEnabled: Boolean = true, var refusals: Int = 0) : NfcReader {
         var enabled = 0
+        var attempts = 0
         var disabled = 0
         var armed = false
         private var onTag: ((NfcTagHandle) -> Unit)? = null
-        override fun enableReaderMode(onTag: (NfcTagHandle) -> Unit) { enabled++; armed = true; this.onTag = onTag }
+        override fun enableReaderMode(onTag: (NfcTagHandle) -> Unit) {
+            attempts++
+            // Android refuses while the Activity is not RESUMED (a dialog was just dismissed)
+            if (refusals > 0) { refusals--; throw IllegalStateException("Activity not resumed") }
+            enabled++; armed = true; this.onTag = onTag
+        }
         override fun disableReaderMode() { disabled++; armed = false; onTag = null }
 
         /** The key is presented: delivered only while reader mode is armed; otherwise Android's own dispatcher would have it. */
@@ -243,5 +249,38 @@ class NfcCtap2TransportTest {
     @Test
     fun theCompositeKeepsItsOldJvmConstructor() {
         CompositeCtap2Transport::class.java.getConstructor(UsbCtap2Transport::class.java, NfcCtap2Transport::class.java, kotlin.jvm.functions.Function1::class.java)
+    }
+
+    @Test
+    fun readerModeRefusedWhileTheActivityIsNotResumed_isRetried_andTheKeyIsThenAccepted() = runTest {
+        // Pixel + YubiKey 5 NFC: the NFC branch gave up (IllegalStateException) within ~10 ms of the PIN dialog closing.
+        val reader = FakeReader(refusals = 3)
+        val transport = NfcCtap2Transport(reader, tagWaitTimeoutMs = 30_000)
+        val connecting = async { transport.connect() }
+        runCurrent()
+        assertFalse("not armed yet: still refused", reader.armed)
+        assertEquals(1, reader.attempts)
+        advanceTimeBy(NfcCtap2Transport.READER_MODE_RETRY_MS * 3 + 1)
+        runCurrent()
+        assertTrue("armed on the fourth try", reader.armed)
+        assertEquals(4, reader.attempts)
+        assertTrue(reader.present(FakeTag()))
+        runCurrent()
+        connecting.await()
+        assertArrayEquals(byteArrayOf(0x01, 0x02), transport.send(byteArrayOf(0x04)))
+    }
+
+    @Test
+    fun aReaderThatNeverArms_endsWithTheTagWaitTimeout_notAnImmediateFailure() = runTest {
+        val reader = FakeReader(refusals = Int.MAX_VALUE)
+        val transport = NfcCtap2Transport(reader, tagWaitTimeoutMs = 1_000)
+        val connecting = async { runCatching { transport.connect() } }
+        runCurrent()
+        assertTrue("still trying, not dead", connecting.isActive)
+        advanceTimeBy(1_001)
+        runCurrent()
+        val e = connecting.await().exceptionOrNull()
+        assertTrue("timed out: $e", e is Ctap2TransportException.Timeout)
+        assertTrue(reader.attempts > 1)
     }
 }

@@ -1635,6 +1635,166 @@ class SirosWalletTest {
         verify(exactly = 0) { engine.sendFlowAction("flow-auth", "authorization_complete", any()) }
     }
 
+    @Test
+    fun startPresentation_aRedeliveredIdenticalLinkStartsNoSecondFlow_butARetryAfterAFailedStartDoes() = runTest(dispatcher) {
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val completeFlow = MutableSharedFlow<FlowCompleteMessage>()
+        val engine = mockEngineConstructor(flowErrors = flowErrors, flowComplete = completeFlow)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val link = "openid4vp://?client_id=issuer.example.com&request_uri=https%3A%2F%2Fissuer.example.com%2Fr%2F1&response_code=DMEpnhz"
+
+        assertTrue(wallet.startPresentation(link))
+        assertFalse("the issuer's page re-fires it on the way back: ignored, and the caller is told", wallet.startPresentation(link))
+        verify(exactly = 1) { engine.startPresentation(any(), any(), any()) }
+
+        assertTrue("a different request is a different flow", wallet.startPresentation("$link&x=other"))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+
+        // a start that failed is not remembered: the retry goes through
+        var calls = 0
+        every { engine.startPresentation(any(), any(), any()) } answers { if (calls++ == 0) throw IllegalStateException("socket down") }
+        val retry = "$link&y=retry"
+        runCatching { wallet.startPresentation(retry) }
+        assertTrue(wallet.startPresentation(retry))
+    }
+
+    @Test
+    fun startPresentation_aFlowErrorBeforeTheAnswerReleasesTheLink() = runTest(dispatcher) {
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val completeFlow = MutableSharedFlow<FlowCompleteMessage>()
+        val engine = mockEngineConstructor(flowErrors = flowErrors, flowComplete = completeFlow)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val failed = "openid4vp://?client_id=v.example.com&request_uri=https%3A%2F%2Fv.example.com%2Fr%2F1"
+
+        assertTrue(wallet.startPresentation(failed))
+        // the engine reports an error for it (a connection loss, a refused request) before any answer was sent
+        flowErrors.emit(FlowErrorMessage(flowId = "f1", error = FlowError(code = "internal", message = "boom")))
+        advanceUntilIdle()
+        assertTrue("the Retry action resubmits the same link: it must go through", wallet.startPresentation(failed))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_theSocketItReplacesDoesNotReportTheOriginalFlowAsLost() = runTest(dispatcher) {
+        // Pixel e2e on gdc: "Resuming authorization of flow X ... reconnecting" and 20 ms later "Flow X lost with its engine connection;
+        // ending it locally" plus a failure in the UI, although the resumed flow completed under a new id. The resumption's own forced
+        // reconnect replaces the socket the original flow was first seen on; that must not be reported as a failure of that flow.
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val generations = MutableStateFlow(0)
+        val completeFlow = MutableSharedFlow<FlowCompleteMessage>()
+        val continuations = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val keystore = org.siros.sdk.keystore.JweKeystore()
+        keystore.unlock(ByteArray(32) { it.toByte() }, ByteArray(0), ByteArray(32) { 5 }, "info".toByteArray())
+        val store = KeystoreMirroringStore(keystore, mirror = true)
+        val sessionStore = mockk<SessionStore>(relaxed = true)
+        val apiClient = mockk<BackendApiClient>(relaxed = true)
+        every { sessionStore.privateDataJwe } returns null
+        coEvery { apiClient.updatePrivateData(any()) } returns buildJsonObject {}
+        val engine = mockEngineConstructor(progressFlow = progressFlow, flowComplete = completeFlow, generations = generations)
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to store,
+            "keystore" to keystore,
+            "sessionStore" to sessionStore,
+            "apiClient" to apiClient,
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "flowContinuations" to continuations,
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        progressFlow.emit(
+            FlowProgressMessage(
+                flowId = "flow-auth",
+                step = "authorization_required",
+                payload = buildJsonObject {
+                    put("authorization_url", "https://issuer.example.com/auth?state=s")
+                    put("expected_redirect_uri", "siros://callback")
+                    put("state", "s")
+                    put("code_verifier", "v")
+                    putJsonObject("credential_offer") { put("credential_issuer", "https://issuer.example.com") }
+                },
+            )
+        )
+        advanceUntilIdle()
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        // the forced reconnect opened a new connection generation: the sweep for flows of the older one runs
+        generations.value = 1
+        advanceUntilIdle()
+
+        verify(exactly = 1) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { listener.onFlowError("flow-auth", any(), any()) }
+
+        // the resumed flow (a new id) completes, which pairs it with the original; a LATER reconnect must not sweep the original either
+        completeFlow.emit(
+            FlowCompleteMessage(
+                flowId = "flow-new",
+                credentials = listOf(CredentialResult(format = "dc+sd-jwt", credential = NymTestCredentials.sdJwt(sscValues = emptyList()), notificationId = "n-1")),
+            ),
+        )
+        advanceUntilIdle()
+        assertEquals("the resumed flow is paired with the original", mapOf("flow-new" to "flow-auth"), continuations.toMap())
+        generations.value = 2
+        advanceUntilIdle()
+        verify(exactly = 0) { listener.onFlowError("flow-auth", any(), any()) }
+    }
+
+    @Test
+    fun startPresentation_aConnectionReplacedBeforeTheFirstFlowEventReleasesTheLink() = runTest(dispatcher) {
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(generations = generations)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val link = "openid4vp://?client_id=v.example.com&request_uri=https%3A%2F%2Fv.example.com%2Fr%2F9"
+        assertTrue(wallet.startPresentation(link))
+        // the socket dies after the start but before any flow event: no flow id exists for the sweeps, yet the link must not stay blocked
+        generations.value = engine.connectionGeneration + 1
+        advanceUntilIdle()
+        assertTrue(wallet.startPresentation(link))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+    }
+
     /**
      * The whole resumption after the browser: the authorization step hands off, the app comes back with a code, the engine
      * WebSocket is reconnected, ONE stateless flow_start is sent, and the engine completes the issuance under a NEW flow id.
