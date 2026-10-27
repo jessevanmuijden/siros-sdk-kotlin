@@ -111,11 +111,11 @@ internal object DeliveredCredentialMetadata {
         /** The commitments this wallet put in the key proofs of the request (Auxiliary Data v0.1): the credentials must hold them. */
         holderCommitments: List<org.siros.sdk.credentials.HolderCommitment> = emptyList(),
     ): DeliveredMetadataVerdict {
-        holdsHolderCommitments(credentials, holderCommitments)?.let { return it }
         // A secret in a superseded shape is never read and never stored, whatever else the response carries (and before any other check).
         response.credentialMetadata?.takeIf { !it.malformed }?.let {
             if (it.legacyMemberPresent || LegacySecretMembers.carriedBy(JsonObject(it.members))) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER)
         }
+        holdsHolderCommitments(credentials, holderCommitments)?.let { return it }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         }
