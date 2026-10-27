@@ -117,6 +117,22 @@ class NoOnboardedWscdException(
 )
 
 /**
+ * Issuance is refused because the credential type's required key-storage tier cannot be determined: a credential catalog is
+ * configured ([WalletConfig.credentialTierCatalog]) and it does not list the type, could not be consulted, or a tier it (or the
+ * issuer) states is not a known ISO 18045 tier. Nothing falls back to a weaker keystore.
+ *
+ * @param reason a short, fixed description (never a value from the issuer or the catalog).
+ */
+class KeyStorageTierUndeterminedException(
+    val issuer: String?,
+    val credentialType: String?,
+    val reason: String,
+) : WscdSelectionException(
+    "The required key-storage tier cannot be determined ($reason)" +
+        (if (issuer != null) " (issuer=$issuer credentialType=$credentialType)" else ""),
+)
+
+/**
  * Thrown by [WscdSelectionPolicy.resolve] when two or more of the host app's
  * registered plugins meet the credential type's declared `requiredTier`, but
  * there was no way to have the user pick which one: either no

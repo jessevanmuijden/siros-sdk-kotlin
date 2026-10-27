@@ -181,6 +181,11 @@ private data class PendingAuthorization(
     val redirectUri: String,
     val codeVerifier: String?,
     val state: String,
+    /**
+     * The issuance attempt ([SirosWallet]'s start epoch) this authorization belongs to, when it was saved. A callback that arrives
+     * after a cancel or a newer issuance is for a SUPERSEDED attempt and must not resume anything (nor borrow the newer one's context).
+     */
+    val issuanceEpoch: Int = -1,
 )
 
 /** Facade methods that need a live backend session throw this when there is none. */
@@ -5029,13 +5034,33 @@ class SirosWallet private constructor(
             throw WalletException("Authorization state mismatch for flow $flowId (possible CSRF)")
         }
         pendingAuthorizations.remove(flowId)
+        // A callback for a SUPERSEDED attempt (cancelled, or a newer issuance began since this authorization was saved) resumes nothing:
+        // not reconnecting, not borrowing the newer attempt's offer context.
+        if (pending.issuanceEpoch >= 0 && pending.issuanceEpoch != issuanceStartEpoch.get()) {
+            Timber.w("Authorization callback for flow $flowId ignored: its issuance attempt was cancelled or superseded")
+            return
+        }
+        // The resume owns the issuance from here until it completes or fails: the original flow's guards may have been reset (it was ended
+        // locally), and without them a second issuance could replace the offer before the resumed flow requests its proof.
+        issuanceInFlight = true
         Timber.i("Resuming authorization of flow $flowId after the browser: reconnecting the engine WebSocket (was ${engine.state.value}) and sending a new, stateless flow_start; the engine will answer under a new flow id")
         resumingFlowIds?.add(flowId)
+        val resumeEpoch = issuanceStartEpoch.get()
+        val resumeSession = sessionGeneration
         scope.launch {
             try {
                 engine.forceReconnect()
                 engine.awaitConnected()
                 Timber.i("Engine WebSocket reconnected (${engine.state.value}); sending the resume flow_start for flow $flowId")
+                // The resumed flow needs the same offer context the first one had (the key-storage tier is decided from it); ending the
+                // original flow locally cleared it.
+                if (!restoreOfferContextForResume(pending.offerJson, resumeEpoch, resumeSession)) {
+                    // Cancelled or superseded while the context was being resolved: nothing is sent for it.
+                    resumingFlowIds?.remove(flowId)
+                    // Not released here: a cancel has reset the guards already, and the attempt that superseded this one owns them now.
+                    Timber.i("The resume of flow $flowId was cancelled or superseded before it was sent")
+                    return@launch
+                }
                 // Client attestation for the resumed flow arrives the same way
                 // as for a fresh one: go-wallet-backend's Execute() runs its
                 // attestation setup before branching on msg.AuthCode, so it
@@ -5043,6 +5068,10 @@ class SirosWallet private constructor(
                 // too (the token request - the one that actually needs it for
                 // redirect-based authorization_code issuers - only ever happens
                 // via this path). See handleRequestAttestation.
+                // The resumed start is registered on ITS connection: if that socket is lost before the first reply, no flow id exists
+                // for any sweep, so the connection-loss handlers release the guard through this.
+                resumeStartGeneration = engine.connectionGeneration
+                resumeStartFlowId = flowId
                 engine.resumeIssuance(
                     offer = pending.offerJson,
                     redirectUri = pending.redirectUri,
@@ -5051,6 +5080,7 @@ class SirosWallet private constructor(
                 )
             } catch (e: Exception) {
                 resumingFlowIds?.remove(flowId)
+                if (issuanceStartEpoch.get() == resumeEpoch) resetIssuanceGuards()
                 Timber.e(e, "Failed to resume authorization for flow $flowId (engine WebSocket ${engine.state.value})")
                 eventListener?.onFlowError(flowId, e.message ?: "Failed to resume authorization")
             }
@@ -5581,7 +5611,35 @@ class SirosWallet private constructor(
     /** New flow id -> the flow id it resumed; logging only. */
     private val flowContinuations: MutableMap<String, String>? = java.util.concurrent.ConcurrentHashMap()
 
+    /** The connection generation a resumed authorization's `flow_start` was sent on, until the engine's first reply (null otherwise). */
+    private var resumeStartGeneration: Int? = null
+    private var resumeStartFlowId: String? = null
+
+    /**
+     * A resumed start whose connection is gone before any reply can never be answered: its issuance guard is released and the app is told
+     * (once) that the flow it was waiting on is lost. [lostUpTo] is the newest connection generation that is gone.
+     */
+    private fun endResumedStartLost(lostUpTo: Int) {
+        val generation = resumeStartGeneration ?: return
+        if (generation > lostUpTo) return
+        val flowId = resumeStartFlowId
+        resumeStartGeneration = null
+        resumeStartFlowId = null
+        flowId?.let { resumingFlowIds?.remove(it) }
+        resetIssuanceGuards()
+        if (flowId != null) eventListener?.onFlowError(flowId, FLOW_LOST_MESSAGE)
+        val current = _state.value
+        if (current is WalletState.FlowActive && (current.isPending || current.flowId == flowId)) {
+            _state.value = readyState(current.userId, current.displayName, current.credentials)
+        }
+    }
+
     private fun noteFlowId(flowId: String) {
+        // The engine's first reply for the resumed start: it is on record now (as a flow), no longer a pending start.
+        if (resumeStartGeneration != null && resumingFlowIds?.peek() != null) {
+            resumeStartGeneration = null
+            resumeStartFlowId = null
+        }
         // The first event of a flow tells which in-flight presentation link it belongs to (by the connection it arrived on).
         engineSession?.let { presentationLinks?.associate(flowId, it.connectionGeneration) }
         val resuming = resumingFlowIds ?: return
@@ -6796,6 +6854,9 @@ class SirosWallet private constructor(
     /** Test seam: runs after a sign request has passed its liveness checks and before it is dispatched (to pause it there). */
     internal var signDispatchHook: (() -> Unit)? = null
 
+    /** Test seam: replaces the display lookup of a resumed authorization's offer (the resolved offer, or null for a malformed advertisement, and its `record`). */
+    internal var offerResolveHook: (suspend (String) -> Pair<CredentialOffer?, () -> Boolean>?)? = null
+
     /** Counts the ends of WMP peers: a callback built for one lifetime is refused once it has moved on (see [wmpProfile]). */
     @Volatile
     private var wmpLifetime: Int = 0
@@ -7204,6 +7265,127 @@ class SirosWallet private constructor(
         return keystore
     }
 
+    /**
+     * Gives the resumed flow back the offer context of the flow it resumes ([activeOffer], [activeVctm]) when it was cleared in the
+     * meantime, from the `credential_offer` saved at the authorization step: its issuer and configuration id are all the key-storage
+     * tier decision ([resolveEffectiveKeystoreForIssuance]) needs, so an unresolvable display lookup still leaves a minimal offer.
+     * Nothing is replaced when an offer is already active.
+     */
+    /** The issuer and first configuration id a saved `credential_offer` names, or null. */
+    private fun offerIdentityOf(offerJson: String): Pair<String, String>? = try {
+        val o = json.parseToJsonElement(offerJson).jsonObject
+        val issuer = o["credential_issuer"]?.jsonPrimitive?.contentOrNull
+        val configId = (o["credential_configuration_ids"] as? kotlinx.serialization.json.JsonArray)?.firstOrNull()?.jsonPrimitive?.contentOrNull
+        if (issuer != null && configId != null) issuer to configId else null
+    } catch (e: Exception) {
+        null
+    }
+
+    private suspend fun restoreOfferContextForResume(offerJson: String?, epoch: Int, session: Int): Boolean {
+        // The resume is ONE attempt: a cancel, a new issuance or a session change since it began ends it, wherever it is.
+        fun stillCurrent() = issuanceStartEpoch.get() == epoch && sessionGeneration == session
+        if (offerJson == null) return stillCurrent()
+        activeOffer?.let { active ->
+            // An offer context that is already there is reused only if it belongs to THIS authorization.
+            return stillCurrent() && offerIdentityOf(offerJson)?.let { (issuer, configId) ->
+                active.credentialIssuerIdentifier == issuer && active.credentialConfigurationId == configId
+            } == true
+        }
+        // Lookups stay LOCAL: nothing is published until the attempt is confirmed to still be the current one.
+        val hook = offerResolveHook
+        val resolved = try {
+            if (hook != null) hook(offerJson)?.let { ResolvedOfferForDisplay(it.first, it.second) } else resolveOfferForDisplay(offerJson)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        val offer = resolved?.offer ?: if (resolved != null) {
+            // A resolution without an offer is a MALFORMED auxiliary-data advertisement, not a failed display lookup: no fallback.
+            null
+        } else try {
+            val o = json.parseToJsonElement(offerJson).jsonObject
+            val issuer = o["credential_issuer"]?.jsonPrimitive?.contentOrNull
+            val configId = (o["credential_configuration_ids"] as? kotlinx.serialization.json.JsonArray)
+                ?.firstOrNull()?.jsonPrimitive?.contentOrNull
+            if (issuer != null && configId != null) {
+                org.siros.sdk.credentials.CredentialOffer(
+                    credentialConfigurationId = configId,
+                    credentialIssuerIdentifier = issuer,
+                    credentialName = configId,
+                    issuerName = issuer,
+                )
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
+        val vctmDocument = offer?.let {
+            try {
+                vctmFetcher.fetchDocument(
+                    issuerUrl = it.credentialIssuerIdentifier,
+                    scope = it.credentialConfigurationId,
+                    // The offer's type: with it the lookup also resolves by type (registry, well-known, cache), as a fresh issuance does.
+                    vct = it.vct,
+                    registryUrl = registryUrl,
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+        }
+        if (!stillCurrent()) return false
+        // Recorded (and a malformed advertisement refused) BEFORE any context is published or the resume is sent.
+        if (resolved != null && !resolved.record()) {
+            throw WalletException(
+                "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                errorCode = "auxiliary_data_advertisement_malformed",
+            )
+        }
+        if (offer == null) {
+            Timber.w("Resumed flow: the saved credential offer names no issuer and configuration; the key-storage tier cannot be decided from it")
+            return true
+        }
+        activeOffer = offer
+        // BOTH the raw document and its parsed VCTM, as a fresh issuance publishes them: the integrity check of the delivered credential
+        // needs the document, and a parsed VCTM with no document would let an unresolvable pin pass as "no metadata applies".
+        activeVctmDocument = vctmDocument
+        activeVctm = vctmDocument?.vctm
+        return true
+    }
+
+    /**
+     * The key-storage tier required for [credentialType]: the credential catalog's, raised (never lowered) by [issuerTier]; just
+     * [issuerTier] when no [WalletConfig.credentialTierCatalog] is configured. Throws [KeyStorageTierUndeterminedException] when a
+     * catalog is configured and the tier cannot be determined.
+     */
+    private suspend fun catalogBaselineTier(issuer: String, credentialType: String, issuerTier: String?): String? {
+        val catalog = config.credentialTierCatalog ?: return issuerTier
+        val baseline = when (val answer = try {
+            catalog.tierFor(credentialType)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            org.siros.sdk.credentials.CatalogTier.Unavailable
+        }) {
+            is org.siros.sdk.credentials.CatalogTier.Known -> answer.tier
+            org.siros.sdk.credentials.CatalogTier.NotListed ->
+                throw KeyStorageTierUndeterminedException(issuer, credentialType, "the catalog does not list the credential type")
+            org.siros.sdk.credentials.CatalogTier.Unavailable ->
+                throw KeyStorageTierUndeterminedException(issuer, credentialType, "the catalog could not be consulted")
+        }
+        if (WscdPluginCapabilities.rankOf(baseline) < 0) {
+            throw KeyStorageTierUndeterminedException(issuer, credentialType, "the catalog states a tier that is not a known ISO 18045 tier")
+        }
+        if (issuerTier == null) return baseline
+        if (WscdPluginCapabilities.rankOf(issuerTier) < 0) {
+            throw KeyStorageTierUndeterminedException(issuer, credentialType, "the issuer states a tier that is not a known ISO 18045 tier")
+        }
+        return if (WscdPluginCapabilities.rankOf(issuerTier) > WscdPluginCapabilities.rankOf(baseline)) issuerTier else baseline
+    }
+
     private suspend fun resolveEffectiveKeystoreForIssuance(): KeystoreManager {
         val available = config.availableKeystores
         if (available.isNullOrEmpty()) {
@@ -7211,6 +7393,10 @@ class SirosWallet private constructor(
             return requireDefaultKeystoreOnboarded("default", null, null, null)
         }
         val offer = activeOffer ?: run {
+            // With a catalog the tier of an unknown credential cannot be decided: refuse rather than use the default keystore.
+            if (config.credentialTierCatalog != null) {
+                throw KeyStorageTierUndeterminedException(null, null, "no credential offer is active")
+            }
             Timber.i("resolveEffectiveKeystoreForIssuance: no activeOffer, using default keystore")
             return requireDefaultKeystoreOnboarded(available.entries.firstOrNull { it.value === keystore }?.key ?: "default", null, null, null)
         }
@@ -7234,8 +7420,27 @@ class SirosWallet private constructor(
         } else {
             null
         }
-        val requiredTier = activeVctm?.requiredKeyStorage ?: mddlSchema?.requiredKeyStorage
-        val credentialType = activeVctm?.vct ?: mddlSchema?.doctype ?: offer.credentialConfigurationId
+        val issuerTier = activeVctm?.requiredKeyStorage ?: mddlSchema?.requiredKeyStorage
+        // With a catalog the type is the one the OFFER advertised; type metadata that names another type is refused BEFORE the catalog is
+        // asked (an issuer could advertise a high-tier type and return the metadata of a basic one).
+        val catalogged = config.credentialTierCatalog != null
+        if (catalogged) {
+            val metadataVct = activeVctm?.vct
+            val metadataDoctype = mddlSchema?.doctype
+            if ((offer.vct != null && metadataVct != null && metadataVct != offer.vct) ||
+                (offer.doctype != null && metadataDoctype != null && metadataDoctype != offer.doctype)
+            ) {
+                throw KeyStorageTierUndeterminedException(issuer, offer.vct ?: offer.doctype, "the type metadata names another type than the offer advertised")
+            }
+        }
+        val credentialType = if (catalogged) {
+            offer.vct ?: offer.doctype ?: activeVctm?.vct ?: mddlSchema?.doctype ?: offer.credentialConfigurationId
+        } else {
+            activeVctm?.vct ?: mddlSchema?.doctype ?: offer.credentialConfigurationId
+        }
+        // The catalog's tier is the BASELINE; the issuer's own metadata may raise it, never lower it. With a catalog configured an
+        // undeterminable tier refuses (no fallback to a weaker keystore).
+        val requiredTier = catalogBaselineTier(issuer, credentialType, issuerTier)
 
         // Identify which registered plugin (if any) is already the active
         // default, so WscdSelectionPolicy can prefer it over switching
@@ -7503,6 +7708,7 @@ class SirosWallet private constructor(
         active?.let { ids.add(it) }
         ids.addAll(selectionJobsByFlow.keys)
         ids.forEach { endFlowLost(it) }
+        engineSession?.let { endResumedStartLost(it.connectionGeneration) }
     }
 
     /** Flows first seen on a connection older than [generation] are gone with it. */
@@ -7520,6 +7726,8 @@ class SirosWallet private constructor(
         presentationLinks?.releaseOlderThan(generation)
         // The engine keeps a flow only as long as its session: the flows of an older socket can never complete.
         endFlowsOfOlderConnections(generation)
+        // After the sweep (which spares a flow whose resumption is under way), so the lost resumption is reported exactly once.
+        endResumedStartLost(generation - 1)
         endSentPendingStartLost(generation)
         blindIssuance.markStaleBefore(generation)
         scope.launch {
@@ -8971,6 +9179,7 @@ class SirosWallet private constructor(
                                     redirectUri = redirectUri,
                                     codeVerifier = codeVerifier,
                                     state = effectiveState,
+                                    issuanceEpoch = issuanceStartEpoch.get(),
                                 )
                             }
                             eventListener?.onAuthorizationRequired(
