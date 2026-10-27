@@ -484,6 +484,7 @@ public final class org/siros/sdk/wallet/PresentationConsentText$Companion {
 public final class org/siros/sdk/wallet/PresentationLinkLedger {
 	public static final field Companion Lorg/siros/sdk/wallet/PresentationLinkLedger$Companion;
 	public static final field DEFAULT_TTL_MILLIS J
+	public static final field IN_FLIGHT_TTL_MILLIS J
 	public fun <init> ()V
 	public fun <init> (JILkotlin/jvm/functions/Function0;)V
 	public synthetic fun <init> (JILkotlin/jvm/functions/Function0;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
