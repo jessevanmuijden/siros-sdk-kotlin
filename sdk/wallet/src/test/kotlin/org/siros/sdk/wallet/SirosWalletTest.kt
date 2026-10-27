@@ -3538,11 +3538,15 @@ class SirosWalletTest {
         assertTrue(resolveKeystore(f.wallet).exceptionOrNull() is KeyStorageTierUndeterminedException)
     }
 
-    private fun resumeFixture(awaitConnected: suspend () -> Unit = {}): Triple<SirosWallet, WalletEngineSession, WalletEventListener> {
-        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
-        val engine = mockEngineConstructor(progressFlow = progressFlow)
+    private class ResumeCtx(val wallet: SirosWallet, val engine: WalletEngineSession, val listener: WalletEventListener, val progress: MutableSharedFlow<FlowProgressMessage>)
+
+    private suspend fun kotlinx.coroutines.test.TestScope.resumeCtx(
+        hookOffer: org.siros.sdk.credentials.CredentialOffer? = org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer"),
+    ): ResumeCtx {
+        val progress = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progress)
         every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
-        coEvery { engine.awaitConnected(any()) } coAnswers { awaitConnected() }
+        coEvery { engine.awaitConnected(any()) } just runs
         val listener = mockk<WalletEventListener>(relaxed = true)
         val wallet = newWallet(
             "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
@@ -3554,7 +3558,11 @@ class SirosWalletTest {
             "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
             "json" to Json { ignoreUnknownKeys = true },
         )
-        return Triple(wallet, engine, listener)
+        wallet.offerResolveHook = { _ -> Pair(hookOffer) { true } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progress)
+        return ResumeCtx(wallet, engine, listener, progress)
     }
 
     private suspend fun kotlinx.coroutines.test.TestScope.parkAuthorization(wallet: SirosWallet, progress: MutableSharedFlow<FlowProgressMessage>) {
@@ -3651,6 +3659,65 @@ class SirosWalletTest {
         ))
         resolveKeystore(f.wallet).getOrThrow()
         assertEquals(listOf("urn:eudi:pid:1"), seen)
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aCallbackForACancelledAttemptResumesNothing() = runTest(dispatcher) {
+        val c = resumeCtx()
+        c.wallet.cancelCurrentFlow() // attempt A is cancelled while its browser step is still open
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s") // the delayed callback of A
+        advanceUntilIdle()
+        coVerify(exactly = 0) { c.engine.forceReconnect() }
+        verify(exactly = 0) { c.engine.resumeIssuance(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_anOfferContextOfAnotherAttemptIsNeverReused() = runTest(dispatcher) {
+        val c = resumeCtx()
+        // another attempt's offer context is active (its issuance is what the wallet is doing now)
+        setField(c.wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer("other-config", "https://other.example.com", "Other", issuerName = "Other"))
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        verify(exactly = 0) { c.engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        assertEquals("the other attempt's context is untouched", "other-config", (getField(c.wallet, "activeOffer") as org.siros.sdk.credentials.CredentialOffer).credentialConfigurationId)
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_theTypeMetadataLookupGetsTheOffersVct() = runTest(dispatcher) {
+        val c = resumeCtx(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer", vct = "urn:eudi:pid:1"))
+        val fetcher = mockk<org.siros.sdk.credentials.VctmFetcher>()
+        coEvery { fetcher.fetch(any(), any(), any(), any()) } returns null
+        setField(c.wallet, "vctmFetcher", fetcher)
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        coVerify { fetcher.fetch(any(), "pid", "urn:eudi:pid:1", any()) }
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_theResumeOwnsTheIssuance_soACompetingStartIsRefused() = runTest(dispatcher) {
+        val c = resumeCtx()
+        setField(c.wallet, "issuanceInFlight", false) // the original flow's guards were reset when it was ended locally
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        verify(exactly = 1) { c.engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        val competing = runCatching { c.wallet.startIssuance("openid-credential-offer://?credential_offer=%7B%7D") }.exceptionOrNull()
+        assertTrue("a second issuance must not start while the resumed one is pending: $competing", competing is WalletException)
+        assertTrue(competing!!.message!!.contains("already in progress"))
+    }
+
+    @Test
+    fun metadataThatNamesAnotherTypeThanTheOfferAdvertised_isRefusedBeforeTheCatalogIsAsked() {
+        val seen = mutableListOf<String>()
+        val catalog = org.siros.sdk.credentials.CredentialTierCatalog { type -> seen += type; org.siros.sdk.credentials.CatalogTier.Known("iso_18045_basic") }
+        val f = catalogFixture(catalog, issuerTier = null, withOffer = false)
+        setField(f.wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+            credentialConfigurationId = "pid", credentialIssuerIdentifier = "https://issuer.example.com", credentialName = "PID", issuerName = "Issuer",
+            vct = "urn:type:A", // advertised: catalog high
+        ))
+        setField(f.wallet, "activeVctm", org.siros.sdk.credentials.Vctm(vct = "urn:type:B")) // delivered metadata of another (basic) type
+        val e = resolveKeystore(f.wallet).exceptionOrNull()
+        assertTrue("expected a refusal, got $e", e is KeyStorageTierUndeterminedException)
+        assertEquals("the catalog was never asked", emptyList<String>(), seen)
     }
 
     @Test
