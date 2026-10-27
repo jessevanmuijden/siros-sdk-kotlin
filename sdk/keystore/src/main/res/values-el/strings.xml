@@ -12,4 +12,7 @@
     <string name="siros_pin_error_replug">Αποσυνδέστε το κλειδί ασφαλείας, συνδέστε το ξανά και δοκιμάστε πάλι.</string>
     <string name="siros_pin_error_internal">Το κλειδί ασφαλείας βρίσκεται σε μη αναμενόμενη κατάσταση. Δοκιμάστε ξανά.</string>
     <string name="siros_pin_error_too_many">Πάρα πολλές προσπάθειες PIN. Δοκιμάστε ξανά αργότερα.</string>
+    <string name="siros_enrol_unsuitable">Αυτό το κλειδί ασφαλείας δεν μπορεί να καταχωριστεί ως έχει.</string>
+    <string name="siros_enrol_key_changed">Το κλειδί ασφαλείας άλλαξε ή αντικαταστάθηκε. Ξεκινήστε ξανά με το κλειδί που θέλετε να χρησιμοποιήσετε.</string>
+    <string name="siros_enrol_cancelled">Η καταχώριση ακυρώθηκε.</string>
 </resources>

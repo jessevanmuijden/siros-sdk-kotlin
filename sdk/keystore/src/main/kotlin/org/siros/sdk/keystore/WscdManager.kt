@@ -39,6 +39,14 @@ interface WscdManager : SignerLifecycleManager {
      */
     fun exportFido2State(): ByteArray
 
+    /**
+     * Read-only description of the FIDO2 authenticator behind the registered `fido2` plugin: what it is, whether it has a PIN,
+     * the minimum PIN length, the remaining PIN attempts and whether it can be enrolled. Never asks for or sends a PIN, never
+     * changes the key, and uses the registered transport as it is (an already-open USB connection is reused; an NFC key
+     * must be held to the phone for it). Throws if the fido2 plugin is not registered.
+     */
+    suspend fun describeFido2Authenticator(): Fido2AuthenticatorInfo
+
     /** Register the R2PS remote HSM plugin. */
     fun registerR2psPlugin(config: R2psConfig, transport: R2psTransportProvider)
 }

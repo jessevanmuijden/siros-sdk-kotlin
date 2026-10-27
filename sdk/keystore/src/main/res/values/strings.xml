@@ -15,4 +15,7 @@
     <string name="siros_pin_error_replug">Unplug the security key, plug it in again and retry.</string>
     <string name="siros_pin_error_internal">The security key is in an unexpected state. Try again.</string>
     <string name="siros_pin_error_too_many">Too many PIN attempts. Try again later.</string>
+    <string name="siros_enrol_unsuitable">This security key cannot be used for enrolment as it is.</string>
+    <string name="siros_enrol_key_changed">The security key was changed or replaced. Start again with the key you want to use.</string>
+    <string name="siros_enrol_cancelled">Enrolment cancelled.</string>
 </resources>

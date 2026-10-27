@@ -12,4 +12,7 @@
     <string name="siros_pin_error_replug">Dra ut säkerhetsnyckeln, sätt i den igen och försök på nytt.</string>
     <string name="siros_pin_error_internal">Säkerhetsnyckeln är i ett oväntat tillstånd. Försök igen.</string>
     <string name="siros_pin_error_too_many">För många PIN-försök. Försök igen senare.</string>
+    <string name="siros_enrol_unsuitable">Den här säkerhetsnyckeln kan inte registreras som den är.</string>
+    <string name="siros_enrol_key_changed">Säkerhetsnyckeln byttes eller ändrades. Börja om med den nyckel du vill använda.</string>
+    <string name="siros_enrol_cancelled">Registreringen avbröts.</string>
 </resources>

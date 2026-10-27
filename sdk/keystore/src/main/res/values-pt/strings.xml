@@ -12,4 +12,7 @@
     <string name="siros_pin_error_replug">Desligue a chave de segurança, volte a ligá-la e tente novamente.</string>
     <string name="siros_pin_error_internal">A chave de segurança está num estado inesperado. Tente novamente.</string>
     <string name="siros_pin_error_too_many">Demasiadas tentativas de PIN. Tente mais tarde.</string>
+    <string name="siros_enrol_unsuitable">Esta chave de segurança não pode ser registada tal como está.</string>
+    <string name="siros_enrol_key_changed">A chave de segurança foi trocada ou alterada. Comece de novo com a chave que pretende usar.</string>
+    <string name="siros_enrol_cancelled">Registo cancelado.</string>
 </resources>
