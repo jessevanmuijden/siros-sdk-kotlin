@@ -339,4 +339,35 @@ class AuxiliaryDataV01Test {
             assertTrue(member, AuxiliaryDataV01.parseDeliveries(md) is AuxiliaryParse.Malformed)
         }
     }
+
+    // ---- the wallet's own entry/path-count bound (32, independent of the engine's now-removed maxAuxEntries/maxAuxPathLen) ----
+
+    private fun slot(claim: String) = """{"type":"hash_commitment","alg":"sha-256","path":["$claim"],"encoding":"base64url"}"""
+
+    @Test
+    fun upTo32AdvertisedToWalletEntriesAreAccepted_33AreNot() {
+        val entries32 = (0 until 32).joinToString(",") { slot("c$it") }
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[$entries32]}""")) is AuxiliarySelection.Selected)
+        val entries33 = (0 until 33).joinToString(",") { slot("c$it") }
+        assertTrue(AuxiliaryDataShapes.select(config("""{"to_wallet":[$entries33]}""")) is AuxiliarySelection.Malformed)
+    }
+
+    @Test
+    fun upTo32DeliveredEntriesAreAccepted_33AreNot() {
+        fun delivery(n: Int) = Array(n) { """{"type":"hash_commitment","alg":"sha-256","path":["c$it"],"opening":"$openingB64"}""" }
+        assertTrue(AuxiliaryDataV01.parseDeliveries(response(*delivery(32))) is AuxiliaryParse.Parsed)
+        assertTrue(AuxiliaryDataV01.parseDeliveries(response(*delivery(33))) is AuxiliaryParse.Malformed)
+    }
+
+    @Test
+    fun upTo32ToIssuerEntriesAreAnsweredBySlotsToAnswer_33Refuses() {
+        fun entry(n: Int) = Json.parseToJsonElement(slot("c$n")).jsonObject
+        assertEquals(32, AuxiliaryDataV01.slotsToAnswer((0 until 32).map { entry(it) }).size)
+        try {
+            AuxiliaryDataV01.slotsToAnswer((0 until 33).map { entry(it) })
+            fail("accepted 33 to_issuer entries")
+        } catch (e: WalletException) {
+            assertEquals("holder_commitment_unsupported", e.errorCode)
+        }
+    }
 }
