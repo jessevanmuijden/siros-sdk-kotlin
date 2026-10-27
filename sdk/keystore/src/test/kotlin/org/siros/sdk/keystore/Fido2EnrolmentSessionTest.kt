@@ -461,6 +461,48 @@ class Fido2EnrolmentSessionTest {
     }
 
     @Test
+    fun clearDuringTheFirstChoosePrompt_wipesTheReturnedPinAndNeverAsksToConfirm() = runTest {
+        val info1 = info(Fido2PinState.NOT_SET, min = 6)
+        val firstAskEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resumeFirstAsk = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var asks = 0
+        var confirmRequested = false
+        var handedOut: ByteArray? = null
+        suspend fun describe(): Fido2AuthenticatorInfo = info1
+        suspend fun ask(request: PinRequest): ByteArray? {
+            asks++
+            if (asks == 1) {
+                firstAskEntered.complete(Unit)
+                resumeFirstAsk.await()
+                return "654321".toByteArray().also { handedOut = it }
+            }
+            confirmRequested = true
+            return "654321".toByteArray()
+        }
+        val session = Fido2EnrolmentSession(::describe, ::ask)
+        var caught: Fido2EnrolmentException? = null
+        var ceremonyRan = false
+        val job = launch {
+            try {
+                session.enrol { ceremonyRan = true }
+            } catch (e: Fido2EnrolmentException) {
+                caught = e
+            }
+        }
+        firstAskEntered.await()
+        // The host abandons the enrolment WHILE the user is still choosing a PIN for the first time - before any confirmation
+        // round, so a valid PIN returned afterward must never even get as far as asking the user to confirm it.
+        session.clear()
+        resumeFirstAsk.complete(Unit)
+        advanceUntilIdle()
+        assertFalse("no confirmation is requested once the enrolment is abandoned", confirmRequested)
+        assertFalse(ceremonyRan)
+        assertEquals(Fido2EnrolmentFailure.CANCELLED, caught?.failure)
+        assertTrue("the PIN returned after abandonment is wiped, not held onto", handedOut!!.all { it == 0.toByte() })
+        assertNull(session.answer(PinRequest.Choose("fido2", 6, confirm = false)))
+    }
+
+    @Test
     fun theLibrarysDescriptionIsMappedFieldByField() {
         val ffi = FfiAuthenticatorInfo(
             listOf("FIDO_2_0", "FIDO_2_1"), ByteArray(16) { it.toByte() }, FfiClientPinState.NOT_SET, 6u, true, null,
