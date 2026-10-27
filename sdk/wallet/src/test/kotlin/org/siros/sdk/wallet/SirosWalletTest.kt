@@ -52,6 +52,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -3417,6 +3418,406 @@ class SirosWalletTest {
         advanceUntilIdle()
         coVerify(exactly = 1) { fido2Keystore.generateKeypairs(1) }
         assertEquals("the claim of the keystore that generated the keys (FIDO2), not the default's", "fido2", sentPlugin.captured)
+    }
+
+    // -------- the credential catalog as the baseline key-storage tier --------
+
+    private class CatalogFixture(val wallet: SirosWallet, val soft: KeystoreManager, val fido2: KeystoreManager)
+
+    /** A wallet whose default keystore is the SOFT one and which also has an (onboarded unless said otherwise) FIDO2 keystore. */
+    private fun catalogFixture(
+        catalog: org.siros.sdk.credentials.CredentialTierCatalog?,
+        issuerTier: String?,
+        fido2Onboarded: Boolean = true,
+        withOffer: Boolean = true,
+        policy: WscdSelectionPolicy = WscdSelectionPolicy(tofuStore = InMemoryWscdTofuStore()),
+    ): CatalogFixture {
+        val soft = mockk<KeystoreManager>(relaxed = true)
+        coEvery { soft.isWscdOnboarded() } returns true
+        val fido2 = mockk<KeystoreManager>(relaxed = true)
+        coEvery { fido2.isWscdOnboarded() } returns fido2Onboarded
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Disconnected()),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(
+                backendUrl = "https://wallet.example.com",
+                availableKeystores = mapOf("softkey" to soft, "fido2" to fido2),
+                credentialTierCatalog = catalog,
+            ),
+            "keystore" to soft,
+            "wscdSelectionPolicy" to policy,
+        )
+        if (withOffer) {
+            setField(wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+                credentialConfigurationId = "pid", credentialIssuerIdentifier = "https://issuer.example.com", credentialName = "PID", issuerName = "Issuer",
+            ))
+            setField(wallet, "activeVctm", org.siros.sdk.credentials.Vctm(vct = "urn:eu.europa.ec.eudi:pid:1", requiredKeyStorage = issuerTier))
+        }
+        return CatalogFixture(wallet, soft, fido2)
+    }
+
+    private fun catalogOf(answer: org.siros.sdk.credentials.CatalogTier) = org.siros.sdk.credentials.CredentialTierCatalog { answer }
+    private fun known(tier: String) = catalogOf(org.siros.sdk.credentials.CatalogTier.Known(tier))
+
+    /** The keystore [SirosWallet] resolves for the active issuance, or the exception that refused it. */
+    private fun resolveKeystore(wallet: SirosWallet): Result<KeystoreManager> = runCatching {
+        val method = wallet::class.declaredMemberFunctions.first { it.name == "resolveEffectiveKeystoreForIssuance" }
+        method.isAccessible = true
+        try {
+            kotlinx.coroutines.runBlocking { method.callSuspend(wallet) as KeystoreManager }
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.targetException
+        }
+    }
+
+    @Test
+    fun catalogTier_isTheBaseline_whenTheIssuerDeclaresNone_theGdcPidGap() {
+        // The issuer's metadata says nothing: before, the SOFT default was used. The catalog says high: FIDO2 is.
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null)
+        assertSame(f.fido2, resolveKeystore(f.wallet).getOrThrow())
+    }
+
+    @Test
+    fun theIssuerMayRaiseTheCatalogTier_butNeverLowerIt() {
+        // catalog basic + issuer high: high (the soft keystore would not do)
+        val raised = catalogFixture(known("iso_18045_basic"), issuerTier = "iso_18045_high")
+        assertSame(raised.fido2, resolveKeystore(raised.wallet).getOrThrow())
+        // catalog high + issuer basic: still high
+        val notLowered = catalogFixture(known("iso_18045_high"), issuerTier = "iso_18045_basic")
+        assertSame(notLowered.fido2, resolveKeystore(notLowered.wallet).getOrThrow())
+    }
+
+    @Test
+    fun withoutACatalog_onlyTheIssuersTierCounts_asBefore() {
+        val f = catalogFixture(null, issuerTier = null)
+        assertSame("no tier at all: the default keystore, as before", f.soft, resolveKeystore(f.wallet).getOrThrow())
+    }
+
+    @Test
+    fun aTierTheCatalogCannotGive_refusesAndNeverFallsBackToTheSoftKeystore() {
+        for (catalog in listOf(
+            catalogOf(org.siros.sdk.credentials.CatalogTier.NotListed),
+            catalogOf(org.siros.sdk.credentials.CatalogTier.Unavailable),
+            org.siros.sdk.credentials.CredentialTierCatalog { throw IllegalStateException("catalog crashed") },
+            known("iso_18045_ultra"), // not a known tier
+        )) {
+            val f = catalogFixture(catalog, issuerTier = null)
+            val e = resolveKeystore(f.wallet).exceptionOrNull()
+            assertTrue("expected a refusal, got $e", e is KeyStorageTierUndeterminedException)
+        }
+        // an issuer tier alone does not stand in for a catalog that cannot answer
+        val f = catalogFixture(catalogOf(org.siros.sdk.credentials.CatalogTier.Unavailable), issuerTier = "iso_18045_basic")
+        assertTrue(resolveKeystore(f.wallet).exceptionOrNull() is KeyStorageTierUndeterminedException)
+    }
+
+    @Test
+    fun aCatalogTierNoOnboardedPluginMeets_refuses_notTheSoftKeystore() {
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null, fido2Onboarded = false)
+        val e = resolveKeystore(f.wallet).exceptionOrNull()
+        assertTrue("expected NoOnboardedWscdException, got $e", e is NoOnboardedWscdException)
+    }
+
+    @Test
+    fun aUserOverrideCannotGoBelowTheCatalogTier() {
+        val policy = WscdSelectionPolicy(
+            tofuStore = InMemoryWscdTofuStore(),
+            userOverrideStore = object : WscdUserOverrideStore {
+                override fun get(issuer: String, credentialType: String): String? = null
+                override fun put(issuer: String, credentialType: String, pluginId: String) {}
+                override fun getGlobal(): String? = "softkey"
+                override fun setGlobal(pluginId: String) {}
+            },
+        )
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null, policy = policy)
+        assertSame("the soft override does not meet the catalog tier", f.fido2, resolveKeystore(f.wallet).getOrThrow())
+    }
+
+    @Test
+    fun theResumedAuthorizationPath_hasNoActiveOffer_andWithACatalogIsRefused_notServedBySoft() {
+        val f = catalogFixture(known("iso_18045_high"), issuerTier = null, withOffer = false)
+        assertTrue(resolveKeystore(f.wallet).exceptionOrNull() is KeyStorageTierUndeterminedException)
+    }
+
+    private class ResumeCtx(val wallet: SirosWallet, val engine: WalletEngineSession, val listener: WalletEventListener, val progress: MutableSharedFlow<FlowProgressMessage>)
+
+    private suspend fun kotlinx.coroutines.test.TestScope.resumeCtx(
+        hookOffer: org.siros.sdk.credentials.CredentialOffer? = org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer"),
+    ): ResumeCtx {
+        val progress = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progress)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        wallet.offerResolveHook = { _ -> Pair(hookOffer) { true } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progress)
+        return ResumeCtx(wallet, engine, listener, progress)
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.parkAuthorization(wallet: SirosWallet, progress: MutableSharedFlow<FlowProgressMessage>) {
+        progress.emit(
+            FlowProgressMessage(
+                flowId = "flow-auth",
+                step = "authorization_required",
+                payload = buildJsonObject {
+                    put("authorization_url", "https://issuer.example.com/auth?state=s")
+                    put("expected_redirect_uri", "siros://callback")
+                    put("state", "s")
+                    put("code_verifier", "v")
+                    putJsonObject("credential_offer") {
+                        put("credential_issuer", "https://issuer.example.com")
+                        putJsonArray("credential_configuration_ids") { add(kotlinx.serialization.json.JsonPrimitive("pid")) }
+                    }
+                },
+            )
+        )
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aCancelWhileTheContextIsResolved_sendsNoResumeAndPublishesNothing() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        var wallet: SirosWallet? = null
+        coEvery { engine.awaitConnected(any()) } coAnswers { wallet?.cancelCurrentFlow() }
+        wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        wallet.offerResolveHook = { _ -> Pair(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer")) { true } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progressFlow)
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+
+        verify(exactly = 0) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        assertNull("the cancelled attempt published no offer context", getField(wallet, "activeOffer"))
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aMalformedAdvertisementIsRecordedAndRefused_beforeAnyFallbackOrResume() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        var recorded = 0
+        // a resolution WITHOUT an offer is a malformed advertisement (not a failed display lookup); record() says it is unusable
+        wallet.offerResolveHook = { _ -> Pair(null as org.siros.sdk.credentials.CredentialOffer?) { recorded++; false } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progressFlow)
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+
+        assertEquals("the selection was recorded (cleared) once", 1, recorded)
+        verify(exactly = 0) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-auth", any(), any()) }
+        assertNull("no minimal-offer fallback was built from the saved offer", getField(wallet, "activeOffer"))
+    }
+
+    @Test
+    fun theCatalogGetsTheOffersAdvertisedType_whenTheTypeMetadataLookupFails() {
+        val seen = mutableListOf<String>()
+        val catalog = org.siros.sdk.credentials.CredentialTierCatalog { type -> seen += type; org.siros.sdk.credentials.CatalogTier.Known("iso_18045_high") }
+        val f = catalogFixture(catalog, issuerTier = null, withOffer = false)
+        // the offer carries the type the issuer advertised; the VCTM / MDDL lookup returned nothing (no activeVctm, unreachable issuer)
+        setField(f.wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+            credentialConfigurationId = "pid-config", credentialIssuerIdentifier = "https://issuer.invalid", credentialName = "PID", issuerName = "Issuer",
+            vct = "urn:eudi:pid:1",
+        ))
+        resolveKeystore(f.wallet).getOrThrow()
+        assertEquals(listOf("urn:eudi:pid:1"), seen)
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aCallbackForACancelledAttemptResumesNothing() = runTest(dispatcher) {
+        val c = resumeCtx()
+        c.wallet.cancelCurrentFlow() // attempt A is cancelled while its browser step is still open
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s") // the delayed callback of A
+        advanceUntilIdle()
+        coVerify(exactly = 0) { c.engine.forceReconnect() }
+        verify(exactly = 0) { c.engine.resumeIssuance(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_anOfferContextOfAnotherAttemptIsNeverReused() = runTest(dispatcher) {
+        val c = resumeCtx()
+        // another attempt's offer context is active (its issuance is what the wallet is doing now)
+        setField(c.wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer("other-config", "https://other.example.com", "Other", issuerName = "Other"))
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        verify(exactly = 0) { c.engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        assertEquals("the other attempt's context is untouched", "other-config", (getField(c.wallet, "activeOffer") as org.siros.sdk.credentials.CredentialOffer).credentialConfigurationId)
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_theTypeMetadataLookupGetsTheOffersVct_andBothTheDocumentAndTheVctmArePublished() = runTest(dispatcher) {
+        val c = resumeCtx(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer", vct = "urn:eudi:pid:1"))
+        val fetcher = mockk<org.siros.sdk.credentials.VctmFetcher>()
+        val doc = org.siros.sdk.credentials.VctmDocument(raw = """{"vct":"urn:eudi:pid:1"}""", vctm = org.siros.sdk.credentials.Vctm(vct = "urn:eudi:pid:1"))
+        coEvery { fetcher.fetchDocument(any(), any(), any(), any(), any()) } returns doc
+        setField(c.wallet, "vctmFetcher", fetcher)
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        coVerify { fetcher.fetchDocument(any(), "pid", "urn:eudi:pid:1", any(), any()) }
+        assertEquals("the raw document is published too (verifyVctIntegrity needs it)", doc, getField(c.wallet, "activeVctmDocument"))
+        assertEquals(doc.vctm, getField(c.wallet, "activeVctm"))
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aConnectionLostBeforeTheFirstReplyReleasesTheIssuanceGuard() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(progressFlow = progressFlow, generations = generations)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        wallet.offerResolveHook = { _ -> Pair(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer")) { true } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progressFlow)
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        verify(exactly = 1) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        assertEquals("the resume owns the issuance while it is pending", true, getField(wallet, "issuanceInFlight"))
+
+        // the socket the resume was sent on is replaced before the engine replied: nothing can ever answer it
+        generations.value = engine.connectionGeneration + 1
+        advanceUntilIdle()
+
+        assertEquals("the guard is released", false, getField(wallet, "issuanceInFlight"))
+        verify(exactly = 1) { listener.onFlowError("flow-auth", any(), any()) }
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_theResumeOwnsTheIssuance_soACompetingStartIsRefused() = runTest(dispatcher) {
+        val c = resumeCtx()
+        setField(c.wallet, "issuanceInFlight", false) // the original flow's guards were reset when it was ended locally
+        c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        verify(exactly = 1) { c.engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        val competing = runCatching { c.wallet.startIssuance("openid-credential-offer://?credential_offer=%7B%7D") }.exceptionOrNull()
+        assertTrue("a second issuance must not start while the resumed one is pending: $competing", competing is WalletException)
+        assertTrue(competing!!.message!!.contains("already in progress"))
+    }
+
+    @Test
+    fun metadataThatNamesAnotherTypeThanTheOfferAdvertised_isRefusedBeforeTheCatalogIsAsked() {
+        val seen = mutableListOf<String>()
+        val catalog = org.siros.sdk.credentials.CredentialTierCatalog { type -> seen += type; org.siros.sdk.credentials.CatalogTier.Known("iso_18045_basic") }
+        val f = catalogFixture(catalog, issuerTier = null, withOffer = false)
+        setField(f.wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+            credentialConfigurationId = "pid", credentialIssuerIdentifier = "https://issuer.example.com", credentialName = "PID", issuerName = "Issuer",
+            vct = "urn:type:A", // advertised: catalog high
+        ))
+        setField(f.wallet, "activeVctm", org.siros.sdk.credentials.Vctm(vct = "urn:type:B")) // delivered metadata of another (basic) type
+        val e = resolveKeystore(f.wallet).exceptionOrNull()
+        assertTrue("expected a refusal, got $e", e is KeyStorageTierUndeterminedException)
+        assertEquals("the catalog was never asked", emptyList<String>(), seen)
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_restoresTheOfferContext_soTheCatalogTierApplies() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val soft = mockk<KeystoreManager>(relaxed = true)
+        coEvery { soft.isWscdOnboarded() } returns true
+        val fido2 = mockk<KeystoreManager>(relaxed = true)
+        coEvery { fido2.isWscdOnboarded() } returns true
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(
+                backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback",
+                availableKeystores = mapOf("softkey" to soft, "fido2" to fido2),
+                credentialTierCatalog = known("iso_18045_high"),
+            ),
+            "keystore" to soft,
+            "wscdSelectionPolicy" to WscdSelectionPolicy(tofuStore = InMemoryWscdTofuStore()),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        progressFlow.emit(
+            FlowProgressMessage(
+                flowId = "flow-auth",
+                step = "authorization_required",
+                payload = buildJsonObject {
+                    put("authorization_url", "https://issuer.example.com/auth?state=s")
+                    put("expected_redirect_uri", "siros://callback")
+                    put("state", "s")
+                    put("code_verifier", "v")
+                    putJsonObject("credential_offer") {
+                        put("credential_issuer", "https://issuer.example.com")
+                        putJsonArray("credential_configuration_ids") { add(kotlinx.serialization.json.JsonPrimitive("eu.europa.ec.eudi.pid_mdoc")) }
+                    }
+                },
+            )
+        )
+        advanceUntilIdle()
+        // the original flow was ended locally in the meantime: no offer context
+        setField(wallet, "activeOffer", null)
+        assertNull(getField(wallet, "activeOffer"))
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        // the display lookup does real IO off the test scheduler: wait (in real time) for the offer context to be restored
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            repeat(100) { if (getField(wallet, "activeOffer") == null) kotlinx.coroutines.delay(50) }
+        }
+
+        val offer = getField(wallet, "activeOffer") as org.siros.sdk.credentials.CredentialOffer
+        assertEquals("eu.europa.ec.eudi.pid_mdoc", offer.credentialConfigurationId)
+        assertEquals("https://issuer.example.com", offer.credentialIssuerIdentifier)
+        // and the catalog tier now decides: FIDO2, not the soft default
+        assertSame(fido2, resolveKeystore(wallet).getOrThrow())
     }
 
     /** Both fido2 and r2ps are eligible for the tier but only r2ps is onboarded: it is used, fido2 never touched. */

@@ -465,6 +465,16 @@ data class WalletConfig(
      * unknown entries are refused when the configuration is built.
      */
     val zkProofSystemPreference: List<String> = emptyList(),
+    /**
+     * The credential catalog (TS11 registry) as the BASELINE for the key-storage tier a credential type requires at issuance. With
+     * one set, the tier is the catalog's for the type, raised (never lowered) by the issuer's own `attestation_los`, and issuance is
+     * refused when the tier cannot be determined (type not listed, catalog unavailable, unknown tier): there is no fallback to a weaker
+     * keystore, and no onboarded plugin that meets the tier is the same refusal as before ([NoOnboardedWscdException],
+     * [NoEligibleWscdPluginException]). A user override can only choose among plugins that meet the resulting tier. Null (the default)
+     * keeps the previous behaviour: only the issuer's own metadata gives a tier. Needs [availableKeystores]: the tier is met by one of
+     * the registered keystores or not at all.
+     */
+    val credentialTierCatalog: org.siros.sdk.credentials.CredentialTierCatalog? = null,
 ) {
     init {
         wscdPluginClaims.forEach { (keystoreId, claim) ->
@@ -474,6 +484,9 @@ data class WalletConfig(
         require(secretSeedNamespace.isNotBlank()) { "secretSeedNamespace must not be blank" }
         VerifierIdTypeOrder.require(circuitZkVerifierIdTypes)
         org.siros.sdk.credentials.ZkProofSystemPreference.require(zkProofSystemPreference)
+        require(credentialTierCatalog == null || !availableKeystores.isNullOrEmpty()) {
+            "credentialTierCatalog needs availableKeystores: the tier is met by one of the registered keystores"
+        }
     }
 
     /**
