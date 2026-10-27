@@ -440,6 +440,27 @@ class Fido2EnrolmentSessionTest {
     }
 
     @Test
+    fun clearAtomicWithTheInstall_refusesRatherThanInstallingAPinClearAlreadyAbandoned() {
+        // The real bug this proves wrong: clear() landing strictly AFTER a (hypothetical, non-atomic) "all clear" check has
+        // already passed but BEFORE the PIN is actually installed into `held` - a window of a handful of synchronous
+        // statements, too narrow to land reliably from a real concurrent thread in a test (confirmed: a 300-iteration real-
+        // thread race via onSecondTap never once exposed it, on EITHER the fixed or a deliberately reverted build). The
+        // deterministic seam testHookBeforeInstall fires exactly where that gap used to be.
+        val info1 = info(Fido2PinState.SET)
+        val session = Fido2EnrolmentSession(describe = { info1 }, ask = { "246810".toByteArray() })
+        session.testHookBeforeInstall = { session.clear() }
+        var ceremonyRan = false
+        try {
+            runTest { session.enrol { ceremonyRan = true } }
+            fail("installed a PIN clear() had already abandoned")
+        } catch (e: Fido2EnrolmentException) {
+            assertEquals(Fido2EnrolmentFailure.CANCELLED, e.failure)
+        }
+        assertFalse("the ceremony must never run with an abandoned PIN", ceremonyRan)
+        assertNull("the held PIN is gone, not installed", session.answer(PinRequest.Enter("fido2")))
+    }
+
+    @Test
     fun theLibrarysDescriptionIsMappedFieldByField() {
         val ffi = FfiAuthenticatorInfo(
             listOf("FIDO_2_0", "FIDO_2_1"), ByteArray(16) { it.toByte() }, FfiClientPinState.NOT_SET, 6u, true, null,

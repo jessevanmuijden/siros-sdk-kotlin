@@ -46,12 +46,18 @@ class Fido2Enrolment<T>(val value: T, val info: Fido2AuthenticatorInfo)
  * advisory until it has been checked on hardware. One instance serves one enrolment; [answer] may be called from another thread.
  *
  * PIN LIFETIME, STRUCTURALLY: every function below that ever holds a raw PIN buffer in a local variable while awaiting something
- * else (another [describe] call, the user confirming a chosen PIN) registers that buffer into [pendingBuffers] first ([register])
- * and removes it again once its own code has decided what becomes of it ([deregister]), then calls [refuseIfInvalidated] to check
- * whether [clear] ran meanwhile. [clear] wipes and forgets every buffer in [pendingBuffers] - and [held]'s - the instant it runs,
- * wherever in the flow that is, and sets [invalidated] for good; nothing that was already wiped by it is ever installed, compared
- * or otherwise acted on afterward. Adding a new suspension point that captures a PIN byte array only has to follow this same
- * register / do-the-suspending-call / deregister-then-refuseIfInvalidated shape, never a bespoke clear()-reachable field of its own.
+ * else (another [describe] call, the user confirming a chosen PIN) registers that buffer into [pendingBuffers] the instant it
+ * has one ([registerAndCheckInvalidated], which ALSO checks [invalidated] inside the same lock acquisition - a check and the
+ * act on its result must never be two separate critical sections, or [clear] can run in the gap between them and reach
+ * neither the not-yet-registered buffer nor the already-past check). The buffer then stays registered - nothing deregisters it
+ * early "to be safe" - all the way to whichever single point resolves what becomes of it: installed into [held] (that
+ * transfer and the final invalidation check are the SAME critical section too), handed further up the call stack to another
+ * function's own registerAndCheckInvalidated (harmless to register twice), or discarded ([deregisterDiscardAndCheckInvalidated]
+ * - restarting, an unsuitable re-description, a mismatched confirmation). [clear] wipes and forgets every buffer in
+ * [pendingBuffers] - and [held]'s - the instant it runs, wherever in the flow that is, and sets [invalidated] for good; nothing
+ * already wiped by it is ever installed, compared or otherwise acted on afterward. A new suspension point that captures a PIN
+ * byte array only has to follow this same register-and-check / do-the-suspending-call / resolve-and-check shape, with the
+ * check and the act on it always inside one lock, never a bespoke clear()-reachable field of its own.
  */
 class Fido2EnrolmentSession(
     private val describe: suspend () -> Fido2AuthenticatorInfo,
@@ -77,7 +83,7 @@ class Fido2EnrolmentSession(
      * Every raw PIN buffer currently alive in a local variable somewhere in this class WHILE a suspend call that does not involve
      * it is in flight - [enrol]'s `collected` racing the second [describe], [choose]'s `first` racing its confirm prompt - tracked
      * by reference (identity, not content) so [clear] can reach and wipe it from outside whichever call stack is holding it. See
-     * the class doc comment for the register/deregister/refuseIfInvalidated pattern every such site follows.
+     * the class doc comment for the register-and-check / resolve-and-check pattern every such site follows.
      */
     private val pendingBuffers = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<ByteArray, Boolean>())
 
@@ -87,23 +93,40 @@ class Fido2EnrolmentSession(
      */
     private var invalidated = false
 
-    private fun register(buf: ByteArray?) {
-        if (buf != null) synchronized(lock) { pendingBuffers += buf }
-    }
+    /**
+     * TEST-ONLY. Invoked, synchronously, once per loop iteration right before the install's own atomic check - the exact gap a
+     * non-atomic check-then-install (a real bug) used to leave open, too narrow to land reliably from a real concurrent
+     * thread. Null (the default) in production; a test sets it to call [clear] from here to prove the install still refuses.
+     */
+    internal var testHookBeforeInstall: (() -> Unit)? = null
 
-    private fun deregister(buf: ByteArray?) {
-        if (buf != null) synchronized(lock) { pendingBuffers -= buf }
+    /**
+     * Registers [buf] (if non-null) AND checks [invalidated] inside the SAME lock acquisition: a check and an act on its result
+     * must never be two separate critical sections, or [clear] can run in the gap between them and reach neither the buffer
+     * (not yet registered) nor this decision (already past the check). [buf] is wiped here, not by [clear], when it is already
+     * too late by the time this runs.
+     */
+    private fun registerAndCheckInvalidated(buf: ByteArray?, info: Fido2AuthenticatorInfo?) {
+        synchronized(lock) {
+            if (buf != null) pendingBuffers += buf
+            if (invalidated) {
+                buf?.fill(0)
+                throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+            }
+        }
     }
 
     /**
-     * Throws [Fido2EnrolmentFailure.CANCELLED] (wiping every one of [buffers], since none of them was in [pendingBuffers] for
-     * [clear] to have reached - the caller just [deregister]ed them) if [clear] ran since this buffer started being used. Every
-     * site that registers a buffer calls this right after deregistering it, before doing anything else with it.
+     * Removes [buf] from [pendingBuffers] and wipes it, UNCONDITIONALLY (the caller is discarding it regardless - a restart, a
+     * re-description that turned out unsuitable), then throws [Fido2EnrolmentFailure.CANCELLED] if [clear] ran while it was
+     * pending (it was already wiped by clear()'s own sweep in that case, since it stayed registered until this very call - the
+     * `fill(0)` here is then a harmless no-op): the loop must not keep asking the user for a key the host has abandoned.
      */
-    private fun refuseIfInvalidated(info: Fido2AuthenticatorInfo?, vararg buffers: ByteArray?) {
-        if (synchronized(lock) { invalidated }) {
-            buffers.forEach { it?.fill(0) }
-            throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+    private fun deregisterDiscardAndCheckInvalidated(buf: ByteArray?, info: Fido2AuthenticatorInfo?) {
+        synchronized(lock) {
+            if (buf != null) pendingBuffers -= buf
+            buf?.fill(0)
+            if (invalidated) throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
         }
     }
 
@@ -118,21 +141,21 @@ class Fido2EnrolmentSession(
         while (true) {
             refuseIfUnsuitable(info)
             val collected = collect(info)
-            register(collected)
-            refuseIfInvalidated(info, collected)
+            // Registered and checked atomically: see registerAndCheckInvalidated's doc comment for why this must not be two
+            // separate critical sections. `collected` stays registered (nothing deregisters it below) all the way to whichever
+            // of the three exits below resolves it - there is no point after this where it is both live and unprotected.
+            registerAndCheckInvalidated(collected, info)
             val fresh: Fido2AuthenticatorInfo
             try {
                 onSecondTap()
                 fresh = describe()
             } catch (e: Throwable) {
-                deregister(collected)
+                synchronized(lock) { collected?.let { pendingBuffers -= it } }
                 collected?.fill(0)
                 throw e
             }
-            deregister(collected)
-            refuseIfInvalidated(fresh, collected)
             if (!info.sameEnrolmentSituationAs(fresh)) {
-                collected?.fill(0)
+                deregisterDiscardAndCheckInvalidated(collected, fresh)
                 Timber.i("The security key presented differs from the one the PIN dialog was built for; asking again")
                 if (++restarts > MAX_RESTARTS) throw Fido2EnrolmentException(Fido2EnrolmentFailure.KEY_CHANGED, fresh)
                 info = fresh
@@ -141,10 +164,22 @@ class Fido2EnrolmentSession(
             try {
                 refuseIfUnsuitable(fresh)
             } catch (e: Fido2EnrolmentException) {
-                collected?.fill(0)
+                deregisterDiscardAndCheckInvalidated(collected, fresh)
                 throw e
             }
+            // Test-only seam: the exact gap a non-atomic check-then-install left open (a real bug, found by review: the
+            // narrow window between this point and the lock below is a handful of synchronous statements, too fast to land
+            // reliably from a real concurrent thread in a test). Null and never invoked outside tests.
+            testHookBeforeInstall?.invoke()
+            // The invalidation check and the transfer into `held` are the SAME critical section: clear() running anywhere up to
+            // and including this point either wipes `collected` here (it is still registered) and is caught by the check below,
+            // or - impossible, since both run under `lock` - interleaves with the install itself.
             synchronized(lock) {
+                collected?.let { pendingBuffers -= it }
+                if (invalidated) {
+                    collected?.fill(0)
+                    throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, fresh)
+                }
                 held?.pin?.fill(0)
                 held = collected?.let { Held(it, if (info.clientPin == Fido2PinState.NOT_SET) info.minPinLength else null) }
                 issued.clear()
@@ -255,25 +290,25 @@ class Fido2EnrolmentSession(
                 return@repeat
             }
             // `first` is complete and valid but not yet confirmed: alive here while the confirm prompt below awaits the user, so
-            // it is registered for clear() to reach - the same shape as enrol()'s `collected` around its own second describe() call.
-            register(first)
+            // it is registered for clear() to reach - the same shape as enrol()'s `collected` around its own second describe()
+            // call. Registered and checked atomically (see registerAndCheckInvalidated), and - on success - left registered
+            // when handed up to collect()'s caller: enrol() registers (a no-op, already there) and checks it again right away,
+            // so there is no gap between here and the one place that actually installs it.
+            registerAndCheckInvalidated(first, info)
             val again = try {
                 ask(PinRequest.Choose(pluginId, min, confirm = true, notice = null))
             } catch (e: Throwable) {
-                deregister(first)
+                synchronized(lock) { pendingBuffers -= first }
                 first.fill(0)
                 throw e
             } ?: run {
-                deregister(first)
-                first.fill(0)
+                deregisterDiscardAndCheckInvalidated(first, info)
                 throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
             }
-            deregister(first)
-            refuseIfInvalidated(info, first, again)
             val same = java.security.MessageDigest.isEqual(first, again)
             again.fill(0)
             if (same) return first
-            first.fill(0)
+            deregisterDiscardAndCheckInvalidated(first, info)
             notice = PinPromptNotice.MISMATCH
         }
         throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
