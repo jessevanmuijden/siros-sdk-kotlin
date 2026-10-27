@@ -34,12 +34,20 @@ class PresentationLinkLedger(
     @Synchronized
     fun admit(link: String, generation: Int = 0): Boolean {
         val now = clock()
-        seen.entries.removeAll { now - it.value.at >= ttlMillis }
+        prune(now)
         val key = digest(link)
         if (seen.containsKey(key)) return false
         seen[key] = Entry(inFlight = true, generation = generation, flowId = null, at = now)
         while (seen.size > capacity) seen.remove(seen.keys.first())
         return true
+    }
+
+    /**
+     * Answered entries expire [ttlMillis] after their answer; an entry still in flight lives [IN_FLIGHT_TTL_MILLIS] (a slow presentation
+     * must still be on record when it completes, but one nothing ever answers must not block its link for ever).
+     */
+    private fun prune(now: Long) {
+        seen.entries.removeAll { now - it.value.at >= (if (it.value.inFlight) maxOf(ttlMillis, IN_FLIGHT_TTL_MILLIS) else ttlMillis) }
     }
 
     /** The start of [link] was sent on connection [generation] (it may have changed while the wallet reconnected): records that, re-admitting the entry if a loss released it meanwhile. */
@@ -66,7 +74,16 @@ class PresentationLinkLedger(
     /** [link] was answered: it stays recorded for a full window from now. */
     @Synchronized
     fun markCompleted(link: String) {
-        seen[digest(link)]?.let { it.inFlight = false; it.at = clock() }
+        val key = digest(link)
+        val entry = seen[key]
+        if (entry != null) {
+            entry.inFlight = false
+            entry.at = clock()
+        } else {
+            // The start was evicted (capacity): the answer is still recorded, within the bound.
+            seen[key] = Entry(inFlight = false, generation = 0, flowId = null, at = clock())
+            while (seen.size > capacity) seen.remove(seen.keys.first())
+        }
     }
 
     /** The flow [flowId] failed, was lost or ended in a local failure before an answer: a retry of its link goes through. */
@@ -117,5 +134,8 @@ class PresentationLinkLedger(
     companion object {
         /** One minute: long enough for a page to re-fire the request on the way back, short enough that a deliberate retry is not blocked. */
         const val DEFAULT_TTL_MILLIS = 60_000L
+
+        /** How long an unanswered start stays on record: ten minutes. */
+        const val IN_FLIGHT_TTL_MILLIS = 10 * 60_000L
     }
 }

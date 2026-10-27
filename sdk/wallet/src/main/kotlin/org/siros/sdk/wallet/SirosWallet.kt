@@ -9501,10 +9501,6 @@ class SirosWallet private constructor(
         scope.launch {
             engine.flowErrors().collect { msg ->
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
-                msg.flowId?.let { fid ->
-                    engineSession?.let { presentationLinks?.associate(fid, it.connectionGeneration) }
-                    presentationLinks?.releaseFlow(fid)
-                }
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
                 // An error for a flow already ended locally as lost (one buffered before the loss): the app was told once, and a second
@@ -9523,6 +9519,11 @@ class SirosWallet private constructor(
                     return@collect
                 }
                 terminatedFlowIds.add(fid)
+                // Only an error that is acted on (not a late or ignored one) ends the presentation of THAT flow: its link is released.
+                if (msg.flowId != null) {
+                    engineSession?.let { presentationLinks?.associate(fid, it.connectionGeneration) }
+                    presentationLinks?.releaseFlow(fid)
+                }
                 selectionJobsByFlow.remove(fid)?.cancel()
                 flowConnectionGeneration.remove(fid)
                 stopZkSigning(fid, refuse = false)

@@ -15,8 +15,11 @@ class PresentationLinkLedgerTest {
         assertTrue(l.admit("openid4vp://?client_id=x&nonce=1"))
         assertFalse("redelivered", l.admit("openid4vp://?client_id=x&nonce=1"))
         assertTrue("a different link is a different request", l.admit("openid4vp://?client_id=x&nonce=2"))
+        l.markCompleted("openid4vp://?client_id=x&nonce=1")
         now += 60_001
-        assertTrue("after the window", l.admit("openid4vp://?client_id=x&nonce=1"))
+        assertTrue("an answered link, after its window", l.admit("openid4vp://?client_id=x&nonce=1"))
+        now += 10 * 60_000 + 1
+        assertTrue("an unanswered one is forgotten after ten minutes", l.admit("openid4vp://?client_id=x&nonce=2"))
     }
 
     @Test
@@ -96,5 +99,24 @@ class PresentationLinkLedgerTest {
         assertFalse("the duplicate is still ignored", l.admit("B", 2))
         l.releaseUpTo(2)
         assertTrue(l.admit("B", 2))
+    }
+
+    @Test
+    fun `an answer is recorded for its full window even when the start was pruned or evicted`() {
+        val l = ledger(capacity = 2)
+        l.admit("A", 1)
+        l.admit("B", 1); l.admit("C", 1) // A is evicted at capacity
+        l.markCompleted("A")
+        assertFalse("A's redelivery is a spent request", l.admit("A", 1))
+    }
+
+    @Test
+    fun `a slow presentation is still on record when it completes, past the answered window`() {
+        val l = ledger()
+        l.admit("A", 1); l.associate("fa", 1)
+        now += 3 * 60_000 // three minutes in flight
+        l.admit("B", 1) // prunes: A is still in flight, not expired
+        l.completeFlow("fa")
+        assertFalse("A was answered: its redelivery is ignored", l.admit("A", 1))
     }
 }
