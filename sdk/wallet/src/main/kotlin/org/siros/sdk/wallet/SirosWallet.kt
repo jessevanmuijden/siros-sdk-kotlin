@@ -412,7 +412,7 @@ class SirosWallet private constructor(
      */
     @Volatile
     internal var credentialSecretSeedSource: CredentialSecretSeedSource =
-        KeystoreSecretSeedSource(config.secretSeedNamespace) { id -> storedCredentialMetadata(id) }
+        KeystoreSecretSeedSource { id -> storedCredentialMetadata(id) }
 
     /** The delivered `metadata` of a stored credential. Never display it, log it or put it in a presentation. */
     internal suspend fun storedCredentialMetadata(id: Long): kotlinx.serialization.json.JsonArray? =
@@ -6078,10 +6078,9 @@ class SirosWallet private constructor(
         val verdict = DeliveredCredentialMetadata.check(
             response = opened ?: PlainDeliveredResponse(decoded.credentialMetadata),
             credentials = creds.map { DeliveredCredential(it.format, it.credential, it.notificationId) },
-            secretNamespace = config.secretSeedNamespace,
             canStoreSecret = keystoreCanHoldCredentialMetadata(),
             advertised = isSecretSeedAdvertised(decoded.credentialIssuer, wmpConfigurationId),
-            shape = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.shape ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+            shape = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.shape ?: org.siros.sdk.credentials.AuxiliaryDataV01,
             advertisement = auxiliarySelection(decoded.credentialIssuer, wmpConfigurationId)?.advertisement,
             holderCommitments = sentCommitments,
         )
@@ -6976,7 +6975,6 @@ class SirosWallet private constructor(
         count: Int,
         proofTypesSupported: Set<String>?,
         proofTypeHint: String?,
-        holderCommitments: List<String>? = null,
         credentialType: String? = null,
         credentialIssuer: String? = null,
         auxiliaryDataToIssuer: List<kotlinx.serialization.json.JsonObject>? = null,
@@ -6991,15 +6989,9 @@ class SirosWallet private constructor(
             else -> "jwt"
         }
         val auxiliarySlots = if (auxiliaryDataToIssuer.isNullOrEmpty()) emptyList() else {
-            if (!holderCommitments.isNullOrEmpty()) {
-                throw WalletException(
-                    "The request asks for holder commitments in two shapes at once",
-                    errorCode = "holder_commitment_unsupported",
-                )
-            }
             org.siros.sdk.credentials.AuxiliaryDataV01.slotsToAnswer(auxiliaryDataToIssuer)
         }
-        if (chosen == "attestation" && (!holderCommitments.isNullOrEmpty() || auxiliarySlots.isNotEmpty())) {
+        if (chosen == "attestation" && auxiliarySlots.isNotEmpty()) {
             // An attestation proof has no payload to carry the claim; answering
             // without it would be refused by the issuer after the user has waited.
             throw WalletException(
@@ -7022,7 +7014,6 @@ class SirosWallet private constructor(
                 // may have started a hardware operation). Never logged.
                 val witness = effectiveKeystore as? org.siros.sdk.keystore.HolderWitnessSource
                 val derive = witness?.let { w -> { type: String, issuer: String -> w.privateSeedCommitment(type, issuer) } }
-                val commitmentClaims = HolderCommitments.proofClaims(holderCommitments, credentialType, credentialIssuer, derive)
                 // Credential Auxiliary Data v0.1: ONE value, computed once, goes into every proof of the request.
                 val auxiliaryClaims = if (auxiliarySlots.isEmpty()) emptyMap() else {
                     // The request's credential type and issuer string when it carries them; the offer's otherwise.
@@ -7059,28 +7050,15 @@ class SirosWallet private constructor(
                         val keyId = extractProofKeyId(proofJwt)
                         return@map GeneratedProofData(proofType = "jwt", jwt = proofJwt, attestedKeyIds = keyId?.let { listOf(it) })
                     }
-                    // The four-argument form when there is nothing to add: a keystore
-                    // that predates extra claims keeps working for every issuer that
-                    // asked for none.
-                    val proofJwt = if (commitmentClaims.isEmpty()) {
-                        effectiveKeystore.generateProof(
-                            audience = audience,
-                            nonce = nonce,
-                            freshKey = count > 1,
-                            // `audience` is the credential issuer, which is what
-                            // decides whether this proof names the holder key by
-                            // did:jwk (DIIP) or carries it (HAIP).
-                            holderBinding = holderBindingFor(audience),
-                        )
-                    } else {
-                        effectiveKeystore.generateProof(
-                            audience = audience,
-                            nonce = nonce,
-                            freshKey = count > 1,
-                            holderBinding = holderBindingFor(audience),
-                            extraClaims = commitmentClaims,
-                        )
-                    }
+                    val proofJwt = effectiveKeystore.generateProof(
+                        audience = audience,
+                        nonce = nonce,
+                        freshKey = count > 1,
+                        // `audience` is the credential issuer, which is what
+                        // decides whether this proof names the holder key by
+                        // did:jwk (DIIP) or carries it (HAIP).
+                        holderBinding = holderBindingFor(audience),
+                    )
                     val keyId = extractProofKeyId(proofJwt)
                     GeneratedProofData(proofType = "jwt", jwt = proofJwt, attestedKeyIds = keyId?.let { listOf(it) })
                 }
@@ -7847,7 +7825,6 @@ class SirosWallet private constructor(
                     count = count,
                     proofTypesSupported = params.proofTypesSupported?.keys,
                     proofTypeHint = params.proofType,
-                    holderCommitments = params.holderCommitments,
                     credentialType = params.credentialType,
                     credentialIssuer = params.credentialIssuer,
                     auxiliaryDataToIssuer = params.auxiliaryDataToIssuer,
@@ -8637,7 +8614,6 @@ class SirosWallet private constructor(
                                 count = count,
                                 proofTypesSupported = params?.proofTypesSupported?.keys,
                                 proofTypeHint = params?.proofType,
-                                holderCommitments = params?.holderCommitments,
                                 credentialType = params?.credentialType,
                                 credentialIssuer = params?.credentialIssuer,
                                 auxiliaryDataToIssuer = params?.auxiliaryDataToIssuer,
@@ -8651,7 +8627,7 @@ class SirosWallet private constructor(
                 // the first entry's list (as this used to) silently dropped every
                 // index past 0 for a "jwt" batch of more than one credential.
                 activeAttestedKeyIds = generated.flatMap { it.attestedKeyIds.orEmpty() }.ifEmpty { null }
-                            if (!params?.holderCommitments.isNullOrEmpty() || !params?.auxiliaryDataToIssuer.isNullOrEmpty()) {
+                            if (!params?.auxiliaryDataToIssuer.isNullOrEmpty()) {
                                 (params?.credentialIssuer?.takeIf { it.isNotEmpty() } ?: activeOffer?.credentialIssuerIdentifier)?.let { pscIssuerByFlow[msg.flowId] = it }
                             }
                             val proofs = generated.map {
@@ -9262,11 +9238,10 @@ class SirosWallet private constructor(
                 val deliveredVerdict = DeliveredCredentialMetadata.check(
                     response = openedResponse,
                     credentials = msg.credentials.orEmpty().map { DeliveredCredential(it.format, it.credential, it.notificationId) },
-                    secretNamespace = config.secretSeedNamespace,
                     canStoreSecret = canStoreDelivered,
                     advertised = isSecretSeedAdvertised(msg.credentialIssuer, msg.selectedCredentialConfigurationId),
                     shape = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.shape
-                        ?: org.siros.sdk.credentials.LegacyOrgSirosShape,
+                        ?: org.siros.sdk.credentials.AuxiliaryDataV01,
                     advertisement = auxiliarySelection(msg.credentialIssuer, msg.selectedCredentialConfigurationId)?.advertisement,
                     holderCommitments = sentCommitments,
                 )
@@ -11181,9 +11156,8 @@ class SirosWallet private constructor(
      * failure for an issuance the user may still be completing.
      */
     /**
-     * Routes the engine's `PSC_CONFLICT` flow error (the issuer already holds a
-     * different pseudonym commitment for this subject) to the typed
-     * [WalletEventListener.onPseudonymCommitmentConflict]. Returns whether
+     * Routes the engine's `AUXILIARY_DATA_CONFLICT` flow error and an issuer's `auxiliary_data: ` refusal to the typed
+     * [WalletEventListener.onAuxiliaryDataConflict] / [WalletEventListener.onAuxiliaryDataRefused]. Returns whether
      * [code] was that error, so the caller does not also report a generic one.
      * Nothing was issued, so there is nothing to roll back.
      */
@@ -11196,9 +11170,7 @@ class SirosWallet private constructor(
             eventListener?.onAuxiliaryDataConflict(flowId, AuxiliaryDataConflictException(message.orEmpty()))
             return true
         }
-        if (code != PseudonymCommitmentConflictException.FLOW_ERROR_CODE) return false
-        eventListener?.onPseudonymCommitmentConflict(flowId, PseudonymCommitmentConflictException(message.orEmpty()))
-        return true
+        return false
     }
 
     private fun reportNoMatchingCredential(presentationFlowId: String, error: FlowError) {

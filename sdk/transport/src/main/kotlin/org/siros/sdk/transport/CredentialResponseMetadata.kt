@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * in the response.
  *
  * This is NOT the display metadata of the credential store: it is the object the issuer's response delivers,
- * which is shared with display data and may carry the issuer-delivered `org.siros.secret_seed`. [members] is kept
+ * which is shared with display data and may carry the issuer-delivered `auxiliary_data`. [members] is kept
  * as received, every member verbatim (unknown ones included, in order), so the receipt can store each exactly.
  * A consumer interprets only the members it knows.
  *
@@ -33,18 +33,24 @@ import kotlinx.serialization.json.JsonPrimitive
 class ResponseCredentialMetadata(
     val members: JsonObject = JsonObject(emptyMap()),
     val malformed: Boolean = false,
+    /**
+     * A member of a REMOVED secret-bearing shape was present in the object the engine relayed and was dropped by
+     * [DisplayOnlyCredentialMetadataSerializer]: only that it was there is kept, never its value. A consumer refuses the
+     * response ([org.siros.sdk.credentials.LegacySecretMembers]); [members] never holds it.
+     */
+    val legacyMemberPresent: Boolean = false,
 ) {
     override fun toString() = "ResponseCredentialMetadata(${if (malformed) "malformed" else "redacted"})"
 
-    override fun equals(other: Any?) = other is ResponseCredentialMetadata && malformed == other.malformed && members == other.members
+    override fun equals(other: Any?) = other is ResponseCredentialMetadata && malformed == other.malformed && legacyMemberPresent == other.legacyMemberPresent && members == other.members
 
-    override fun hashCode() = members.hashCode() * 31 + malformed.hashCode()
+    override fun hashCode() = (members.hashCode() * 31 + malformed.hashCode()) * 31 + legacyMemberPresent.hashCode()
 }
 
 /**
  * Decodes the response-level `credential_metadata` a PLAIN issuer response relays on `flow_complete`, keeping only the
  * display-only members [DISPLAY_MEMBERS] (`display`, `claims`) and ignoring every other member. An extension member (a
- * `org.siros.secret_seed`, say) is never taken from the engine's frame: it is read only from a response the wallet
+ * `auxiliary_data`, say) is never taken from the engine's frame: it is read only from a response the wallet
  * decrypted itself. Anything but a JSON object is the malformed placeholder, as in [ResponseCredentialMetadataSerializer].
  */
 internal object DisplayOnlyCredentialMetadataSerializer : KSerializer<ResponseCredentialMetadata> {
@@ -56,7 +62,10 @@ internal object DisplayOnlyCredentialMetadataSerializer : KSerializer<ResponseCr
         val element = (decoder as? JsonDecoder ?: throw SerializationException("credential metadata decodes from JSON only"))
             .decodeJsonElement()
         val obj = element as? JsonObject ?: return ResponseCredentialMetadata(malformed = true)
-        return ResponseCredentialMetadata(JsonObject(obj.filterKeys { it in DISPLAY_MEMBERS }))
+        return ResponseCredentialMetadata(
+            JsonObject(obj.filterKeys { it in DISPLAY_MEMBERS }),
+            legacyMemberPresent = org.siros.sdk.credentials.LegacySecretMembers.carriedBy(obj),
+        )
     }
 
     override fun serialize(encoder: Encoder, value: ResponseCredentialMetadata) = ResponseCredentialMetadataSerializer.serialize(encoder, value)

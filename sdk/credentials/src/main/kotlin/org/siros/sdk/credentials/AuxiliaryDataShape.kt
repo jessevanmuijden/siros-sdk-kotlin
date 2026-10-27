@@ -72,7 +72,7 @@ interface AuxiliaryDataShape {
      * Which of [deliveries] the wallet must check against the credential (and keep as its secret): for the credential type whose
      * designated namespace is [secretNamespace]. Null when a delivery the shape requires is absent.
      */
-    fun deliveriesToVerify(deliveries: List<SecretDelivery>, secretNamespace: String, advertised: AuxiliaryAdvertisement?): List<SecretDelivery>?
+    fun deliveriesToVerify(deliveries: List<SecretDelivery>, advertised: AuxiliaryAdvertisement?): List<SecretDelivery>?
 
     /**
      * The commitment [delivery] must open, read from the issued [credential] of [format]: the credential's own claim. Null when the
@@ -90,7 +90,7 @@ interface AuxiliaryDataShape {
 /** The registry of adapters and the rule for choosing one. */
 object AuxiliaryDataShapes {
     /** Every adapter this SDK knows, in no priority: a configuration may advertise exactly one of them. */
-    val all: List<AuxiliaryDataShape> get() = listOf(LegacyOrgSirosShape, AuxiliaryDataV01)
+    val all: List<AuxiliaryDataShape> get() = listOf(AuxiliaryDataV01)
 
     /**
      * The adapter for [config]: the one whose advertisement it carries. A configuration that advertises more than one shape,
@@ -105,60 +105,5 @@ object AuxiliaryDataShapes {
             1 -> selected.single()
             else -> AuxiliarySelection.Malformed
         }
-    }
-}
-
-/**
- * The legacy shape (privatedata-spec 5A): the response `credential_metadata` member [SecretSeedDelivery.MEMBER] maps a
- * namespace to 32 lowercase hex characters; the advertisement is the same member with `{"namespaces": [...]}`; the holder
- * pseudonym commitment goes into the proof as the claim [PSC_CLAIM] (base64url, 32 bytes). Normalised: a delivery's path is
- * `[namespace]`, alg `sha-256`.
- */
-object LegacyOrgSirosShape : AuxiliaryDataShape {
-    override val id = "org.siros.legacy"
-
-    /** The proof claim carrying the `psc`. */
-    const val PSC_CLAIM = "org.siros.psc"
-    const val ALG = "sha-256"
-
-    override fun advertisement(config: CredentialConfiguration): AuxiliarySelection =
-        when (val a = SecretSeedDelivery.classifyAdvertisement(config.credentialMetadata?.secretSeed)) {
-            SecretSeedDelivery.Advertisement.None -> AuxiliarySelection.None
-            SecretSeedDelivery.Advertisement.Malformed -> AuxiliarySelection.Malformed
-            is SecretSeedDelivery.Advertisement.Valid ->
-                AuxiliarySelection.Selected(this, AuxiliaryAdvertisement(a.namespaces.map { AuxiliaryAdvertisement.Slot(listOf(it), ALG) }, emptyList()))
-        }
-
-    override fun carriesSecret(metadata: JsonObject): Boolean = SecretSeedDelivery.MEMBER in metadata
-
-    override fun parseDeliveries(metadata: JsonObject): AuxiliaryParse {
-        val member = metadata[SecretSeedDelivery.MEMBER] ?: return AuxiliaryParse.Parsed(emptyList())
-        val seeds = SecretSeedDelivery.parseDelivery(member) ?: return AuxiliaryParse.Malformed
-        val out = ArrayList<SecretDelivery>(seeds.size)
-        for ((ns, hex) in seeds) {
-            val bytes = SecretSeedCommitment.seedFromHex(hex) ?: run { out.forEach { it.bytes.fill(0) }; return AuxiliaryParse.Malformed }
-            out += SecretDelivery(listOf(ns), ALG, bytes)
-        }
-        return AuxiliaryParse.Parsed(out)
-    }
-
-    override fun deliveriesToVerify(deliveries: List<SecretDelivery>, secretNamespace: String, advertised: AuxiliaryAdvertisement?): List<SecretDelivery>? =
-        deliveries.firstOrNull { it.path == listOf(secretNamespace) }?.let { listOf(it) }
-
-    override fun commitmentOf(format: String, credential: String, delivery: SecretDelivery): ByteArray? = when {
-        format.equals("mso_mdoc", ignoreCase = true) -> SecretSeedCommitment.sscOfMdoc(credential)
-        format.contains("sd-jwt", ignoreCase = true) -> SecretSeedCommitment.sscOfSdJwt(credential)
-        else -> null
-    }
-
-    // Raw removal of this shape's own member: SecretSeedDelivery.stripped() composes every shape and must not recurse here.
-    override fun stripFromMetadata(metadata: JsonObject): JsonObject = JsonObject(metadata - SecretSeedDelivery.MEMBER)
-
-    override fun placeInProof(commitments: List<HolderCommitment>): Map<String, JsonElement> {
-        if (commitments.isEmpty()) return emptyMap()
-        // One psc, in one claim: anything else this shape cannot express is refused rather than dropped.
-        val psc = commitments.singleOrNull()?.takeIf { it.path == listOf("psc") && it.alg == ALG }
-            ?: throw WalletException("The legacy shape can carry only the psc commitment", errorCode = "holder_commitment_unsupported")
-        return mapOf(PSC_CLAIM to kotlinx.serialization.json.JsonPrimitive(java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(psc.commitment)))
     }
 }
