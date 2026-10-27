@@ -240,7 +240,14 @@ class Ts11RegistryClient(
 
     private suspend fun parseAndPaginate(resolvedUrl: String, firstBody: String): SourceResult? {
         if (looksLikeAllCredentialsRegistryResponse(firstBody)) {
-            return parseRegistryResponse(resolvedUrl, firstBody)?.let { SourceResult(it, complete = true) }
+            val entries = parseRegistryResponse(resolvedUrl, firstBody) ?: return null
+            // A response with fewer entries than it declares (`total`) is a PARTIAL registry: not complete.
+            val declared = try {
+                json.decodeFromString(Ts11RegistryWireResponse.serializer(), firstBody).total
+            } catch (e: Exception) {
+                0
+            }
+            return SourceResult(entries, complete = declared <= 0 || entries.size >= declared)
         }
         var complete = true
 
@@ -250,6 +257,9 @@ class Ts11RegistryClient(
 
         while (true) {
             val page = try {
+                // `{}` or an error object decodes with defaults: a page is a page only if it carries `data` or `schemas`.
+                val obj = json.parseToJsonElement(currentBody).jsonObject
+                require("data" in obj || "schemas" in obj) { "not a schemas page" }
                 json.decodeFromString(Ts11SchemasWireResponse.serializer(), currentBody)
             } catch (e: Exception) {
                 if (pageCount == 0) {

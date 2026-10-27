@@ -149,4 +149,30 @@ class Ts11CredentialTierCatalogTest {
         )
         assertEquals(CatalogTier.Unavailable, catalog.tierFor("pid-schema"))
     }
+
+    @Test
+    fun `a registry json response with fewer entries than it declares is incomplete and never replaces a snapshot`() = runTest {
+        val f = Fixture(page(entry("pid", "iso_18045_high")))
+        assertEquals(CatalogTier.Known("iso_18045_high"), f.catalog.tierFor("pid"))
+        // the all-credentials shape: it declares 2 entries and returns only a basic-tier one
+        f.body = """{"credentials":[{"id":"pid","attestationLoS":"iso_18045_basic"}],"total":2}"""
+        f.now += 2000
+        assertEquals("the partial answer is not the registry's state", CatalogTier.Known("iso_18045_high"), f.catalog.tierFor("pid"))
+        f.now += 9000
+        assertEquals("and did not renew the snapshot", CatalogTier.Unavailable, f.catalog.tierFor("pid"))
+    }
+
+    @Test
+    fun `a later page that is an empty object or an error object makes the answer incomplete`() = runTest {
+        for (bad in listOf("{}", """{"error":"upstream failed"}""")) {
+            val r = Paged(firstPage(entry("pid", "iso_18045_high")), secondPage(entry("other", "iso_18045_basic")))
+            assertEquals(CatalogTier.Known("iso_18045_high"), r.catalog.tierFor("pid"))
+            r.first = firstPage(entry("pid", "iso_18045_basic"))
+            r.second = bad
+            r.now += 2000
+            assertEquals("for $bad: the previous snapshot is kept", CatalogTier.Known("iso_18045_high"), r.catalog.tierFor("pid"))
+            r.now += 9000
+            assertEquals("for $bad: not renewed", CatalogTier.Unavailable, r.catalog.tierFor("pid"))
+        }
+    }
 }

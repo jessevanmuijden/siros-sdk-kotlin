@@ -5068,6 +5068,10 @@ class SirosWallet private constructor(
                 // too (the token request - the one that actually needs it for
                 // redirect-based authorization_code issuers - only ever happens
                 // via this path). See handleRequestAttestation.
+                // The resumed start is registered on ITS connection: if that socket is lost before the first reply, no flow id exists
+                // for any sweep, so the connection-loss handlers release the guard through this.
+                resumeStartGeneration = engine.connectionGeneration
+                resumeStartFlowId = flowId
                 engine.resumeIssuance(
                     offer = pending.offerJson,
                     redirectUri = pending.redirectUri,
@@ -5607,7 +5611,35 @@ class SirosWallet private constructor(
     /** New flow id -> the flow id it resumed; logging only. */
     private val flowContinuations: MutableMap<String, String>? = java.util.concurrent.ConcurrentHashMap()
 
+    /** The connection generation a resumed authorization's `flow_start` was sent on, until the engine's first reply (null otherwise). */
+    private var resumeStartGeneration: Int? = null
+    private var resumeStartFlowId: String? = null
+
+    /**
+     * A resumed start whose connection is gone before any reply can never be answered: its issuance guard is released and the app is told
+     * (once) that the flow it was waiting on is lost. [lostUpTo] is the newest connection generation that is gone.
+     */
+    private fun endResumedStartLost(lostUpTo: Int) {
+        val generation = resumeStartGeneration ?: return
+        if (generation > lostUpTo) return
+        val flowId = resumeStartFlowId
+        resumeStartGeneration = null
+        resumeStartFlowId = null
+        flowId?.let { resumingFlowIds?.remove(it) }
+        resetIssuanceGuards()
+        if (flowId != null) eventListener?.onFlowError(flowId, FLOW_LOST_MESSAGE)
+        val current = _state.value
+        if (current is WalletState.FlowActive && (current.isPending || current.flowId == flowId)) {
+            _state.value = readyState(current.userId, current.displayName, current.credentials)
+        }
+    }
+
     private fun noteFlowId(flowId: String) {
+        // The engine's first reply for the resumed start: it is on record now (as a flow), no longer a pending start.
+        if (resumeStartGeneration != null && resumingFlowIds?.peek() != null) {
+            resumeStartGeneration = null
+            resumeStartFlowId = null
+        }
         // The first event of a flow tells which in-flight presentation link it belongs to (by the connection it arrived on).
         engineSession?.let { presentationLinks?.associate(flowId, it.connectionGeneration) }
         val resuming = resumingFlowIds ?: return
@@ -7289,9 +7321,9 @@ class SirosWallet private constructor(
         } catch (e: Exception) {
             null
         }
-        val vctm = offer?.let {
+        val vctmDocument = offer?.let {
             try {
-                vctmFetcher.fetch(
+                vctmFetcher.fetchDocument(
                     issuerUrl = it.credentialIssuerIdentifier,
                     scope = it.credentialConfigurationId,
                     // The offer's type: with it the lookup also resolves by type (registry, well-known, cache), as a fresh issuance does.
@@ -7317,7 +7349,10 @@ class SirosWallet private constructor(
             return true
         }
         activeOffer = offer
-        activeVctm = vctm
+        // BOTH the raw document and its parsed VCTM, as a fresh issuance publishes them: the integrity check of the delivered credential
+        // needs the document, and a parsed VCTM with no document would let an unresolvable pin pass as "no metadata applies".
+        activeVctmDocument = vctmDocument
+        activeVctm = vctmDocument?.vctm
         return true
     }
 
@@ -7673,6 +7708,7 @@ class SirosWallet private constructor(
         active?.let { ids.add(it) }
         ids.addAll(selectionJobsByFlow.keys)
         ids.forEach { endFlowLost(it) }
+        engineSession?.let { endResumedStartLost(it.connectionGeneration) }
     }
 
     /** Flows first seen on a connection older than [generation] are gone with it. */
@@ -7690,6 +7726,8 @@ class SirosWallet private constructor(
         presentationLinks?.releaseOlderThan(generation)
         // The engine keeps a flow only as long as its session: the flows of an older socket can never complete.
         endFlowsOfOlderConnections(generation)
+        // After the sweep (which spares a flow whose resumption is under way), so the lost resumption is reported exactly once.
+        endResumedStartLost(generation - 1)
         endSentPendingStartLost(generation)
         blindIssuance.markStaleBefore(generation)
         scope.launch {

@@ -3683,14 +3683,52 @@ class SirosWalletTest {
     }
 
     @Test
-    fun resumingAfterTheBrowser_theTypeMetadataLookupGetsTheOffersVct() = runTest(dispatcher) {
+    fun resumingAfterTheBrowser_theTypeMetadataLookupGetsTheOffersVct_andBothTheDocumentAndTheVctmArePublished() = runTest(dispatcher) {
         val c = resumeCtx(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer", vct = "urn:eudi:pid:1"))
         val fetcher = mockk<org.siros.sdk.credentials.VctmFetcher>()
-        coEvery { fetcher.fetch(any(), any(), any(), any()) } returns null
+        val doc = org.siros.sdk.credentials.VctmDocument(raw = """{"vct":"urn:eudi:pid:1"}""", vctm = org.siros.sdk.credentials.Vctm(vct = "urn:eudi:pid:1"))
+        coEvery { fetcher.fetchDocument(any(), any(), any(), any(), any()) } returns doc
         setField(c.wallet, "vctmFetcher", fetcher)
         c.wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
         advanceUntilIdle()
-        coVerify { fetcher.fetch(any(), "pid", "urn:eudi:pid:1", any()) }
+        coVerify { fetcher.fetchDocument(any(), "pid", "urn:eudi:pid:1", any(), any()) }
+        assertEquals("the raw document is published too (verifyVctIntegrity needs it)", doc, getField(c.wallet, "activeVctmDocument"))
+        assertEquals(doc.vctm, getField(c.wallet, "activeVctm"))
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aConnectionLostBeforeTheFirstReplyReleasesTheIssuanceGuard() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(progressFlow = progressFlow, generations = generations)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        wallet.offerResolveHook = { _ -> Pair(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer")) { true } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progressFlow)
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+        verify(exactly = 1) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        assertEquals("the resume owns the issuance while it is pending", true, getField(wallet, "issuanceInFlight"))
+
+        // the socket the resume was sent on is replaced before the engine replied: nothing can ever answer it
+        generations.value = engine.connectionGeneration + 1
+        advanceUntilIdle()
+
+        assertEquals("the guard is released", false, getField(wallet, "issuanceInFlight"))
+        verify(exactly = 1) { listener.onFlowError("flow-auth", any(), any()) }
     }
 
     @Test
