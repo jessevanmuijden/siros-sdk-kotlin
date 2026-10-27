@@ -8127,14 +8127,29 @@ class SirosWalletTest {
         ).also { it.connectionGeneration = engineGeneration.get() }) // stamped by the session on receipt, as in production
     }
 
-    private fun redirectSign(thumbprint: String? = redirectThumbprint, audience: String = redirectClientId, responseUri: String? = "https://rp.example/response", creds: List<String> = listOf("1"), flow: String = "f1", messageId: String = "m1") =
+    /** The verifier's response-encryption key of the default [redirectSign]: a zkp_req request is only answered signed and encrypted. */
+    private val redirectKey by lazy { verifierKey() }
+    private val redirectKeyThumbprint by lazy { redirectKey.computeThumbprint().toString() }
+
+    private fun redirectSign(thumbprint: String? = null, audience: String = redirectClientId, responseUri: String? = "https://rp.example/response", creds: List<String> = listOf("1"), flow: String = "f1", messageId: String = "m1") =
         SignRequestMessage(
             flowId = flow, messageId = messageId, action = "sign_presentation",
             params = SignRequestParams(
-                audience = audience, nonce = "n-redirect", responseUri = responseUri, verifierJwkThumbprint = thumbprint,
+                audience = audience, nonce = "n-redirect", responseUri = responseUri, verifierJwkThumbprint = thumbprint ?: redirectKeyThumbprint,
                 credentialsToInclude = creds.map { org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "q", credentialId = it) },
+                responseEncryption = org.siros.sdk.transport.ResponseEncryptionRequest(
+                    jwk = Json.parseToJsonElement(redirectKey.toPublicJWK().toJSONString()).jsonObject, alg = "ECDH-ES", enc = "A128GCM",
+                ),
+                state = "st-1",
+                verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = redirectClientId, responseMode = "direct_post.jwt", signed = true, signatureVerification = "verified"),
             ),
         )
+
+    /** The `vp_token` of the JARM response a zkp_req answer carries (the engine only relays the ciphertext). */
+    private fun jarmVpToken(jwe: String): JsonObject {
+        val parsed = com.nimbusds.jose.JWEObject.parse(jwe).also { it.decrypt(com.nimbusds.jose.crypto.ECDHDecrypter(redirectKey)) }
+        return Json.parseToJsonElement(parsed.payload.toString()).jsonObject["vp_token"]!!.jsonObject
+    }
 
     @Test
     fun circuitZkRedirect_aZkpReqRequestRelayedByTheEngine_isMatchedProvedAndAnsweredWithTheCborPresentation() = runTest(dispatcher) {
@@ -8157,8 +8172,8 @@ class SirosWalletTest {
         advanceUntilIdle()
 
         val vp = slot<String>()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
-        val token = Json.parseToJsonElement(vp.captured).jsonObject
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(vp), messageId = "m1") }
+        val token = jarmVpToken(vp.captured)
         assertEquals(setOf("q"), token.keys)
         val decoded = CzkDecoded(token["q"]!!.jsonArray.single().jsonPrimitive.content)
         assertEquals(
@@ -8167,7 +8182,7 @@ class SirosWalletTest {
         )
         // The proof is bound to the redirect OpenID4VPHandover over [client id, nonce, thumbprint, response_uri].
         org.junit.Assert.assertArrayEquals(
-            org.siros.sdk.keystore.MdocDeviceResponseBuilder.buildCircuitZkRedirectSessionTranscript(redirectClientId, "n-redirect", "https://rp.example/response", redirectThumbprint),
+            org.siros.sdk.keystore.MdocDeviceResponseBuilder.buildCircuitZkRedirectSessionTranscript(redirectClientId, "n-redirect", "https://rp.example/response", redirectKeyThumbprint),
             e.s.prover.lastInput!!.sessionTranscript,
         )
         // One consent, naming the verifier; the history records a ZK proof; the flow is not cancelled.
@@ -8278,6 +8293,53 @@ class SirosWalletTest {
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
     }
 
+    private suspend fun TestScope.assertCircuitZkRefused(msg: SignRequestMessage, step: String) {
+        val e = engineCzk()
+        e.matchOnce()
+        advanceUntilIdle()
+        e.sign.emit(msg)
+        advanceUntilIdle()
+        verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", step) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
+        // Refused before anything is proved or asked of the user.
+        assertTrue(e.s.consents.isEmpty())
+        assertTrue(e.s.history.isEmpty())
+    }
+
+    @Test
+    fun circuitZkRedirect_anUnsignedRequest_isRefusedBeforeAnythingIsProved() = runTest(dispatcher) {
+        val m = redirectSignEncrypted(verifierKey())
+        assertCircuitZkRefused(
+            m.copy(params = m.params.copy(verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "x509_san_dns:rp.example", responseMode = "direct_post.jwt", signed = false, signatureVerification = "none"))),
+            "unsigned-request",
+        )
+    }
+
+    @Test
+    fun circuitZkRedirect_aSignedFlagWithoutAVerifiedSignature_isRefused() = runTest(dispatcher) {
+        val m = redirectSignEncrypted(verifierKey())
+        assertCircuitZkRefused(
+            m.copy(params = m.params.copy(verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "x509_san_dns:rp.example", responseMode = "direct_post.jwt", signed = true, signatureVerification = "deferred"))),
+            "unsigned-request",
+        )
+    }
+
+    @Test
+    fun circuitZkRedirect_aMissingVerifiedRequest_countsAsUnsigned_failClosed() = runTest(dispatcher) {
+        val m = redirectSignEncrypted(verifierKey())
+        assertCircuitZkRefused(m.copy(params = m.params.copy(verifiedRequest = null)), "unsigned-request")
+    }
+
+    @Test
+    fun circuitZkRedirect_aSignedRequestWithAPlainResponse_isRefused() = runTest(dispatcher) {
+        val m = redirectSign()
+        assertCircuitZkRefused(
+            m.copy(params = m.params.copy(responseEncryption = null, verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "x509_san_dns:rp.example", responseMode = "direct_post", signed = true, signatureVerification = "verified"))),
+            "response-not-encrypted",
+        )
+    }
+
     @Test
     fun theSessionTranscriptThumbprintOfADirectPostJwtRequestComesFromTheEncryptionKey_aMismatchIsRefused() {
         val wallet = newWallet()
@@ -8360,6 +8422,7 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
     }
 
@@ -8374,6 +8437,7 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", "response-encryption") }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
     }
 
     @Test
@@ -8756,8 +8820,8 @@ class SirosWalletTest {
         })
         advanceUntilIdle()
         val vp = slot<String>()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
-        assertEquals(setOf("q1", "q2"), Json.parseToJsonElement(vp.captured).jsonObject.keys)
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(vp), messageId = "m1") }
+        assertEquals(setOf("q1", "q2"), jarmVpToken(vp.captured).keys)
         // The prover got credential 2 for q1 and credential 1 for q2: tell them apart by the birth dates they hold.
         fun holds(input: org.siros.sdk.keystore.CircuitZkProveInput, birth: String) = String(input.credentialBytes, Charsets.ISO_8859_1).contains(birth)
         assertEquals(2, e.s.prover.inputs.size)
@@ -8786,7 +8850,7 @@ class SirosWalletTest {
         // q1 and q2 are answered by credential 1, q3 by credential 2: three queries, two distinct credentials.
         e.sign.emit(redirectSign().withRefs(refs("q1" to "1", "q2" to "1", "q3" to "2")))
         advanceUntilIdle()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
         assertEquals(3, e.s.prover.inputs.size)
         assertTrue(holds(e.s.prover.inputs[0], "2000-06-15"))
         assertTrue(holds(e.s.prover.inputs[1], "2000-06-15"))
@@ -8801,6 +8865,7 @@ class SirosWalletTest {
         e.sign.emit(redirectSign().withRefs(refs("q1" to "1")))
         advanceUntilIdle()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
         // Exactly one SIGN_REFUSED answering the sign_request (message_id echoed); no decline action, no vp_token.
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
@@ -8824,7 +8889,7 @@ class SirosWalletTest {
             // The sign references are the ones the consent emitted, not fabricated ones.
             e.sign.emit(redirectSign().withRefs(refs(*expected.toTypedArray())))
             advanceUntilIdle()
-            verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+            verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
             assertEquals(name, 2, e.s.prover.calls)
         }
     }
@@ -8861,7 +8926,7 @@ class SirosWalletTest {
         advanceUntilIdle()
         e.sign.emit(redirectSign())
         advanceUntilIdle()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
         assertEquals(1, e.s.prover.calls)
     }
 
@@ -8876,8 +8941,8 @@ class SirosWalletTest {
         e.sign.emit(redirectSign())
         advanceUntilIdle()
         val vp = slot<String>()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = capture(vp), messageId = "m1") }
-        val viaEngine = CzkDecoded(Json.parseToJsonElement(vp.captured).jsonObject["q"]!!.jsonArray.single().jsonPrimitive.content).results["n"]
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = capture(vp), messageId = "m1") }
+        val viaEngine = CzkDecoded(jarmVpToken(vp.captured)["q"]!!.jsonArray.single().jsonPrimitive.content).results["n"]
         val viaDcApi = czkDecoded(czkRun(czkSetup(trust = czkIds("x509_san_dns" to "rp.example")), czkRequest()).responseJson).results["n"]
         assertEquals(org.siros.sdk.credentials.ResultValue.Pseudonym(czkExpectedPseudonym("x509_san_dns:rp.example")), viaDcApi)
         assertEquals(viaDcApi, viaEngine)
@@ -8896,6 +8961,7 @@ class SirosWalletTest {
         gate.complete(true)
         runCurrent()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
         assertTrue(e.s.history.isEmpty())
     }
@@ -8913,6 +8979,7 @@ class SirosWalletTest {
         gate.complete(true)
         runCurrent()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
         assertTrue(e.s.history.isEmpty())
     }
@@ -8934,6 +9001,7 @@ class SirosWalletTest {
         advanceUntilIdle()
         assertEquals(1, e.s.prover.calls)
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
     }
 
     @Test
@@ -8953,6 +9021,7 @@ class SirosWalletTest {
         assertTrue("the DC API request must not wait for the stale dialog", dcApi.isCompleted)
         assertEquals(1, e.s.prover.calls)
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
     }
 
     @Test
@@ -8970,7 +9039,7 @@ class SirosWalletTest {
         runCurrent()
         gate.complete(true)
         runCurrent()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
         // The DC API request found the single copy spent.
         assertTrue(dcApi.await().exceptionOrNull() is org.siros.sdk.wallet.dcapi.DCAPIRequestRefused)
         assertEquals(1, e.s.prover.calls)
@@ -8991,7 +9060,7 @@ class SirosWalletTest {
         runCurrent()
         // Exactly one of them presented the credential; the other found it spent.
         assertEquals(1, e.s.prover.calls)
-        verify(exactly = 1) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 1) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         verify(exactly = 1) { e.engine.sendSignRefusal(any(), any(), any()) }
         assertEquals(1, e.s.history.size)
     }
@@ -9007,6 +9076,7 @@ class SirosWalletTest {
             e.sign.emit(redirectSign())
             advanceUntilIdle()
             verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
             verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
             assertEquals(name, 0, e.s.prover.calls)
         }
@@ -9021,6 +9091,7 @@ class SirosWalletTest {
         e.sign.emit(redirectSign(audience = client))
         advanceUntilIdle()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
         assertEquals(0, e.s.prover.calls)
         assertTrue(e.s.consents.isEmpty())
@@ -9037,6 +9108,7 @@ class SirosWalletTest {
         e.sign.emit(redirectSign())
         advanceUntilIdle()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
         assertEquals(0, e.s.prover.calls)
     }
@@ -9057,6 +9129,7 @@ class SirosWalletTest {
             gate.complete(true)   // a late approval
             runCurrent() // not advanceUntilIdle: virtual time would run out the consent time limit
             verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
             assertEquals(ending, 0, e.s.prover.calls)
             assertTrue(ending, e.s.history.isEmpty())
         }
@@ -9081,6 +9154,7 @@ class SirosWalletTest {
         // The pending sign request is refused (not left to the engine's timeout), and the late approval does nothing.
         verify(exactly = 1) { e.engine.sendSignRefusal("f1", "m1", any()) }
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
     }
 
@@ -9101,6 +9175,7 @@ class SirosWalletTest {
             gate.complete(true)
             runCurrent()
             verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+            verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
             verify(exactly = 0) { e.engine.sendSignRefusal(any(), any(), any()) }
             assertEquals(how, 0, e.s.prover.calls)
             assertTrue(how, e.s.history.isEmpty())
@@ -9125,6 +9200,7 @@ class SirosWalletTest {
         gate.complete(true)
         runCurrent()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
     }
 
@@ -9198,6 +9274,7 @@ class SirosWalletTest {
         })
         advanceUntilIdle()
         verify(exactly = 0) { e.engine.sendSignResponse(any(), vpToken = any(), messageId = any()) }
+        verify(exactly = 0) { e.engine.sendSignResponse(any(), responseJwe = any(), messageId = any()) }
         assertEquals(0, e.s.prover.calls)
     }
 
@@ -9209,7 +9286,7 @@ class SirosWalletTest {
         verify(exactly = 1) { e.engine.sendFlowAction("f1", "consent", any()) }
         e.sign.emit(redirectSign())
         advanceUntilIdle()
-        verify(exactly = 1) { e.engine.sendSignResponse("f1", vpToken = any(), messageId = "m1") }
+        verify(exactly = 1) { e.engine.sendSignResponse("f1", responseJwe = any(), messageId = "m1") }
         assertEquals(1, e.s.prover.calls)
         // Recorded once, from what was really used.
         assertEquals(listOf(listOf(1L)), e.s.history.map { it.credentialIds })
@@ -9234,7 +9311,7 @@ class SirosWalletTest {
         val failed = engineCzk()
         failed.matchOnce()
         advanceUntilIdle()
-        failed.sign.emit(redirectSign(thumbprint = null))
+        failed.sign.emit(redirectSign(thumbprint = "short"))
         advanceUntilIdle()
         assertEquals(0, cached(failed))
         // And one that never reaches the sign step is dropped when the flow ends.
@@ -9262,8 +9339,6 @@ class SirosWalletTest {
     @Test
     fun circuitZkRedirect_aMissingOrMalformedThumbprintAndOtherHandoverInputs_areRefused_nothingIsAskedOrProved() = runTest(dispatcher) {
         for ((name, req) in listOf(
-            "no thumbprint" to redirectSign(thumbprint = null),
-            "empty thumbprint" to redirectSign(thumbprint = ""),
             "short thumbprint" to redirectSign(thumbprint = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(31))),
             "no response_uri" to redirectSign(responseUri = null),
         )) {

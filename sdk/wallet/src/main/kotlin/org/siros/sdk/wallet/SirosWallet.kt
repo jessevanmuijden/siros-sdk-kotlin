@@ -8085,6 +8085,11 @@ class SirosWallet private constructor(
             if (ended()) return
             fun refuse(step: String, reason: org.siros.sdk.wallet.dcapi.DCAPIRefusalReason): Nothing = throw CircuitZkEngineRefusal(step, reason)
             val params = msg.params
+            // The wallet's own zkp_req policy (the engine does not apply it), the same as the web wallet's: a signed request object whose
+            // signature the engine verified AND an encrypted response. Read from the engine's verified_request, never assumed.
+            ZkpReqPolicy.refusalStep(params.verifiedRequest, params.responseEncryption != null)?.let { step ->
+                refuse(step, org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.NOT_TRUSTED)
+            }
             val audience = params.audience.orEmpty()
             val nonce = params.nonce.orEmpty()
             val responseUri = params.responseUri.orEmpty()
@@ -8168,7 +8173,7 @@ class SirosWallet private constructor(
                 verifierContext = VerifierIdContext(request, trust, origin),
                 verifiedClientIdDisplayName = ClientIdScheme.parse(audience).displayName,
                 attestedOrigin = origin,
-                // The engine verified the signed request object and the trust decision is positive for its key.
+                // Established by the policy gate above (verified_request.signed with a verified signature), not assumed.
                 requestSigned = true,
                 support = support,
                 prover = prover,
