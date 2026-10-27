@@ -836,6 +836,7 @@ class SirosWallet private constructor(
      */
     @Synchronized
     private fun bumpSessionGeneration() {
+        presentationLinks?.releaseInFlight()
         sessionGeneration += 1
         reloginDoneForGeneration = false
         // A zkp_req signing waiting on the user belongs to the session that just ended or was replaced.
@@ -1887,6 +1888,8 @@ class SirosWallet private constructor(
      * refused this installation.
      */
     private fun endSessionLocally() {
+        // Presentations still waiting for an answer belong to the session that ends here.
+        presentationLinks?.releaseInFlight()
         // A zkp_req signing still waiting on the user belongs to the session that ends here: nothing of it may act on a later one.
         stopAllZkSigning()
         engineStateJob?.cancel()
@@ -3878,15 +3881,17 @@ class SirosWallet private constructor(
         val engine = engineSession ?: throw WalletException(NOT_CONNECTED)
         // The same link delivered again (an issuer's page re-firing its request on the way back, an intent delivered twice) is not a
         // new request: no second flow, no second consent screen. The caller is told (false) so it can clear a "starting" indicator.
-        if (presentationLinks?.admit(requestUri) == false) {
+        if (presentationLinks?.admit(requestUri, engine.connectionGeneration) == false) {
             Timber.i("A presentation request identical to one started moments ago was delivered again; ignoring the duplicate")
             return false
         }
-        presentationLinkInFlight = requestUri
         try {
             ensureEngineConnected(engine)
             val declare = isTransactionDataEffectivelyEnabled
             engineFlowDeclaredTransactionData = declare
+            // The start is sent on the connection that is current NOW (ensureEngineConnected may have replaced it, which releases the
+            // entries of the old one - including this one, hence the re-bind).
+            presentationLinks?.rebind(requestUri, engine.connectionGeneration)
             engine.startPresentation(
                 requestUri = requestUri,
                 features = TransactionDataSupport.engineFeatures(declare),
@@ -3895,24 +3900,11 @@ class SirosWallet private constructor(
         } catch (e: Exception) {
             // A start that did not happen can be retried at once.
             presentationLinks?.release(requestUri)
-            presentationLinkInFlight = null
             throw e
         }
     }
 
-    /** The link of the presentation started last, until it is answered or fails: released on an error, kept when answered. */
-    private var presentationLinkInFlight: String? = null
-
-    private fun presentationFailedBeforeAnswer() {
-        presentationLinkInFlight?.let { presentationLinks?.release(it) }
-        presentationLinkInFlight = null
-    }
-
-    private fun presentationAnswered() {
-        presentationLinkInFlight?.let { presentationLinks?.markCompleted(it) }
-        presentationLinkInFlight = null
-    }
-
+    // Nullable like [resumingFlowIds]: a test that builds a wallet without running initialisers leaves it null (no dedupe).
     private val presentationLinks: PresentationLinkLedger? = PresentationLinkLedger()
 
     /**
@@ -4946,7 +4938,9 @@ class SirosWallet private constructor(
      * issuance was ever in flight, so it's always safe to call from here.
      */
     fun cancelCurrentFlow() {
-        presentationLinks?.releaseAll()
+        // Only the cancelled presentation is released (its flow, or a start no flow was reported for); answered links keep their window.
+        (_state.value as? WalletState.FlowActive)?.flowId?.let { presentationLinks?.releaseFlow(it) }
+        presentationLinks?.releaseUnassociated()
         // Invalidate any start still suspended in network work: it stops at its
         // next step instead of sending the engine a flow that was cancelled.
         issuanceStartEpoch.incrementAndGet()
@@ -5588,6 +5582,8 @@ class SirosWallet private constructor(
     private val flowContinuations: MutableMap<String, String>? = java.util.concurrent.ConcurrentHashMap()
 
     private fun noteFlowId(flowId: String) {
+        // The first event of a flow tells which in-flight presentation link it belongs to (by the connection it arrived on).
+        engineSession?.let { presentationLinks?.associate(flowId, it.connectionGeneration) }
         val resuming = resumingFlowIds ?: return
         val continuations = flowContinuations ?: return
         val old = resuming.peek() ?: return
@@ -5666,6 +5662,8 @@ class SirosWallet private constructor(
      * the real error the moment it's caught instead.
      */
     private suspend fun reportSignFailure(flowId: String, message: String, notifyError: Boolean = true) {
+        // A local failure ends the presentation without an answer: its link is retryable at once.
+        presentationLinks?.releaseFlow(flowId)
         terminatedFlowIds.add(flowId)
         clearFlowMatchState(flowId)
         if (notifyError) eventListener?.onFlowError(flowId, message)
@@ -7448,7 +7446,7 @@ class SirosWallet private constructor(
         // resumed flow continues under a new id and answers for the user.
         if (resumingFlowIds?.contains(flowId) == true || flowContinuations?.containsValue(flowId) == true) return
         if (!lostFlowIds.add(flowId)) return
-        presentationFailedBeforeAnswer()
+        presentationLinks?.releaseFlow(flowId)
         Timber.w("Flow $flowId lost with its engine connection; ending it locally")
         terminatedFlowIds.add(flowId)
         // Shared issuance state is reset only when this flow owns it: a presentation lost while a new issuance has just claimed the
@@ -7498,6 +7496,7 @@ class SirosWallet private constructor(
     }
 
     private fun endFlowsOnConnectionLoss() {
+        engineSession?.let { presentationLinks?.releaseUpTo(it.connectionGeneration) }
         endSentPendingStartLost(null)
         val active = (_state.value as? WalletState.FlowActive)?.takeIf { !it.isPending }?.flowId
         val ids = LinkedHashSet<String>()
@@ -7517,6 +7516,8 @@ class SirosWallet private constructor(
      * buffered can still be processed against it.
      */
     private fun onEngineSocketReplaced(generation: Int) {
+        // What was started on the connections that are gone can never be answered.
+        presentationLinks?.releaseOlderThan(generation)
         // The engine keeps a flow only as long as its session: the flows of an older socket can never complete.
         endFlowsOfOlderConnections(generation)
         endSentPendingStartLost(generation)
@@ -9036,7 +9037,7 @@ class SirosWallet private constructor(
                 // An encrypted response is read only from what the wallet decrypted; a plain one may relay display-only members.
                 val openedResponse: DeliveredResponseMetadata = filled.opened ?: PlainDeliveredResponse(msg.credentialMetadata)
                 noteFlowId(msg.flowId)
-                presentationAnswered()
+                presentationLinks?.completeFlow(msg.flowId)
                 Timber.i("Flow ${msg.flowId} complete" + (flowContinuations?.get(msg.flowId)?.let { " (the resumption of flow $it)" } ?: ""))
                 terminatedFlowIds.add(msg.flowId)
                 stopZkSigning(msg.flowId, refuse = false)
@@ -9500,7 +9501,10 @@ class SirosWallet private constructor(
         scope.launch {
             engine.flowErrors().collect { msg ->
                 if (isAbandonedFlowEvent(engine, msg.flowId, msg.connectionGeneration)) return@collect
-                presentationFailedBeforeAnswer()
+                msg.flowId?.let { fid ->
+                    engineSession?.let { presentationLinks?.associate(fid, it.connectionGeneration) }
+                    presentationLinks?.releaseFlow(fid)
+                }
                 Timber.e("Flow ${msg.flowId} error: ${msg.error.code} — ${msg.error.message}")
                 val fid = msg.flowId ?: "unknown"
                 // An error for a flow already ended locally as lost (one buffered before the loss): the app was told once, and a second

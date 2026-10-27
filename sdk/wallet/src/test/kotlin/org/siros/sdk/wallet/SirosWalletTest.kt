@@ -1770,6 +1770,30 @@ class SirosWalletTest {
         verify(exactly = 0) { listener.onFlowError("flow-auth", any(), any()) }
     }
 
+    @Test
+    fun startPresentation_aConnectionReplacedBeforeTheFirstFlowEventReleasesTheLink() = runTest(dispatcher) {
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(generations = generations)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val link = "openid4vp://?client_id=v.example.com&request_uri=https%3A%2F%2Fv.example.com%2Fr%2F9"
+        assertTrue(wallet.startPresentation(link))
+        // the socket dies after the start but before any flow event: no flow id exists for the sweeps, yet the link must not stay blocked
+        generations.value = engine.connectionGeneration + 1
+        advanceUntilIdle()
+        assertTrue(wallet.startPresentation(link))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+    }
+
     /**
      * The whole resumption after the browser: the authorization step hands off, the app comes back with a code, the engine
      * WebSocket is reconnected, ONE stateless flow_start is sent, and the engine completes the issuance under a NEW flow id.

@@ -50,4 +50,51 @@ class PresentationLinkLedgerTest {
         now += 10_001
         assertTrue(l.admit("a"))
     }
+
+    @Test
+    fun `a flow ending releases only its own link`() {
+        val l = ledger()
+        l.admit("A", 1); l.admit("B", 1)
+        l.associate("flow-a", 1) // the first flow the engine reports on connection 1 is the oldest start's
+        l.associate("flow-b", 1)
+        l.releaseFlow("flow-a")
+        assertTrue("A is retryable", l.admit("A", 1))
+        assertFalse("B is untouched: its flow is still going", l.admit("B", 1))
+    }
+
+    @Test
+    fun `an answered link survives a cancelled flow, a session end and a connection loss, an unanswered one does not`() {
+        val l = ledger()
+        l.admit("answered", 1); l.associate("f1", 1); l.completeFlow("f1")
+        l.admit("pending", 1)
+        l.releaseUnassociated() // a cancelled start
+        assertTrue(l.admit("pending", 1))
+        l.releaseInFlight() // the session ended
+        assertFalse("answered stays", l.admit("answered", 1))
+        assertTrue(l.admit("pending", 1))
+        l.releaseUpTo(1) // the connection was lost
+        assertFalse(l.admit("answered", 1))
+        assertTrue(l.admit("pending", 1))
+    }
+
+    @Test
+    fun `connections that are gone release what was started on them, and a start on the new one is untouched`() {
+        val l = ledger()
+        l.admit("old", 1)
+        l.admit("new", 2)
+        l.releaseOlderThan(2)
+        assertTrue("sent on the replaced connection: never answered", l.admit("old", 2))
+        assertFalse("started on the current connection", l.admit("new", 2))
+    }
+
+    @Test
+    fun `a start whose connection was replaced while it connected is re-admitted by rebind`() {
+        val l = ledger()
+        l.admit("B", 1)
+        l.releaseOlderThan(2) // the forced reconnect of ensureEngineConnected
+        l.rebind("B", 2)
+        assertFalse("the duplicate is still ignored", l.admit("B", 2))
+        l.releaseUpTo(2)
+        assertTrue(l.admit("B", 2))
+    }
 }
