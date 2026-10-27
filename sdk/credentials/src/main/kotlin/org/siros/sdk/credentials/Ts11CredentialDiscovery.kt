@@ -95,6 +95,46 @@ class Ts11CredentialDiscovery(
         registryClient.fetchSchemas().map { schema -> enrich(schema) }
     }
 
+    /** What [discoverAll] found: one entry per (declaration, identity), and whether everything was read ([complete]). */
+    class Result(val credentials: List<Ts11DiscoveredCredential>, val complete: Boolean)
+
+    /**
+     * Every declaration (duplicates kept) with EVERY identity it states: an entry with both an SD-JWT and an mdoc schema URI yields its
+     * `vct` AND its `doctype`. Incomplete (`complete == false`) when a registry page or source, or a schema document, could not be
+     * read: the identities that could not be resolved still appear under the entry's registry id, but a caller must not take an
+     * incomplete answer as the state of the registry.
+     */
+    suspend fun discoverAll(): Result = withContext(Dispatchers.IO) {
+        val declarations = registryClient.fetchAllDeclarations()
+        var complete = declarations.complete
+        val found = mutableListOf<Ts11DiscoveredCredential>()
+        for (schema in declarations.entries) {
+            var identified = false
+            for (format in listOf("sd-jwt", "mso_mdoc")) {
+                val uri = schema.schemaURIs.firstOrNull { it.formatIdentifier.contains(format, ignoreCase = true) } ?: continue
+                val body = fetchDocument(uri.uri)
+                if (body == null) {
+                    complete = false
+                    continue
+                }
+                if (format == "sd-jwt") {
+                    vctmFetcher.parseVctm(body)?.let { vctm ->
+                        found += Ts11DiscoveredCredential(schema, vctm.vct, vctm.name, vctm.description)
+                        identified = true
+                    } ?: run { complete = false }
+                } else {
+                    mddlSchemaFetcher.parseMddlSchema(body)?.let { mddl ->
+                        val display = mddl.display?.firstOrNull()
+                        found += Ts11DiscoveredCredential(schema, mddl.doctype, display?.name, display?.description)
+                        identified = true
+                    } ?: run { complete = false }
+                }
+            }
+            if (!identified) found += Ts11DiscoveredCredential(schema, identifier = schema.id)
+        }
+        Result(found, complete)
+    }
+
     private suspend fun enrich(schema: Ts11SchemaMeta): Ts11DiscoveredCredential {
         val sdJwtUri = schema.schemaURIs.firstOrNull { it.formatIdentifier.contains("sd-jwt", ignoreCase = true) }
         if (sdJwtUri != null) {

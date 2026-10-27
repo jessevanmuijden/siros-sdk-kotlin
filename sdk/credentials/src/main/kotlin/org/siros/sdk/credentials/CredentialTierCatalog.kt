@@ -60,30 +60,36 @@ class Ts11CredentialTierCatalog(
 
     private suspend fun refresh(now: Long): Snapshot? {
         val discovered = try {
-            discovery.discover()
+            discovery.discoverAll()
         } catch (e: Exception) {
             Timber.w("credential tier catalog refresh failed (${e.javaClass.simpleName})")
             return null
         }
-        // An empty answer is what a failed fetch of every source looks like: it never replaces a good snapshot.
-        if (discovered.isEmpty()) return null
+        // An INCOMPLETE answer (a page, a source or a schema document could not be read) is not the registry's state: it never replaces
+        // the snapshot (which keeps its own stale deadline), and without a snapshot there is no answer. Nor does an empty one.
+        if (!discovered.complete || discovered.credentials.isEmpty()) return null
         val tiers = HashMap<String, String?>()
-        for (d in discovered) {
+        for (d in discovered.credentials) {
             val tier = d.schema.attestationLoS
-            // The most demanding tier wins when two entries describe the same type.
-            fun put(key: String) {
-                val old = tiers[key]
-                tiers[key] = when {
-                    tier == null -> old
-                    old == null -> tier
-                    WscdTierOrder.rank(tier) > WscdTierOrder.rank(old) -> tier
-                    else -> old
-                }
+            // Every declaration counts: a type declared twice is merged fail-closed, whatever the order.
+            for (key in listOf(d.identifier, d.schema.id)) {
+                tiers[key] = if (tiers.containsKey(key)) mergeTier(tiers[key], tier) else tier
             }
-            put(d.identifier)
-            put(d.schema.id)
         }
         return Snapshot(now, tiers)
+    }
+
+    /**
+     * Two declarations of one type: a missing tier or a tier that is not a known ISO 18045 tier is kept (the wallet then refuses the
+     * type), else the highest wins. Never a lower tier because of the order the registry listed them in.
+     */
+    private fun mergeTier(old: String?, new: String?): String? {
+        if (old == null || new == null) return null
+        val ro = WscdTierOrder.rank(old)
+        val rn = WscdTierOrder.rank(new)
+        if (ro < 0) return old
+        if (rn < 0) return new
+        return if (rn > ro) new else old
     }
 }
 

@@ -5031,6 +5031,8 @@ class SirosWallet private constructor(
         pendingAuthorizations.remove(flowId)
         Timber.i("Resuming authorization of flow $flowId after the browser: reconnecting the engine WebSocket (was ${engine.state.value}) and sending a new, stateless flow_start; the engine will answer under a new flow id")
         resumingFlowIds?.add(flowId)
+        val resumeEpoch = issuanceStartEpoch.get()
+        val resumeSession = sessionGeneration
         scope.launch {
             try {
                 engine.forceReconnect()
@@ -5038,7 +5040,12 @@ class SirosWallet private constructor(
                 Timber.i("Engine WebSocket reconnected (${engine.state.value}); sending the resume flow_start for flow $flowId")
                 // The resumed flow needs the same offer context the first one had (the key-storage tier is decided from it); ending the
                 // original flow locally cleared it.
-                restoreOfferContextForResume(pending.offerJson)
+                if (!restoreOfferContextForResume(pending.offerJson, resumeEpoch, resumeSession)) {
+                    // Cancelled or superseded while the context was being resolved: nothing is sent for it.
+                    resumingFlowIds?.remove(flowId)
+                    Timber.i("The resume of flow $flowId was cancelled or superseded before it was sent")
+                    return@launch
+                }
                 // Client attestation for the resumed flow arrives the same way
                 // as for a fresh one: go-wallet-backend's Execute() runs its
                 // attestation setup before branching on msg.AuthCode, so it
@@ -6799,6 +6806,9 @@ class SirosWallet private constructor(
     /** Test seam: runs after a sign request has passed its liveness checks and before it is dispatched (to pause it there). */
     internal var signDispatchHook: (() -> Unit)? = null
 
+    /** Test seam: replaces the display lookup of a resumed authorization's offer (the resolved offer, or null for a malformed advertisement, and its `record`). */
+    internal var offerResolveHook: (suspend (String) -> Pair<CredentialOffer?, () -> Boolean>?)? = null
+
     /** Counts the ends of WMP peers: a callback built for one lifetime is refused once it has moved on (see [wmpProfile]). */
     @Volatile
     private var wmpLifetime: Int = 0
@@ -7213,16 +7223,23 @@ class SirosWallet private constructor(
      * tier decision ([resolveEffectiveKeystoreForIssuance]) needs, so an unresolvable display lookup still leaves a minimal offer.
      * Nothing is replaced when an offer is already active.
      */
-    private suspend fun restoreOfferContextForResume(offerJson: String?) {
-        if (offerJson == null || activeOffer != null) return
+    private suspend fun restoreOfferContextForResume(offerJson: String?, epoch: Int, session: Int): Boolean {
+        // The resume is ONE attempt: a cancel, a new issuance or a session change since it began ends it, wherever it is.
+        fun stillCurrent() = issuanceStartEpoch.get() == epoch && sessionGeneration == session
+        if (offerJson == null || activeOffer != null) return stillCurrent()
+        // Lookups stay LOCAL: nothing is published until the attempt is confirmed to still be the current one.
+        val hook = offerResolveHook
         val resolved = try {
-            resolveOfferForDisplay(offerJson)
+            if (hook != null) hook(offerJson)?.let { ResolvedOfferForDisplay(it.first, it.second) } else resolveOfferForDisplay(offerJson)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             null
         }
-        val offer = resolved?.offer ?: try {
+        val offer = resolved?.offer ?: if (resolved != null) {
+            // A resolution without an offer is a MALFORMED auxiliary-data advertisement, not a failed display lookup: no fallback.
+            null
+        } else try {
             val o = json.parseToJsonElement(offerJson).jsonObject
             val issuer = o["credential_issuer"]?.jsonPrimitive?.contentOrNull
             val configId = (o["credential_configuration_ids"] as? kotlinx.serialization.json.JsonArray)
@@ -7239,23 +7256,35 @@ class SirosWallet private constructor(
             }
         } catch (e: Exception) {
             null
-        } ?: run {
-            Timber.w("Resumed flow: the saved credential offer names no issuer and configuration; the key-storage tier cannot be decided from it")
-            return
         }
-        if (resolved?.offer != null) resolved.record()
-        activeOffer = offer
-        activeVctm = try {
-            vctmFetcher.fetch(
-                issuerUrl = offer.credentialIssuerIdentifier,
-                scope = offer.credentialConfigurationId,
-                registryUrl = registryUrl,
+        val vctm = offer?.let {
+            try {
+                vctmFetcher.fetch(
+                    issuerUrl = it.credentialIssuerIdentifier,
+                    scope = it.credentialConfigurationId,
+                    registryUrl = registryUrl,
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                null
+            }
+        }
+        if (!stillCurrent()) return false
+        // Recorded (and a malformed advertisement refused) BEFORE any context is published or the resume is sent.
+        if (resolved != null && !resolved.record()) {
+            throw WalletException(
+                "The issuer's auxiliary data advertisement for this credential is malformed; issuance is refused",
+                errorCode = "auxiliary_data_advertisement_malformed",
             )
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            null
         }
+        if (offer == null) {
+            Timber.w("Resumed flow: the saved credential offer names no issuer and configuration; the key-storage tier cannot be decided from it")
+            return true
+        }
+        activeOffer = offer
+        activeVctm = vctm
+        return true
     }
 
     /**
@@ -7323,7 +7352,8 @@ class SirosWallet private constructor(
             null
         }
         val issuerTier = activeVctm?.requiredKeyStorage ?: mddlSchema?.requiredKeyStorage
-        val credentialType = activeVctm?.vct ?: mddlSchema?.doctype ?: offer.credentialConfigurationId
+        // The advertised type of the offer counts before the configuration id when the VCTM/MDDL lookup failed.
+        val credentialType = activeVctm?.vct ?: mddlSchema?.doctype ?: offer.vct ?: offer.doctype ?: offer.credentialConfigurationId
         // The catalog's tier is the BASELINE; the issuer's own metadata may raise it, never lower it. With a catalog configured an
         // undeterminable tier refuses (no fallback to a weaker keystore).
         val requiredTier = catalogBaselineTier(issuer, credentialType, issuerTier)

@@ -3538,6 +3538,121 @@ class SirosWalletTest {
         assertTrue(resolveKeystore(f.wallet).exceptionOrNull() is KeyStorageTierUndeterminedException)
     }
 
+    private fun resumeFixture(awaitConnected: suspend () -> Unit = {}): Triple<SirosWallet, WalletEngineSession, WalletEventListener> {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } coAnswers { awaitConnected() }
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        return Triple(wallet, engine, listener)
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.parkAuthorization(wallet: SirosWallet, progress: MutableSharedFlow<FlowProgressMessage>) {
+        progress.emit(
+            FlowProgressMessage(
+                flowId = "flow-auth",
+                step = "authorization_required",
+                payload = buildJsonObject {
+                    put("authorization_url", "https://issuer.example.com/auth?state=s")
+                    put("expected_redirect_uri", "siros://callback")
+                    put("state", "s")
+                    put("code_verifier", "v")
+                    putJsonObject("credential_offer") {
+                        put("credential_issuer", "https://issuer.example.com")
+                        putJsonArray("credential_configuration_ids") { add(kotlinx.serialization.json.JsonPrimitive("pid")) }
+                    }
+                },
+            )
+        )
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aCancelWhileTheContextIsResolved_sendsNoResumeAndPublishesNothing() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        var wallet: SirosWallet? = null
+        coEvery { engine.awaitConnected(any()) } coAnswers { wallet?.cancelCurrentFlow() }
+        wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        wallet.offerResolveHook = { _ -> Pair(org.siros.sdk.credentials.CredentialOffer("pid", "https://issuer.example.com", "PID", issuerName = "Issuer")) { true } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progressFlow)
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+
+        verify(exactly = 0) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        assertNull("the cancelled attempt published no offer context", getField(wallet, "activeOffer"))
+    }
+
+    @Test
+    fun resumingAfterTheBrowser_aMalformedAdvertisementIsRecordedAndRefused_beforeAnyFallbackOrResume() = runTest(dispatcher) {
+        val progressFlow = MutableSharedFlow<FlowProgressMessage>()
+        val engine = mockEngineConstructor(progressFlow = progressFlow)
+        every { engine.resumeIssuance(any(), any(), any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to listener,
+            "pendingAuthorizations" to mutableMapOf<String, Any?>(),
+            "resumingFlowIds" to java.util.concurrent.ConcurrentLinkedQueue<String>(),
+            "json" to Json { ignoreUnknownKeys = true },
+        )
+        var recorded = 0
+        // a resolution WITHOUT an offer is a malformed advertisement (not a failed display lookup); record() says it is unusable
+        wallet.offerResolveHook = { _ -> Pair(null as org.siros.sdk.credentials.CredentialOffer?) { recorded++; false } }
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        parkAuthorization(wallet, progressFlow)
+
+        wallet.completeAuthorization(flowId = "flow-auth", code = "code", state = "s")
+        advanceUntilIdle()
+
+        assertEquals("the selection was recorded (cleared) once", 1, recorded)
+        verify(exactly = 0) { engine.resumeIssuance(any(), any(), any(), any(), any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-auth", any(), any()) }
+        assertNull("no minimal-offer fallback was built from the saved offer", getField(wallet, "activeOffer"))
+    }
+
+    @Test
+    fun theCatalogGetsTheOffersAdvertisedType_whenTheTypeMetadataLookupFails() {
+        val seen = mutableListOf<String>()
+        val catalog = org.siros.sdk.credentials.CredentialTierCatalog { type -> seen += type; org.siros.sdk.credentials.CatalogTier.Known("iso_18045_high") }
+        val f = catalogFixture(catalog, issuerTier = null, withOffer = false)
+        // the offer carries the type the issuer advertised; the VCTM / MDDL lookup returned nothing (no activeVctm, unreachable issuer)
+        setField(f.wallet, "activeOffer", org.siros.sdk.credentials.CredentialOffer(
+            credentialConfigurationId = "pid-config", credentialIssuerIdentifier = "https://issuer.invalid", credentialName = "PID", issuerName = "Issuer",
+            vct = "urn:eudi:pid:1",
+        ))
+        resolveKeystore(f.wallet).getOrThrow()
+        assertEquals(listOf("urn:eudi:pid:1"), seen)
+    }
+
     @Test
     fun resumingAfterTheBrowser_restoresTheOfferContext_soTheCatalogTierApplies() = runTest(dispatcher) {
         val progressFlow = MutableSharedFlow<FlowProgressMessage>()

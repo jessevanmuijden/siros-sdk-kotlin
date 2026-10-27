@@ -57,6 +57,9 @@ data class Ts11SchemaMeta(
     val trustedAuthorities: List<String>? = null,
 )
 
+/** Every declaration of every registry source, unmerged, and whether all of it was read; see [Ts11RegistryClient.fetchAllDeclarations]. */
+data class Ts11Declarations(val entries: List<Ts11SchemaMeta>, val complete: Boolean)
+
 /**
  * Wire shape for the paginated `/api/v1/schemas.json` endpoint. Supports
  * both response formats it may return, mirroring `TS11SchemasResponse` in
@@ -192,7 +195,12 @@ class Ts11RegistryClient(
         merged.values.toList()
     }
 
-    private suspend fun fetchFromSource(source: String): List<Ts11SchemaMeta>? {
+    private suspend fun fetchFromSource(source: String): List<Ts11SchemaMeta>? = fetchSourceDetailed(source)?.entries
+
+    /** One source's entries, and whether every page of it was read (a page that failed or a page limit reached makes it incomplete). */
+    private class SourceResult(val entries: List<Ts11SchemaMeta>, val complete: Boolean)
+
+    private suspend fun fetchSourceDetailed(source: String): SourceResult? {
         val resolvedUrl = resolveUrl(source)
         Timber.d("Fetching TS11 registry source $resolvedUrl")
         val body = fetchRaw(resolvedUrl) ?: return null
@@ -204,16 +212,37 @@ class Ts11RegistryClient(
         }
     }
 
+    /**
+     * EVERY declaration of every source, as the registry published them: no merging by id (two declarations of one type stay two, so a
+     * consumer that must be fail-closed can see both), and [Ts11Declarations.complete] says whether every source and every page of it was
+     * read. A consumer must not treat an incomplete answer as the registry's state.
+     */
+    suspend fun fetchAllDeclarations(): Ts11Declarations = withContext(Dispatchers.IO) {
+        val all = mutableListOf<Ts11SchemaMeta>()
+        var complete = sources.isNotEmpty()
+        for (source in sources) {
+            val result = fetchSourceDetailed(source)
+            if (result == null) {
+                complete = false
+            } else {
+                all += result.entries
+                if (!result.complete) complete = false
+            }
+        }
+        Ts11Declarations(all, complete)
+    }
+
     /** Mirrors `RemoteSourceConfig.resolveURL()`: an explicit `.json` URL is used as-is. */
     private fun resolveUrl(source: String): String {
         if (source.endsWith(".json")) return source
         return source.trimEnd('/') + "/api/v1/schemas.json"
     }
 
-    private suspend fun parseAndPaginate(resolvedUrl: String, firstBody: String): List<Ts11SchemaMeta>? {
+    private suspend fun parseAndPaginate(resolvedUrl: String, firstBody: String): SourceResult? {
         if (looksLikeAllCredentialsRegistryResponse(firstBody)) {
-            return parseRegistryResponse(resolvedUrl, firstBody)
+            return parseRegistryResponse(resolvedUrl, firstBody)?.let { SourceResult(it, complete = true) }
         }
+        var complete = true
 
         val entries = mutableListOf<Ts11SchemaMeta>()
         var currentBody = firstBody
@@ -228,24 +257,30 @@ class Ts11RegistryClient(
                     return null
                 }
                 Timber.w(e, "Failed to parse a subsequent TS11 schemas page from $resolvedUrl; stopping pagination")
+                complete = false
                 break
             }
 
             entries += page.entries()
             pageCount++
 
-            if (!page.hasMorePages() || pageCount >= MAX_PAGES) break
+            if (!page.hasMorePages()) break
+            if (pageCount >= MAX_PAGES) {
+                complete = false
+                break
+            }
 
             val nextUrl = nextPageUrl(page, resolvedUrl)
             val nextBody = fetchRaw(nextUrl)
             if (nextBody == null) {
                 Timber.w("Failed to fetch next page of TS11 schemas from $nextUrl; stopping pagination")
+                complete = false
                 break
             }
             currentBody = nextBody
         }
 
-        return entries
+        return SourceResult(entries, complete)
     }
 
     /**
