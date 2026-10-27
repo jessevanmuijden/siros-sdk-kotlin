@@ -915,7 +915,7 @@ class WalletEngineSessionTest {
     }
 
     @Test
-    fun send_match_response_serializes_selected_credentials() {
+    fun send_match_response_carries_only_the_query_id_of_each_match() {
         val session = WalletEngineSession(
             baseUrl = "https://wallet.example.com",
             tenantId = "tenant-42",
@@ -941,14 +941,16 @@ class WalletEngineSessionTest {
                 text.contains("\"type\":\"match_response\"") &&
                     text.contains("\"flow_id\":\"flow-88\"") &&
                     text.contains("\"credential_query_id\":\"query-1\"") &&
-                    text.contains("\"credential_id\":\"cred-1\"") &&
-                    text.contains("\"available_claims\":[\"given_name\",\"family_name\"]")
+                    // nothing about the credential itself reaches the engine
+                    !text.contains("credential_id") && !text.contains("cred-1") && !text.contains("format") &&
+                    !text.contains("dc+sd-jwt") && !text.contains("vct") && !text.contains("urn:eu:pid:1") &&
+                    !text.contains("available_claims") && !text.contains("given_name") && !text.contains("family_name")
             })
         }
     }
 
     @Test
-    fun send_match_response_carries_the_reason_nothing_matched() {
+    fun send_match_response_carries_the_reason_code_nothing_matched() {
         val session = WalletEngineSession(
             baseUrl = "https://wallet.example.com",
             tenantId = "tenant-42",
@@ -959,14 +961,14 @@ class WalletEngineSessionTest {
         session.sendMatchResponse(
             flowId = "flow-89",
             matches = emptyList(),
-            noMatchReason = "This wallet holds no credential matching the request",
+            noMatchReason = NoMatchCodes.NO_MATCHING_CREDENTIAL,
         )
 
         verify(exactly = 1) {
             webSocket.send(match<String> { text ->
                 text.contains("\"type\":\"match_response\"") &&
                     text.contains("\"matches\":[]") &&
-                    text.contains("\"no_match_reason\":\"This wallet holds no credential matching the request\"")
+                    text.contains("\"no_match_reason\":\"no_matching_credential\"")
             })
         }
     }
@@ -983,7 +985,7 @@ class WalletEngineSessionTest {
         session.sendCredentialsMatched(
             flowId = "flow-90",
             matches = emptyList(),
-            noMatchReason = "no PID stored",
+            noMatchReason = NoMatchCodes.CREDENTIALS_EXHAUSTED,
         )
 
         verify(exactly = 1) {
@@ -992,9 +994,47 @@ class WalletEngineSessionTest {
                     text.contains("\"flow_id\":\"flow-90\"") &&
                     text.contains("\"action\":\"credentials_matched\"") &&
                     text.contains("\"matches\":[]") &&
-                    text.contains("\"no_match_reason\":\"no PID stored\"")
+                    text.contains("\"no_match_reason\":\"credentials_exhausted\"")
             })
         }
+    }
+
+    @Test
+    fun a_free_text_reason_never_leaves_the_device_and_credentials_matched_carries_only_query_ids() {
+        val session = WalletEngineSession(baseUrl = "https://wallet.example.com", tenantId = "tenant-42", client = client)
+        session.connect("app-token")
+        val full = CredentialMatch(
+            credentialQueryId = "pid_1_8", credentialId = "4711", format = "mso_mdoc", vct = "eu.europa.ec.eudi.pid.1",
+            availableClaims = listOf("given_name", "birth_date"),
+        )
+
+        session.sendCredentialsMatched("flow-91", listOf(full), "This wallet holds no credential matching the request (requested: eu.europa.ec.eudi.pid.1); 3 credential(s) stored")
+        session.sendCredentialsMatched("flow-92", emptyList(), NoMatchCodes.NO_SELECTION)
+
+        verify(exactly = 1) {
+            webSocket.send(match<String> { text ->
+                text.contains("\"flow_id\":\"flow-91\"") &&
+                    text.contains("\"matches\":[{\"credential_query_id\":\"pid_1_8\"}]") &&
+                    // the free-text reason (requested types, how many credentials are stored) is replaced by a code
+                    text.contains("\"no_match_reason\":\"unspecified\"") &&
+                    !text.contains("4711") && !text.contains("mso_mdoc") && !text.contains("eudi") && !text.contains("birth_date") &&
+                    !text.contains("credential(s)")
+            })
+        }
+        verify(exactly = 1) { webSocket.send(match<String> { it.contains("\"flow_id\":\"flow-92\"") && it.contains("\"no_match_reason\":\"no_selection\"") }) }
+    }
+
+    @Test
+    fun noMatchCodes_wire_letsOnlyCodeShapedValuesThrough() {
+        assertEquals(null, NoMatchCodes.wire(null))
+        for (code in listOf(NoMatchCodes.NO_MATCHING_CREDENTIAL, NoMatchCodes.CREDENTIALS_EXHAUSTED, NoMatchCodes.REQUEST_NOT_ANSWERABLE, NoMatchCodes.NO_SELECTION)) {
+            assertEquals(code, NoMatchCodes.wire(code))
+        }
+        assertEquals("unspecified", NoMatchCodes.wire("Has Spaces"))
+        assertEquals("unspecified", NoMatchCodes.wire("UPPER"))
+        assertEquals("unspecified", NoMatchCodes.wire(""))
+        assertEquals("unspecified", NoMatchCodes.wire("a".repeat(65)))
+        assertEquals("a".repeat(64), NoMatchCodes.wire("a".repeat(64)))
     }
 
     @Test
