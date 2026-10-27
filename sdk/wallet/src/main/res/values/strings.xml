@@ -17,7 +17,6 @@
     <string name="siros_dcapi_refused_verifier_id_unavailable">Your wallet could not work out who is asking, so nothing was shared.</string>
     <string name="siros_dcapi_refused_proof_failed">Your wallet could not create the proof, so nothing was shared. Please try again.</string>
     <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
-    <string name="siros_psc_conflict">This issuer already has a different pseudonym commitment on record for you. If you lost your wallet, ask the issuer to reset it.</string>
     <string name="siros_auxiliary_data_conflict">The issuer reports that its record for you conflicts with what this wallet sent. Trying again will not help; contact the issuer.</string>
     <string name="siros_auxiliary_data_refused">The issuer refused the wallet\'s identity commitment data. Trying again will not help; contact the issuer.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->

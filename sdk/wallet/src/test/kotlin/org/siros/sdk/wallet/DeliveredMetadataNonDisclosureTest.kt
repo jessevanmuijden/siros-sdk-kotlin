@@ -51,7 +51,7 @@ class DeliveredMetadataNonDisclosureTest {
         val reader = Regex("""ResponseCredentialMetadata|credentialMetadata\??\.members|\.members\[|DeliveredResponseMetadata""")
         val allowed = setOf(
             "DeliveredCredentialMetadata.kt", "CredentialResponseMetadata.kt", "EngineTypes.kt", "OpenID4xProfile.kt",
-            "SirosWallet.kt", "SecretSeedDelivery.kt", "BlindIssuance.kt",
+            "SirosWallet.kt", "BlindIssuance.kt",
         )
         val offending = sources().filter { it.name !in allowed && reader.containsMatchIn(it.readText()) }.map { it.path }
         assertTrue("response credential_metadata referenced outside the receipt path: $offending", offending.isEmpty())

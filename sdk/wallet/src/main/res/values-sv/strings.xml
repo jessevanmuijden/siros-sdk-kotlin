@@ -13,7 +13,6 @@
     <string name="siros_dcapi_refused_verifier_id_unavailable">Din plånbok kunde inte avgöra vem som frågar, så ingenting delades.</string>
     <string name="siros_dcapi_refused_proof_failed">Din plånbok kunde inte skapa beviset, så ingenting delades. Försök igen.</string>
     <!-- Unreviewed translation. Shown when the issuer refuses the wallet's pseudonym commitment (PSC_CONFLICT). -->
-    <string name="siros_psc_conflict">Utfärdaren har redan ett annat pseudonymåtagande registrerat för dig. Om du har tappat bort din plånbok, be utfärdaren återställa det.</string>
     <string name="siros_auxiliary_data_conflict">Utfärdaren uppger att dess uppgifter om dig strider mot det som plånboken skickade. Att försöka igen hjälper inte; kontakta utfärdaren.</string>
     <string name="siros_auxiliary_data_refused">Utfärdaren avvisade plånbokens identitetsåtagandedata. Att försöka igen hjälper inte; kontakta utfärdaren.</string>
     <!-- circuit_zk consent. Wording approved by leifj 2026-10-20. -->

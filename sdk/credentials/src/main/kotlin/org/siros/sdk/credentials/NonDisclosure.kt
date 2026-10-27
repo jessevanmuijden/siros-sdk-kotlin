@@ -73,6 +73,7 @@ class NonDisclosurePolicy(protectedPaths: Map<String, Set<List<String>>>) {
         const val NYM_AUTH_BBS_TYPE = "eu.europa.ec.eudi.nym_auth.bbs.1"
 
         /** The elements of a nym_auth attestation that are never disclosed (rulebook v0.4): the seeds and `birth_date`. */
+        // A claim-name guard, not a wire shape: a claim called secret_seed must never be disclosable, even if some old credential carries one.
         private val NYM_AUTH_PROTECTED = listOf("ssc", "psc", "secret_seed", "birth_date")
 
         /**

@@ -127,10 +127,10 @@ class AuxiliaryDataV01Test {
         val adv = (AuxiliaryDataShapes.select(config(goodAdvert)) as AuxiliarySelection.Selected).advertisement
         val d = SecretDelivery(listOf("ssc"), "sha-256", opening)
         val extra = SecretDelivery(listOf("other"), "sha-256", opening)
-        assertEquals(listOf(d), AuxiliaryDataV01.deliveriesToVerify(listOf(d), "ignored", adv))
-        assertNull("an unadvertised secret", AuxiliaryDataV01.deliveriesToVerify(listOf(d, extra), "ignored", adv))
-        assertNull("an advertised secret that did not arrive", AuxiliaryDataV01.deliveriesToVerify(listOf(extra), "ignored", adv))
-        assertNull("no advertisement known: nothing is accepted", AuxiliaryDataV01.deliveriesToVerify(listOf(d), "ignored", null))
+        assertEquals(listOf(d), AuxiliaryDataV01.deliveriesToVerify(listOf(d), adv))
+        assertNull("an unadvertised secret", AuxiliaryDataV01.deliveriesToVerify(listOf(d, extra), adv))
+        assertNull("an advertised secret that did not arrive", AuxiliaryDataV01.deliveriesToVerify(listOf(extra), adv))
+        assertNull("no advertisement known: nothing is accepted", AuxiliaryDataV01.deliveriesToVerify(listOf(d), null))
     }
 
     private fun sdJwt(claimName: String, valueB64: String, disclosed: Boolean, inClearAlso: Boolean = false): String {
@@ -230,11 +230,11 @@ class AuxiliaryDataV01Test {
         val parsed = (AuxiliaryDataV01.parseDeliveries(md) as AuxiliaryParse.Parsed).deliveries
         assertEquals(listOf(listOf("ssc")), parsed.map { it.path })
         val adv = (AuxiliaryDataShapes.select(config(goodAdvert)) as AuxiliarySelection.Selected).advertisement
-        assertEquals(parsed, AuxiliaryDataV01.deliveriesToVerify(parsed, "x", adv))
+        assertEquals(parsed, AuxiliaryDataV01.deliveriesToVerify(parsed, adv))
         // Only extensions delivered: nothing recognised, so the advertised slot did not arrive.
         val onlyExt = (AuxiliaryDataV01.parseDeliveries(response(ext)) as AuxiliaryParse.Parsed).deliveries
         assertTrue(onlyExt.isEmpty())
-        assertNull(AuxiliaryDataV01.deliveriesToVerify(onlyExt, "x", adv))
+        assertNull(AuxiliaryDataV01.deliveriesToVerify(onlyExt, adv))
     }
 
     @Test

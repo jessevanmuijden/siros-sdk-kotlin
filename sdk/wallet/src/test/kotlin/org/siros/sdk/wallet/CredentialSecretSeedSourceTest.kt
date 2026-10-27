@@ -7,21 +7,17 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class CredentialSecretSeedSourceTest {
-    private val type = org.siros.sdk.credentials.SecretSeedDelivery.MEMBER
-    private val ns = "org.siros.nym_auth"
+    private val legacyType = "org.siros.secret_seed"
     private val hex = NymTestCredentials.seedHex
 
     private fun entry(t: String, v: kotlinx.serialization.json.JsonElement) =
         buildJsonObject { put("type", JsonPrimitive(t)); put("value", v) }
 
-    private fun seeds(vararg pairs: Pair<String, kotlinx.serialization.json.JsonElement>) = buildJsonObject { pairs.forEach { (k, v) -> put(k, v) } }
-
-    private fun source(md: JsonArray?, namespace: String = ns) = KeystoreSecretSeedSource(namespace) { md }
+    private fun source(md: JsonArray?) = KeystoreSecretSeedSource { md }
 
     @Test
     fun noneHoldsNothing() = runTest {
@@ -30,37 +26,25 @@ class CredentialSecretSeedSourceTest {
     }
 
     @Test
-    fun readsTheSeedOfTheDesignatedNamespaceAsAFreshCopyEachTime() = runTest {
-        val s = source(
-            buildJsonArray {
-                add(entry("other", JsonPrimitive("x")))
-                add(entry(type, seeds("org.siros.other" to JsonPrimitive("ffeeddccbbaa99887766554433221100"), ns to JsonPrimitive(hex))))
-            },
-        )
-        val a = s.secretSeed(1L)!!
-        val b = s.secretSeed(1L)!!
-        assertArrayEquals(NymTestCredentials.seed, a)
-        assertNotSame(a, b)
-        a.fill(0)
-        assertArrayEquals("zeroing one copy must not affect the next", NymTestCredentials.seed, s.secretSeed(1L))
-        // Another namespace is another seed.
-        assertArrayEquals(ByteArray(16) { (0xff - it * 0x11).toByte() }, source(buildJsonArray { add(entry(type, seeds("org.siros.other" to JsonPrimitive("ffeeddccbbaa99887766554433221100")))) }, "org.siros.other").secretSeed(1L))
-    }
-
-    @Test
     fun failsClosed() = runTest {
         assertNull(source(null).secretSeed(1L))
         assertNull(source(JsonArray(emptyList())).secretSeed(1L))
-        assertNull(source(buildJsonArray { add(entry("other", seeds(ns to JsonPrimitive(hex)))) }).secretSeed(1L))
-        assertNull(source(buildJsonArray { add(entry(type, seeds(ns to JsonPrimitive(hex)))); add(entry(type, seeds(ns to JsonPrimitive(hex)))) }).secretSeed(1L))
-        assertNull("no seed for the namespace", source(buildJsonArray { add(entry(type, seeds("org.siros.other" to JsonPrimitive(hex)))) }).secretSeed(1L))
-        for (bad in listOf(hex.dropLast(2), hex.uppercase(), hex + "00", "0x$hex", "")) {
-            assertNull(bad, source(buildJsonArray { add(entry(type, seeds(ns to JsonPrimitive(bad)))) }).secretSeed(1L))
-        }
-        assertNull(source(buildJsonArray { add(entry(type, seeds(ns to JsonPrimitive(5)))) }).secretSeed(1L))
-        // The value must be the namespace map: a bare hex string is not a delivery.
-        assertNull(source(buildJsonArray { add(entry(type, JsonPrimitive(hex))) }).secretSeed(1L))
+        assertNull(source(buildJsonArray { add(entry("other", JsonPrimitive("x"))) }).secretSeed(1L))
         assertNull(source(buildJsonArray { add(JsonPrimitive("junk")) }).secretSeed(1L))
+    }
+
+    @Test
+    fun aCredentialStoredWithTheSupersededSecretSeedEntryHasNoSeedAndNothingThrows() = runTest {
+        // Credentials issued with the legacy seed delivery are orphaned: re-issue them. The entry is not interpreted.
+        val md = buildJsonArray {
+            add(entry(legacyType, buildJsonObject { put("org.siros.nym_auth", JsonPrimitive(hex)) }))
+        }
+        assertNull(source(md).secretSeed(1L))
+        val withDisplay = buildJsonArray {
+            add(entry("display", JsonArray(emptyList())))
+            add(entry(legacyType, buildJsonObject { put("org.siros.nym_auth", JsonPrimitive(hex)) }))
+        }
+        assertNull(source(withDisplay).secretSeed(1L))
     }
 
     @Test
@@ -87,14 +71,14 @@ class CredentialSecretSeedSourceTest {
     }
 
     @Test
-    fun anAuxiliaryDataMemberOfOnlyIgnoredExtensionsFallsThroughToTheLegacySeed() = runTest {
+    fun anAuxiliaryDataMemberOfOnlyIgnoredExtensionsHasNoSeed() = runTest {
         val ext = kotlinx.serialization.json.Json.parseToJsonElement("""[{"type":"future_kind","alg":"sha-256","path":["x"],"opening":"ignored"}]""")
+        assertNull(source(buildJsonArray { add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext)) }).secretSeed(1L))
+        // A superseded entry beside it is not a fallback.
         val md = buildJsonArray {
             add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext))
-            add(entry(type, seeds(ns to JsonPrimitive(hex))))
+            add(entry(legacyType, buildJsonObject { put("org.siros.nym_auth", JsonPrimitive(hex)) }))
         }
-        assertArrayEquals(org.siros.sdk.credentials.SecretSeedCommitment.seedFromHex(hex), source(md).secretSeed(1L))
-        // Receipt stores both; with no legacy seed either, there is none.
-        assertNull(source(buildJsonArray { add(entry(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER, ext)) }).secretSeed(1L))
+        assertNull(source(md).secretSeed(1L))
     }
 }
