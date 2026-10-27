@@ -114,7 +114,7 @@ internal object DeliveredCredentialMetadata {
         holdsHolderCommitments(credentials, holderCommitments)?.let { return it }
         // A secret in a superseded shape is never read and never stored, whatever else the response carries (and before any other check).
         response.credentialMetadata?.takeIf { !it.malformed }?.let {
-            if (LegacySecretMembers.carriedBy(JsonObject(it.members))) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER)
+            if (it.legacyMemberPresent || LegacySecretMembers.carriedBy(JsonObject(it.members))) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER)
         }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)

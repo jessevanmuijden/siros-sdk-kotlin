@@ -141,8 +141,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     override fun advertisement(config: CredentialConfiguration): AuxiliarySelection {
         // `auxiliary_data` belongs to a RESPONSE only: in public issuer metadata it is forbidden, whatever else the configuration says.
         if (config.credentialMetadata?.auxiliaryData != null) return AuxiliarySelection.Malformed
-        // The superseded `org.siros.secret_seed` advertisement: a configuration that still publishes it is not offered.
-        if (config.credentialMetadata?.legacySecretSeed != null) return AuxiliarySelection.Malformed
+        // A member of a superseded secret-bearing shape (any of the five names): a configuration that still publishes one is not offered.
+        if (config.credentialMetadata?.carriesLegacyMember == true) return AuxiliarySelection.Malformed
         val raw = config.auxiliaryDataSupported ?: return AuxiliarySelection.None
         val obj = raw as? JsonObject ?: return AuxiliarySelection.Malformed
         // Section 5: at least one direction. An empty object is a malformed advertisement, not "nothing advertised".

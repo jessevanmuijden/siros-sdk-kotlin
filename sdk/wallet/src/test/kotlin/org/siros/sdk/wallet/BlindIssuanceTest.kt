@@ -160,11 +160,31 @@ class BlindIssuanceTest {
         assertEquals("n-seed", e.notificationId)
         assertFalse(e.message!!.contains("00112233"))
         assertNull("nothing is retained", b.take("f"))
-        // A first (non-deferred) response with credentials may still carry a seed: that is the normal delivery.
+        // A first (non-deferred) response with credentials may still carry the v0.1 delivery: that is the normal delivery.
+        val aux = buildJsonObject { put("auxiliary_data", Json.parseToJsonElement("""[{"type":"hash_commitment","alg":"sha-256","path":["ssc"],"opening":"AAAAAAAAAAAAAAAAAAAAAA"}]""")) }
         val b2 = BlindIssuance()
         val jwk2 = b2.offer("g", request)!!
-        b2.open("g", issuer(jwk2, response("c") { mapOf("notification_id" to JsonPrimitive("n"), "credential_metadata" to seed) }), deferred = false)
+        b2.open("g", issuer(jwk2, response("c") { mapOf("notification_id" to JsonPrimitive("n"), "credential_metadata" to aux) }), deferred = false)
         assertNotNull(b2.take("g")!!.credentialMetadata)
+    }
+
+    @Test
+    fun aSupersededSecretMemberIsRefusedOnEveryResponseOfAFlow_notOnlyTheLastOnesMetadata() {
+        val legacy = listOf("org.siros.secret_seed", "org.siros.holder_commitments", "org.siros.psc", "holder_commitments", "secret_members")
+        for (name in legacy) {
+            val md = buildJsonObject { put(name, buildJsonObject { put("k", JsonPrimitive("00112233445566778899aabbccddeeff")) }) }
+            // The legacy member in the FIRST response, display-only metadata in the last: take() keeps only the last response's
+            // metadata, so the first one has to be refused when it is opened.
+            val b = BlindIssuance()
+            val jwk = b.offer("f", request)!!
+            val e = assertThrows(BlindIssuanceException::class.java) {
+                b.open("f", issuer(jwk, response("first") { mapOf("notification_id" to JsonPrimitive("n1"), "credential_metadata" to md) }), deferred = false)
+            }
+            assertEquals(name, "n1", e.notificationId)
+            assertFalse(name, e.message!!.contains("00112233"))
+            b.open("f", issuer(jwk, response("last") { mapOf("notification_id" to JsonPrimitive("n2"), "credential_metadata" to buildJsonObject { put("display", JsonArray(emptyList())) }) }), deferred = false)
+            assertEquals(name, listOf("last"), b.take("f")!!.credentials)
+        }
     }
 
     @Test

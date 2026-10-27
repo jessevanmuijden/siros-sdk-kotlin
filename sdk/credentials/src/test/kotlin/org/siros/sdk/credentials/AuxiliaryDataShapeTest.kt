@@ -43,4 +43,18 @@ class AuxiliaryDataShapeTest {
         }
         assertFalse(LegacySecretMembers.carriedBy(Json.parseToJsonElement("""{"auxiliary_data":{},"display":[]}""").jsonObject))
     }
+
+    @Test
+    fun everySupersededMemberNameMakesTheConfigurationNotOffered_whateverItsValue() {
+        for (name in LegacySecretMembers.MEMBERS) {
+            for (value in listOf("""{"namespaces":["org.siros.nym_auth"]}""", """{"k":"$hex"}""", "\"x\"", "null", "[]", "1")) {
+                val sel = AuxiliaryDataShapes.select(config("""{"$name":$value}"""))
+                assertTrue("$name=$value", sel is AuxiliarySelection.Malformed)
+            }
+            // Beside a valid v0.1 advertisement it is still not offered.
+            assertTrue(name, AuxiliaryDataShapes.select(config("""{"$name":{}}""", extra = ""","auxiliary_data_supported":{"to_wallet":[{"type":"hash_commitment","alg":"sha-256","path":["ssc"]}]}""")) is AuxiliarySelection.Malformed)
+        }
+        // Display data alone is offered as before.
+        assertTrue(AuxiliaryDataShapes.select(config("""{"display":[{"name":"x"}]}""")) is AuxiliarySelection.None)
+    }
 }

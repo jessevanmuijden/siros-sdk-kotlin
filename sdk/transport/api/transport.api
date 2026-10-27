@@ -56,9 +56,10 @@ public final class org/siros/sdk/transport/DeliveredResponseMetadata$DefaultImpl
 public final class org/siros/sdk/transport/ResponseCredentialMetadata {
 	public static final field Companion Lorg/siros/sdk/transport/ResponseCredentialMetadata$Companion;
 	public fun <init> ()V
-	public fun <init> (Lkotlinx/serialization/json/JsonObject;Z)V
-	public synthetic fun <init> (Lkotlinx/serialization/json/JsonObject;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lkotlinx/serialization/json/JsonObject;ZZ)V
+	public synthetic fun <init> (Lkotlinx/serialization/json/JsonObject;ZZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun equals (Ljava/lang/Object;)Z
+	public final fun getLegacyMemberPresent ()Z
 	public final fun getMalformed ()Z
 	public final fun getMembers ()Lkotlinx/serialization/json/JsonObject;
 	public fun hashCode ()I

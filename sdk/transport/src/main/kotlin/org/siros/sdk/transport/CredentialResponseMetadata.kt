@@ -33,12 +33,18 @@ import kotlinx.serialization.json.JsonPrimitive
 class ResponseCredentialMetadata(
     val members: JsonObject = JsonObject(emptyMap()),
     val malformed: Boolean = false,
+    /**
+     * A member of a REMOVED secret-bearing shape was present in the object the engine relayed and was dropped by
+     * [DisplayOnlyCredentialMetadataSerializer]: only that it was there is kept, never its value. A consumer refuses the
+     * response ([org.siros.sdk.credentials.LegacySecretMembers]); [members] never holds it.
+     */
+    val legacyMemberPresent: Boolean = false,
 ) {
     override fun toString() = "ResponseCredentialMetadata(${if (malformed) "malformed" else "redacted"})"
 
-    override fun equals(other: Any?) = other is ResponseCredentialMetadata && malformed == other.malformed && members == other.members
+    override fun equals(other: Any?) = other is ResponseCredentialMetadata && malformed == other.malformed && legacyMemberPresent == other.legacyMemberPresent && members == other.members
 
-    override fun hashCode() = members.hashCode() * 31 + malformed.hashCode()
+    override fun hashCode() = (members.hashCode() * 31 + malformed.hashCode()) * 31 + legacyMemberPresent.hashCode()
 }
 
 /**
@@ -56,7 +62,10 @@ internal object DisplayOnlyCredentialMetadataSerializer : KSerializer<ResponseCr
         val element = (decoder as? JsonDecoder ?: throw SerializationException("credential metadata decodes from JSON only"))
             .decodeJsonElement()
         val obj = element as? JsonObject ?: return ResponseCredentialMetadata(malformed = true)
-        return ResponseCredentialMetadata(JsonObject(obj.filterKeys { it in DISPLAY_MEMBERS }))
+        return ResponseCredentialMetadata(
+            JsonObject(obj.filterKeys { it in DISPLAY_MEMBERS }),
+            legacyMemberPresent = org.siros.sdk.credentials.LegacySecretMembers.carriedBy(obj),
+        )
     }
 
     override fun serialize(encoder: Encoder, value: ResponseCredentialMetadata) = ResponseCredentialMetadataSerializer.serialize(encoder, value)

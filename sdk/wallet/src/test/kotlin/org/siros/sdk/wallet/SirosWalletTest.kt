@@ -14489,6 +14489,10 @@ class SirosWalletTest {
         ).jsonObject
         assertEquals(DeliveredMetadataRefusal.MALFORMED, advertisedWallet.wmpDeliveredMetadataRefusal("p", plainWith("\"text\""))!!.first)
         assertEquals(null, advertisedWallet.wmpDeliveredMetadataRefusal("p", plainWith(seedBody.toString())))
+        // A member of a superseded shape in a plain completion is refused (its value is dropped by the relay, its presence is not).
+        for (name in listOf("org.siros.secret_seed", "org.siros.holder_commitments", "org.siros.psc", "holder_commitments", "secret_members")) {
+            assertEquals(name, DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER, advertisedWallet.wmpDeliveredMetadataRefusal("p", plainWith("""{"$name":{"k":"v"}}"""))!!.first)
+        }
         // An encrypted completion with no response held for the flow cannot be completed, and nothing is invented.
         val lost = advertisedWallet.wmpDeliveredMetadataRefusal("unknown-flow", encrypted)
         assertEquals(DeliveredMetadataRefusal.RESPONSE_UNAVAILABLE, lost!!.first)
@@ -15570,17 +15574,26 @@ class SirosWalletTest {
     }
 
     @Test
-    fun aPlainCompletion_storesTheRelayedDisplayMetadata_butNeverASeedTheEngineFrameCarries() = runTest(dispatcher) {
-        val wire = """{"display":[{"name":"Nym"}],"org.siros.secret_seed":{"org.siros.nym_auth":"${NymTestCredentials.seedHex}"},"claims":[{"path":["a"]}]}"""
-        // The credential carries no commitment, so no seed is needed and the response is plain.
-        val s = deliveredScenario(
+    fun aPlainCompletion_storesTheRelayedDisplayMetadata_butRefusesAMemberOfASupersededShape() = runTest(dispatcher) {
+        // Display-only metadata is relayed and stored as before.
+        val ok = deliveredScenario(
             listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
-            encrypted = false, wireMetadata = wire,
+            encrypted = false, wireMetadata = """{"display":[{"name":"Nym"}],"claims":[{"path":["a"]}]}""",
         )
-        val stored = s.keystore.getCredentialMetadata(s.store.getAll().single().id)!!
+        val stored = ok.keystore.getCredentialMetadata(ok.store.getAll().single().id)!!
         assertEquals(listOf("display", "claims"), stored.map { it.jsonObject["type"]!!.jsonPrimitive.content })
-        assertNoSecretIn(stored.toString())
-        assertNoSecretIn(s.keystore.getCredential(s.store.getAll().single().id))
+        // A member of a superseded secret-bearing shape in a PLAIN completion (the engine's relay drops its value, not its
+        // presence): the response is refused, nothing is stored and the issuer is told (credential_failure).
+        for (name in listOf("org.siros.secret_seed", "org.siros.holder_commitments", "org.siros.psc", "holder_commitments", "secret_members")) {
+            val wire = """{"display":[{"name":"Nym"}],"$name":{"org.siros.nym_auth":"${NymTestCredentials.seedHex}"},"claims":[{"path":["a"]}]}"""
+            val s = deliveredScenario(
+                listOf(deliveredResult(credential = NymTestCredentials.sdJwt(sscValues = emptyList()))),
+                encrypted = false, wireMetadata = wire,
+            )
+            assertNothingStored(s)
+            verify(exactly = 1) { s.engine.sendCredentialNotification(any(), "notif-1", CredentialNotificationEvent.FAILURE, any()) }
+            verify(exactly = 0) { s.engine.sendCredentialNotification(any(), any(), CredentialNotificationEvent.ACCEPTED, any()) }
+        }
     }
 
     @Test
@@ -15591,10 +15604,8 @@ class SirosWalletTest {
         assertNothingStored(advertised)
         // Not advertised: the credential needs a seed it never receives, so nothing is verified against a seed and no seed is kept.
         val plain = deliveredScenario(listOf(deliveredResult()), encrypted = false, advertised = false, wireMetadata = wire)
-        for (c in plain.store.getAll()) {
-            assertTrue(plain.keystore.getCredentialMetadata(c.id).orEmpty().isEmpty())
-            assertNoSecretIn(plain.keystore.getCredential(c.id))
-        }
+        // A member of a superseded shape is refused outright: nothing is stored.
+        assertNothingStored(plain)
     }
 
     @Test

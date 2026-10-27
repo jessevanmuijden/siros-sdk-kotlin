@@ -230,6 +230,12 @@ internal class BlindIssuance(
         if (credentials.size > BlindIssuanceControl.MAX_CREDENTIAL_COUNT) {
             throw BlindIssuanceException("The credential response carries more than ${BlindIssuanceControl.MAX_CREDENTIAL_COUNT} credentials", notificationId)
         }
+        // A member of a superseded secret-bearing shape is refused on EVERY response of the flow, whatever it is (first, pending, deferred
+        // or a later one): take() keeps only the last response's metadata, so a response refused only at the end would let an
+        // earlier one's credentials through.
+        if (metadata != null && !metadata.malformed && org.siros.sdk.credentials.LegacySecretMembers.carriedBy(JsonObject(metadata.members))) {
+            throw BlindIssuanceException(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER.text, notificationId)
+        }
         // A deferred issuance cannot deliver a secret (privatedata-spec 5A.2): neither a PENDING response (never handed to the receipt
         // check, its metadata is dropped below) nor the response to a Deferred Credential Request, so a seed in either is refused HERE,
         // the one place that sees the plaintext, with the notification_id so the issuer is told.
