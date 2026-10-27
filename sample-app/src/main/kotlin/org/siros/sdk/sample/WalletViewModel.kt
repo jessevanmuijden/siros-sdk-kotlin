@@ -2350,6 +2350,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private suspend fun awaitFido2PinEntry(
         request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2"),
     ): String? = withContext(Dispatchers.Main.immediate) {
+        // A PIN prompt means the presentation guide ("PIN accepted, hold the key") no longer holds - the key was described again and
+        // differs, or the ceremony asks once more - so it is closed before every prompt.
+        _fido2AwaitingPresentation.value = false
         suspendCancellableCoroutine { continuation ->
             val pending = PendingPinEntry(
                 pluginId = "fido2",

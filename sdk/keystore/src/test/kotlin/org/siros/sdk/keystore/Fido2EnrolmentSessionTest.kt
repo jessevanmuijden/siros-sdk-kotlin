@@ -232,6 +232,53 @@ class Fido2EnrolmentSessionTest {
     }
 
     @Test
+    fun aPromptOfAnotherPluginIsNeitherAnsweredNorConsumed() = runTest {
+        val enter = Script(listOf(info(Fido2PinState.SET)), listOf("246810"))
+        val se = session(enter)
+        se.enrol {
+            assertNull(se.answer(PinRequest.Enter("r2ps")))
+            assertArrayEquals("the held PIN is still there for the FIDO2 prompt", "246810".toByteArray(), se.answer(PinRequest.Enter("fido2")))
+        }
+        val choose = Script(listOf(info(Fido2PinState.NOT_SET)), listOf("654321", "654321"))
+        val sc = session(choose)
+        sc.enrol {
+            assertNull(sc.answer(PinRequest.Choose("r2ps", 4, confirm = false)))
+            assertNull(sc.answer(PinRequest.Choose("r2ps", 4, confirm = true)))
+            assertArrayEquals("654321".toByteArray(), sc.answer(PinRequest.Choose("fido2", 4, confirm = false)))
+            assertArrayEquals("654321".toByteArray(), sc.answer(PinRequest.Choose("fido2", 4, confirm = true)))
+        }
+    }
+
+    @Test
+    fun theCollectedPinIsWipedEvenAfterTheCeremonyConsumedItThroughAnswer() = runTest {
+        for (fail in listOf(false, true)) {
+            val s = Script(listOf(info(Fido2PinState.SET)), listOf("246810"))
+            val session = session(s)
+            var handed: ByteArray? = null
+            try {
+                session.enrol {
+                    handed = session.answer(PinRequest.Enter("fido2"))
+                    assertArrayEquals("246810".toByteArray(), handed)
+                    if (fail) throw IllegalStateException("boom")
+                }
+            } catch (e: IllegalStateException) {
+                assertTrue(fail)
+            }
+            assertTrue("fail=$fail: the buffer answer() handed out is wiped after the ceremony", handed!!.all { it == 0.toByte() })
+            assertTrue(s.handedOut.single().all { it == 0.toByte() })
+        }
+        // The same for a CHOOSE whose confirmation consumed the held PIN.
+        val c = Script(listOf(info(Fido2PinState.NOT_SET)), listOf("654321", "654321"))
+        val sc = session(c)
+        var confirmed: ByteArray? = null
+        sc.enrol {
+            sc.answer(PinRequest.Choose("fido2", 4, confirm = false))?.fill(0)
+            confirmed = sc.answer(PinRequest.Choose("fido2", 4, confirm = true))
+        }
+        assertTrue(confirmed!!.all { it == 0.toByte() })
+    }
+
+    @Test
     fun cancellingTheDialogEndsTheEnrolmentWithoutASecondTap() = runTest {
         val s = Script(listOf(info(Fido2PinState.SET)), emptyList())
         try {

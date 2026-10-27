@@ -101,6 +101,9 @@ class Fido2EnrolmentSession(
                 throw e
             } finally {
                 clear()
+                // answer() hands the collected buffer itself to the ceremony and clears `held`, so clear() above no longer reaches it:
+                // wipe it here, after a successful AND a failed ceremony.
+                collected?.fill(0)
             }
         }
     }
@@ -108,9 +111,12 @@ class Fido2EnrolmentSession(
     /**
      * The collected PIN for a prompt of the ceremony, or null when the host has to ask (a retry notice, no PIN collected). An ENTER
      * answers a first ENTER prompt; a CHOOSE answers both prompts (choose, confirm) of a CHOOSE built for the same minimum length.
-     * A prompt of the other kind wipes the PIN and throws [Fido2EnrolmentException] ([Fido2EnrolmentFailure.KEY_CHANGED]).
+     * A prompt for another plugin gets null and leaves the PIN alone. A prompt of the other kind wipes the PIN and throws [Fido2EnrolmentException] ([Fido2EnrolmentFailure.KEY_CHANGED]).
      */
     fun answer(request: PinRequest): ByteArray? = synchronized(lock) {
+        // A prompt of ANOTHER plugin (a shared AuthProvider asks for r2ps, say) is not ours to answer: null, and the held PIN is
+        // neither returned nor consumed.
+        if (request.pluginId != pluginId) return null
         val h = held ?: return null
         val matches = when (request) {
             is PinRequest.Enter -> h.chooseMinLength == null
