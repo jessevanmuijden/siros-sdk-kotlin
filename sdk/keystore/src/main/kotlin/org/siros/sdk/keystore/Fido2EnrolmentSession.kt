@@ -66,6 +66,19 @@ class Fido2EnrolmentSession(
     private var keyChanged = false
 
     /**
+     * The PIN collected for the CURRENT loop iteration, between [collect] returning it and it either being installed into [held]
+     * (the re-description after it matched) or discarded (a restart, an unsuitable re-description, [clear] in between). [clear]
+     * reaches it here even while the second [describe] call is still in flight - nothing else does, since it is not yet [held].
+     */
+    private var pending: ByteArray? = null
+
+    /**
+     * Set by [clear]: a PIN already wiped by it must never be installed into [held] afterward, even if the describe call that was
+     * racing it goes on to succeed. Sticky for the life of this session - one session serves one [enrol] call.
+     */
+    private var invalidated = false
+
+    /**
      * Runs the enrolment: [onSecondTap] is called when the user has to present the key again (after the PIN was typed; over USB
      * the key is still in place and a host shows nothing), then [ceremony] runs with the collected PIN ready for [answer].
      */
@@ -76,6 +89,13 @@ class Fido2EnrolmentSession(
         while (true) {
             refuseIfUnsuitable(info)
             val collected = collect(info)
+            synchronized(lock) {
+                if (invalidated) {
+                    collected?.fill(0)
+                    throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+                }
+                pending = collected
+            }
             val fresh: Fido2AuthenticatorInfo
             try {
                 onSecondTap()
@@ -98,8 +118,15 @@ class Fido2EnrolmentSession(
                 throw e
             }
             synchronized(lock) {
+                if (invalidated) {
+                    // clear() ran (and wiped collected, the same array as pending) while the second describe() above was in flight;
+                    // it must never be installed just because that describe() went on to succeed anyway.
+                    pending = null
+                    throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, fresh)
+                }
                 held?.pin?.fill(0)
                 held = collected?.let { Held(it, if (info.clientPin == Fido2PinState.NOT_SET) info.minPinLength else null) }
+                pending = null
                 issued.clear()
             }
             try {
@@ -158,12 +185,20 @@ class Fido2EnrolmentSession(
         }
     }
 
-    /** Wipes what is still held. Called when the ceremony ends; call it too when the host abandons the enrolment. */
+    /**
+     * Wipes what is still held AND the PIN of a loop iteration in flight (collected but not yet installed into [held] - the second
+     * describe() call this is racing may still be waiting), and invalidates this session for good: a PIN wiped here is never
+     * installed afterward, even if that describe() goes on to succeed. Called when the ceremony ends; call it too when the host
+     * abandons the enrolment.
+     */
     fun clear() = synchronized(lock) {
         held?.pin?.fill(0)
+        pending?.fill(0)
+        pending = null
         issued.forEach { it.fill(0) }
         issued.clear()
         held = null
+        invalidated = true
     }
 
     private fun refuseIfUnsuitable(info: Fido2AuthenticatorInfo) {

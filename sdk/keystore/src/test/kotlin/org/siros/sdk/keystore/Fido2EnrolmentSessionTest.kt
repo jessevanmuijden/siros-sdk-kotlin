@@ -1,5 +1,7 @@
 package org.siros.sdk.keystore
 
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -354,6 +356,49 @@ class Fido2EnrolmentSessionTest {
         val r = session.enrol { assertNull(session.answer(PinRequest.Enter("fido2"))); 7 }
         assertEquals(7, r.value)
         assertTrue(s.requests.isEmpty())
+    }
+
+    @Test
+    fun clearDuringTheSecondDescribeWipesThePendingPinImmediately_andRefusesToInstallItIfDiscoveryThenResumes() = runTest {
+        val info1 = info(Fido2PinState.SET)
+        val secondDescribeEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resumeSecondDescribe = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var describes = 0
+        var handed: ByteArray? = null
+        suspend fun describe(): Fido2AuthenticatorInfo {
+            describes++
+            if (describes == 2) {
+                secondDescribeEntered.complete(Unit)
+                resumeSecondDescribe.await()
+            }
+            return info1
+        }
+        suspend fun ask(request: PinRequest): ByteArray? {
+            val pin = "246810".toByteArray()
+            handed = pin
+            return pin
+        }
+        val session = Fido2EnrolmentSession(::describe, ::ask)
+        var caught: Fido2EnrolmentException? = null
+        var ceremonyRan = false
+        val job = launch {
+            try {
+                session.enrol { ceremonyRan = true }
+            } catch (e: Fido2EnrolmentException) {
+                caught = e
+            }
+        }
+        secondDescribeEntered.await()
+        // The host abandons the enrolment WHILE the second (re-)description is still in flight: the PIN collected for this
+        // iteration is not yet `held` (that only happens after this describe() call returns), so it must be reached another way.
+        session.clear()
+        assertTrue("wiped the instant clear() ran, before discovery even resumed", handed!!.all { it == 0.toByte() })
+        // Discovery goes on to succeed anyway (a key was, after all, presented) - the wiped PIN must never be installed or used.
+        resumeSecondDescribe.complete(Unit)
+        advanceUntilIdle()
+        assertFalse("the ceremony never ran with the wiped PIN", ceremonyRan)
+        assertEquals(Fido2EnrolmentFailure.CANCELLED, caught?.failure)
+        assertTrue("the session never answers an Enter prompt with the wiped PIN", session.answer(PinRequest.Enter("fido2")) == null)
     }
 
     @Test
