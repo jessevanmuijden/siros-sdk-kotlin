@@ -4,6 +4,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -197,7 +198,7 @@ class OpenID4xProfileTest {
                 onMatchRequest = { _, _ ->
                     MatchResult(
                         matches = emptyList(),
-                        noMatchReason = "This wallet holds no credential matching the request",
+                        noMatchReason = org.siros.sdk.transport.engine.NoMatchCodes.NO_MATCHING_CREDENTIAL,
                     )
                 }
             )
@@ -212,7 +213,7 @@ class OpenID4xProfileTest {
         val actions = ctx.notifications.filter { it.first == WmpMethods.FLOW_ACTION }.mapNotNull { it.second }
         val matchResponse = actions.first { it["action"] == JsonPrimitive("match_response") }
         assertEquals(
-            JsonPrimitive("This wallet holds no credential matching the request"),
+            JsonPrimitive("no_matching_credential"),
             matchResponse["no_match_reason"],
         )
         // The engine's OID4VP flow never reads a match_response; this is the
@@ -223,10 +224,35 @@ class OpenID4xProfileTest {
         }
         assertNotNull("Expected a credentials_matched action for an empty match set", credentialsMatched)
         assertEquals(
-            JsonPrimitive("This wallet holds no credential matching the request"),
+            JsonPrimitive("no_matching_credential"),
             credentialsMatched!!["no_match_reason"],
         )
         assertEquals(0, credentialsMatched["matches"]!!.jsonArray.size)
+    }
+
+    @Test
+    fun theMatchResponseCarriesOnlyQueryIds_andAFreeTextReasonBecomesUnspecified() = runBlocking {
+        val profile = OpenID4xProfile(
+            OpenID4xConfig(
+                onMatchRequest = { _, _ ->
+                    MatchResult(
+                        matches = listOf(CredentialMatch(credentialId = "4711", credentialQueryId = "pid_1_8", disclosedClaims = listOf("given_name"))),
+                        noMatchReason = "free text with the requested types and 3 credentials stored",
+                    )
+                }
+            )
+        )
+        val ctx = FakePeerContext()
+        profile.init(ctx)
+
+        profile.handleProgress(FlowProgressParams(wmp = WmpMeta(), flowId = "f-min", step = "match_request"))
+
+        val matchResponse = ctx.notifications.filter { it.first == WmpMethods.FLOW_ACTION }.mapNotNull { it.second }
+            .first { it["action"] == JsonPrimitive("match_response") }
+        val match = matchResponse["matches"]!!.jsonArray.single().jsonObject
+        assertEquals("only the query id", setOf("credential_query_id"), match.keys)
+        assertEquals(JsonPrimitive("pid_1_8"), match["credential_query_id"])
+        assertEquals(JsonPrimitive("unspecified"), matchResponse["no_match_reason"])
     }
 
     @Test

@@ -8132,7 +8132,7 @@ class SirosWallet private constructor(
         Timber.i("WMP match request for flow $flowId matched nothing: $reason")
         return org.siros.sdk.transport.wmp.openid4x.MatchResult(
             matches = emptyList(),
-            noMatchReason = reason,
+            noMatchReason = org.siros.sdk.transport.engine.NoMatchCodes.NO_MATCHING_CREDENTIAL,
         )
     }
 
@@ -8731,8 +8731,8 @@ class SirosWallet private constructor(
                     val zkPlan = planCircuitZkMatches(msg.flowId, dcqlOutput, clientMetadata, lastTrustResults[msg.flowId]?.identifier)
                     if (zkPlan?.refusal != null) {
                         Timber.i("Match request for flow ${msg.flowId}: a zkp_req request that cannot be answered; not answered (code=${zkPlan.code})")
-                        engine.sendMatchResponse(msg.flowId, emptyList(), zkPlan.refusal)
-                        engine.sendCredentialsMatched(msg.flowId, emptyList(), zkPlan.refusal)
+                        engine.sendMatchResponse(msg.flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.REQUEST_NOT_ANSWERABLE)
+                        engine.sendCredentialsMatched(msg.flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.REQUEST_NOT_ANSWERABLE)
                         return@collect
                     }
                     val matchResults = zkPlan?.matchResults ?: dcqlOutput.queryResults
@@ -8759,9 +8759,10 @@ class SirosWallet private constructor(
                         // on consent/decline that will never come, so say so
                         // in the action it acts on too (#336).
                         val reason = noMatchReason(dcqlQuery, allCreds.size)
+                        // The description stays in the local log; only a code goes to the engine.
                         Timber.i("Match request for flow ${msg.flowId} matched nothing: $reason")
-                        engine.sendMatchResponse(msg.flowId, emptyList(), reason)
-                        engine.sendCredentialsMatched(msg.flowId, emptyList(), reason)
+                        engine.sendMatchResponse(msg.flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.NO_MATCHING_CREDENTIAL)
+                        engine.sendCredentialsMatched(msg.flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.NO_MATCHING_CREDENTIAL)
                         return@collect
                     }
 
@@ -8837,9 +8838,8 @@ class SirosWallet private constructor(
                     // zkp_req: one entry per query (a credential may answer several), never the first-match-only view.
                     val zkSelection = if (zkPlan != null) {
                         circuitZkSelectionByQuery(matchResults, selectedIds) ?: run {
-                            val reason = "No credential was selected for every query"
-                            engine.sendMatchResponse(msg.flowId, emptyList(), reason)
-                            engine.sendCredentialsMatched(msg.flowId, emptyList(), reason)
+                            engine.sendMatchResponse(msg.flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.NO_SELECTION)
+                            engine.sendCredentialsMatched(msg.flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.NO_SELECTION)
                             return@collect
                         }
                     } else null
@@ -10763,7 +10763,7 @@ class SirosWallet private constructor(
                 if (zkPlan?.refusal != null) {
                     // A zkp_req request is answered whole or not at all; the verifier gets the engine's no-match answer.
                     Timber.i("Credential selection for flow $flowId: a zkp_req request that cannot be answered; not answered (code=${zkPlan.code})")
-                    engine.sendCredentialsMatched(flowId, emptyList(), zkPlan.refusal)
+                    engine.sendCredentialsMatched(flowId, emptyList(), org.siros.sdk.transport.engine.NoMatchCodes.REQUEST_NOT_ANSWERABLE)
                     return@launch
                 }
                                 if (candidates.isEmpty() || (listener == null && eligible.isEmpty())) {
@@ -10780,7 +10780,11 @@ class SirosWallet private constructor(
                         exhaustedOnly = candidates.isNotEmpty(),
                     )
                     Timber.i("Credential selection for flow $flowId matched nothing: $reason")
-                    engine.sendCredentialsMatched(flowId, emptyList(), reason)
+                    engine.sendCredentialsMatched(
+                        flowId,
+                        emptyList(),
+                        if (candidates.isNotEmpty()) org.siros.sdk.transport.engine.NoMatchCodes.CREDENTIALS_EXHAUSTED else org.siros.sdk.transport.engine.NoMatchCodes.NO_MATCHING_CREDENTIAL,
+                    )
                     return@launch
                 }
                 val selectedIds = if (listener != null) {
