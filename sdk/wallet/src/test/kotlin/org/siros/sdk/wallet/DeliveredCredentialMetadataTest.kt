@@ -109,6 +109,23 @@ class DeliveredCredentialMetadataTest {
     }
 
     @Test
+    fun aSupersededMemberIsReportedFirst_evenWhenAHolderCommitmentIsMissingOrMismatched() {
+        val sentMissing = listOf(org.siros.sdk.credentials.HolderCommitment(listOf("psc"), "sha-256", true, ByteArray(32) { 5 }))
+        val sentWrong = listOf(org.siros.sdk.credentials.HolderCommitment(listOf("ssc"), "sha-256", true, ByteArray(32)))
+        for (name in legacyMembers) {
+            val md = mapOf(name to buildJsonObject { put("k", JsonPrimitive("v")) })
+            for (sent in listOf(sentMissing, sentWrong)) {
+                // Plain completion (relayed marker) and decrypted response (the member itself), each with a commitment the credential lacks
+                // (sentMissing: a required psc the v01Cred() fixture never carries) or does not open (sentWrong: the wrong ssc value,
+                // readable but mismatched - v01Cred() carries ssc as base64url, matching HolderCommitment's default encoding).
+                val marker = Response(ResponseCredentialMetadata(JsonObject(emptyMap()), legacyMemberPresent = true), false)
+                assertRefused(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER, DeliveredCredentialMetadata.check(marker, listOf(v01Cred()), true, false, holderCommitments = sent))
+                assertRefused(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER, DeliveredCredentialMetadata.check(response(md), listOf(v01Cred()), true, false, holderCommitments = sent))
+            }
+        }
+    }
+
+    @Test
     fun theVerdictAndTheCredentialShowNoSeed() {
         val v = check(response(mapOf("org.siros.secret_seed" to buildJsonObject { put(ns, JsonPrimitive(N.seedHex)) })))
         assertFalse(v.toString().contains(N.seedHex))
