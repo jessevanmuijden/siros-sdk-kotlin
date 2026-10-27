@@ -137,11 +137,10 @@ data class CredentialDisplayMetadata(
     val display: List<CredentialDisplayEntry>? = null,
     val claims: List<JsonElement>? = null,
     /**
-     * The `org.siros.secret_seed` member as published: the advertisement of a configuration that delivers a seed
-     * (`{"namespaces": [...]}`), read with [SecretSeedDelivery.classifyAdvertisement]. Kept raw so a value that
-     * must not be there can be told from a list of names.
+     * The REMOVED `org.siros.secret_seed` member, kept raw only so its presence can be told: a configuration that publishes it is a
+     * superseded secret-bearing shape and is not offered ([AuxiliaryDataV01.advertisement]). Never interpreted.
      */
-    @SerialName("org.siros.secret_seed") val secretSeed: JsonElement? = null,
+    @SerialName("org.siros.secret_seed") val legacySecretSeed: JsonElement? = null,
     /**
      * The Auxiliary Data v0.1 response member as it appears in PUBLIC metadata, where it is forbidden: kept raw only so its
      * presence can be told ([AuxiliaryDataV01.advertisement] classifies the configuration as malformed). Appended: binary API.

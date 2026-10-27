@@ -19,7 +19,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * in the response.
  *
  * This is NOT the display metadata of the credential store: it is the object the issuer's response delivers,
- * which is shared with display data and may carry the issuer-delivered `org.siros.secret_seed`. [members] is kept
+ * which is shared with display data and may carry the issuer-delivered `auxiliary_data`. [members] is kept
  * as received, every member verbatim (unknown ones included, in order), so the receipt can store each exactly.
  * A consumer interprets only the members it knows.
  *
@@ -44,7 +44,7 @@ class ResponseCredentialMetadata(
 /**
  * Decodes the response-level `credential_metadata` a PLAIN issuer response relays on `flow_complete`, keeping only the
  * display-only members [DISPLAY_MEMBERS] (`display`, `claims`) and ignoring every other member. An extension member (a
- * `org.siros.secret_seed`, say) is never taken from the engine's frame: it is read only from a response the wallet
+ * `auxiliary_data`, say) is never taken from the engine's frame: it is read only from a response the wallet
  * decrypted itself. Anything but a JSON object is the malformed placeholder, as in [ResponseCredentialMetadataSerializer].
  */
 internal object DisplayOnlyCredentialMetadataSerializer : KSerializer<ResponseCredentialMetadata> {

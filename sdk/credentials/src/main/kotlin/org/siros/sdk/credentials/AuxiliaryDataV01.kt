@@ -141,6 +141,8 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
     override fun advertisement(config: CredentialConfiguration): AuxiliarySelection {
         // `auxiliary_data` belongs to a RESPONSE only: in public issuer metadata it is forbidden, whatever else the configuration says.
         if (config.credentialMetadata?.auxiliaryData != null) return AuxiliarySelection.Malformed
+        // The superseded `org.siros.secret_seed` advertisement: a configuration that still publishes it is not offered.
+        if (config.credentialMetadata?.legacySecretSeed != null) return AuxiliarySelection.Malformed
         val raw = config.auxiliaryDataSupported ?: return AuxiliarySelection.None
         val obj = raw as? JsonObject ?: return AuxiliarySelection.Malformed
         // Section 5: at least one direction. An empty object is a malformed advertisement, not "nothing advertised".
@@ -201,7 +203,7 @@ object AuxiliaryDataV01 : AuxiliaryDataShape {
         }
     }
 
-    override fun deliveriesToVerify(deliveries: List<SecretDelivery>, secretNamespace: String, advertised: AuxiliaryAdvertisement?): List<SecretDelivery>? {
+    override fun deliveriesToVerify(deliveries: List<SecretDelivery>, advertised: AuxiliaryAdvertisement?): List<SecretDelivery>? {
         // Everything delivered is verified, and the delivery must be exactly what was advertised: no extra secret, none missing.
         val want = advertised?.toWallet?.map { it.path }?.toSet() ?: return null
         val got = deliveries.map { it.path }.toSet()

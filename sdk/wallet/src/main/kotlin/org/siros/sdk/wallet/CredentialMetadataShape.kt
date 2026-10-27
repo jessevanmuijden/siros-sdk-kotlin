@@ -10,8 +10,7 @@ package org.siros.sdk.wallet
  * - nesting depth at most [MAX_DEPTH] (the metadata object itself is depth 1; arrays count),
  * - at most [MAX_MEMBERS] members in any one object,
  * - member names of at most [MAX_KEY_BYTES] UTF-8 bytes,
- * - no duplicate member names at the top level of the metadata nor inside its `org.siros.secret_seed` object (elsewhere it is
- *   display data, kept as received).
+ * - no duplicate member names at the top level of the metadata (inside it, it is display or auxiliary data, kept as received).
  *
  * A scanner over the raw text, because a parsed tree has already lost duplicate names. Its messages name no value.
  */
@@ -24,7 +23,6 @@ internal object CredentialMetadataShape {
     /** Depth cap for the parts of the body outside the metadata, which have no business being deep. */
     private const val MAX_OTHER_DEPTH = 64
     private const val METADATA_MEMBER = "credential_metadata"
-    private const val SEED_MEMBER = "org.siros.secret_seed"
 
     private class Violation(message: String) : Exception(message, null, false, false)
 
@@ -86,8 +84,7 @@ internal object CredentialMetadataShape {
                         skipWs()
                         expect(':')
                         skipWs()
-                        // Only the direct member of the top-level object that holds the seeds is checked for duplicates too.
-                        metadataValue(depth + 1, unique = depth == 1 && key == SEED_MEMBER)
+                        metadataValue(depth + 1, unique = false)
                         skipWs()
                         when (peek()) {
                             ',' -> i++

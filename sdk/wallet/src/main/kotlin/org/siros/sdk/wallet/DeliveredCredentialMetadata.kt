@@ -7,10 +7,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import org.siros.sdk.credentials.AuxiliaryDataShape
 import org.siros.sdk.credentials.AuxiliaryDataShapes
 import org.siros.sdk.credentials.AuxiliaryParse
-import org.siros.sdk.credentials.LegacyOrgSirosShape
+import org.siros.sdk.credentials.AuxiliaryDataV01
+import org.siros.sdk.credentials.LegacySecretMembers
 import org.siros.sdk.credentials.SecretDelivery
 import org.siros.sdk.credentials.SecretSeedCommitment
-import org.siros.sdk.credentials.SecretSeedDelivery
 import org.siros.sdk.transport.DeliveredResponseMetadata
 
 /** Why delivered credential metadata was refused. The text names no value. */
@@ -30,8 +30,11 @@ internal enum class DeliveredMetadataRefusal(val text: String) {
     /** An advertised seed did not arrive: it is unavailable, never invented. */
     SEED_UNAVAILABLE("the delivered secret is unavailable for this issuance"),
 
-    /** The credential type's designated namespace is absent from the delivered seeds. */
-    NAMESPACE_ABSENT("the delivered secret has no seed for the credential's namespace"),
+    /** The delivered secrets do not match what the issuer advertised for the configuration. */
+    NAMESPACE_ABSENT("the delivered secret does not match what the issuer advertised"),
+
+    /** The response carries a secret in a superseded shape (`org.siros.secret_seed`, `holder_commitments`, `psc`, ...): never read, never stored. */
+    LEGACY_SECRET_MEMBER("the response carries a secret in a superseded shape"),
 
     /** The credential carries no readable commitment to check the secret against. */
     NO_COMMITMENT("the credential carries no usable commitment for the delivered secret"),
@@ -85,45 +88,34 @@ internal sealed class DeliveredMetadataVerdict {
     ) : DeliveredMetadataVerdict()
 }
 
-/** Whether [c] commits to a seed (carries an `ssc`): a credential that cannot be used for its pseudonym without it. */
-private fun needsSeed(c: DeliveredCredential): Boolean {
-    val ssc = when {
-        c.format.equals("mso_mdoc", ignoreCase = true) -> SecretSeedCommitment.sscOfMdoc(c.credential)
-        c.format.contains("sd-jwt", ignoreCase = true) -> SecretSeedCommitment.sscOfSdJwt(c.credential)
-        else -> null
-    }
-    ssc?.fill(0)
-    return ssc != null
-}
-
 /**
  * Receipt of the response-level `credential_metadata` the issuer delivers (privatedata-spec 5A; OpenID4VCI 1.1). A pure
  * check of the WHOLE response, run BEFORE anything is stored: a refusal means no credential of the response is stored.
  *
- * Only the member [SecretSeedDelivery.MEMBER] is interpreted: the response must have been JWE-encrypted and carry a
- * `notification_id`, the member must be well formed ([SecretSeedDelivery.parseDelivery]), and the seed of
- * [secretNamespace] must open the `ssc` of EVERY credential of the response (`SHA256(secret_seed) == ssc`). The seeds of
- * other namespaces are stored as received. Every other member is stored uninterpreted, in the order received.
- *
- * The check never produces display metadata: the one function that does ([SecretSeedDelivery.mergeDisplay]) takes the
- * object with the member stripped.
+ * Only the Credential Auxiliary Data v0.1 member (`auxiliary_data`) is interpreted: the response must have been
+ * JWE-encrypted and carry a `notification_id`, the member must be well formed, and every delivered opening must open
+ * the commitment its credentials carry. A member of a superseded shape ([LegacySecretMembers]) refuses the response
+ * ([DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER]). Every other member is stored uninterpreted, in the order received.
  */
 internal object DeliveredCredentialMetadata {
     fun check(
         response: DeliveredResponseMetadata,
         credentials: List<DeliveredCredential>,
-        secretNamespace: String,
         canStoreSecret: Boolean,
         /** The issuer metadata of the configuration advertised a seed (`namespaces`): the response must have been encrypted. */
         advertised: Boolean = false,
         /** The adapter the issuer's advertisement selected (never sniffed from the response). */
-        shape: AuxiliaryDataShape = LegacyOrgSirosShape,
+        shape: AuxiliaryDataShape = AuxiliaryDataV01,
         /** What the issuer advertised for the configuration (slots), when known: a shape may require the delivery to match it. */
         advertisement: org.siros.sdk.credentials.AuxiliaryAdvertisement? = null,
         /** The commitments this wallet put in the key proofs of the request (Auxiliary Data v0.1): the credentials must hold them. */
         holderCommitments: List<org.siros.sdk.credentials.HolderCommitment> = emptyList(),
     ): DeliveredMetadataVerdict {
         holdsHolderCommitments(credentials, holderCommitments)?.let { return it }
+        // A secret in a superseded shape is never read and never stored, whatever else the response carries (and before any other check).
+        response.credentialMetadata?.takeIf { !it.malformed }?.let {
+            if (LegacySecretMembers.carriedBy(JsonObject(it.members))) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.LEGACY_SECRET_MEMBER)
+        }
         if (advertised && !response.credentialMetadataEncryptedResponse) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NOT_ENCRYPTED)
         }
@@ -138,7 +130,6 @@ internal object DeliveredCredentialMetadata {
         val all = JsonArray(metadata.members.map { (member, value) -> JsonObject(mapOf("type" to JsonPrimitive(member), "value" to value)) })
         val members = JsonObject(metadata.members)
         // A secret in a shape the issuer did not advertise is never stored uninterpreted, and no other adapter is guessed from it.
-        // (Also when another shape WAS advertised: a response may carry only the advertised shape's secret.)
         if (AuxiliaryDataShapes.all.any { it.id != shape.id && it.carriesSecret(members) }) {
             return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.MALFORMED)
         }
@@ -158,7 +149,7 @@ internal object DeliveredCredentialMetadata {
                 if (credentials.none { !it.notificationId.isNullOrEmpty() }) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_NOTIFICATION_ID)
                 if (!canStoreSecret) return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NO_STORAGE)
             }
-            val toVerify = shape.deliveriesToVerify(deliveries, secretNamespace, advertisement)
+            val toVerify = shape.deliveriesToVerify(deliveries, advertisement)
                 ?: return DeliveredMetadataVerdict.Refuse(DeliveredMetadataRefusal.NAMESPACE_ABSENT)
             return verifyAll(shape, toVerify, credentials, all)
         } finally {

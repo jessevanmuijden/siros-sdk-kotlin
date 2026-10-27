@@ -7,7 +7,7 @@ package org.siros.sdk.wallet
  * `account-recovery-ssc`, `user-managed-pseudonym-xsite-ssc`).
  *
  * INTERNAL SEAM. The wallet's default source is [KeystoreSecretSeedSource]: the seed the issuer delivered
- * with the credential (the response-level `credential_metadata`, kept per credential in the privatedata container). [NONE]
+ * with the credential (the response-level `auxiliary_data` member, kept per credential in the privatedata container). [NONE]
  * holds nothing, so every ssc-based request is refused. The wallet hands the returned array to the
  * presenter, which verifies `SHA256(seed) == ssc` itself (before every use), and zeroes the array
  * afterwards; an implementation must therefore return a fresh copy on each call. A source must never log
@@ -24,39 +24,27 @@ internal fun interface CredentialSecretSeedSource {
 }
 
 /**
- * The seed delivered with a stored credential, read from that credential's container `metadata` ([metadataOf]) as
- * the entry of type [org.siros.sdk.credentials.SecretSeedDelivery.MEMBER], whose value maps namespaces to seeds: the
- * one of [namespace]. Fails closed: no metadata, no such entry, more than one such entry, no seed for the namespace,
- * or a value that is not exactly 32 lowercase hex characters all mean no seed. The returned array is a fresh copy for
- * the caller to zero; nothing is cached, logged or put anywhere else.
+ * The seed delivered with a stored credential, read from that credential's container `metadata` ([metadataOf]) as the
+ * Credential Auxiliary Data v0.1 entry (`auxiliary_data`): the opening of its SSC slot is the seed. Fails closed: no
+ * metadata, no such entry, more than one, no or more than one SSC slot all mean no seed. An entry of a superseded
+ * shape (`org.siros.secret_seed`) is not interpreted: such a credential has no seed here and must be re-issued. The
+ * returned array is a fresh copy for the caller to zero; nothing is cached, logged or put anywhere else.
  */
 internal class KeystoreSecretSeedSource(
-    private val namespace: String,
     private val metadataOf: suspend (Long) -> kotlinx.serialization.json.JsonArray?,
 ) : CredentialSecretSeedSource {
     override suspend fun secretSeed(credentialId: Long): ByteArray? {
         val entries = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
-        // Credential Auxiliary Data v0.1: the opening of the SSC slot is the credential's seed (one `auxiliary_data` entry per response).
         val v01 = entries.filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER }
-        if (v01.isNotEmpty()) {
-            val member = v01.singleOrNull()?.get("value") ?: return null
-            val parsed = org.siros.sdk.credentials.AuxiliaryDataV01.parseDeliveries(
-                kotlinx.serialization.json.JsonObject(mapOf(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER to member)),
-            ) as? org.siros.sdk.credentials.AuxiliaryParse.Parsed ?: return null
-            // The credential's seed is the opening of its SSC slot (the claim named "ssc", whatever its namespace); the others are
-            // other secrets of the same response and are zeroed here. Not exactly one such slot: no seed.
-            if (parsed.deliveries.isNotEmpty()) {
-                val slot = parsed.deliveries.filter { it.path.last() == SSC_CLAIM }.singleOrNull()
-                parsed.deliveries.filter { it !== slot }.forEach { it.bytes.fill(0) }
-                return slot?.bytes
-            }
-            // Only ignored extension entries (receipt accepts and stores them): they carry no seed, so the legacy lookup below decides.
-        }
-        val matching = metadataOf(credentialId).orEmpty().mapNotNull { it as? kotlinx.serialization.json.JsonObject }
-            .filter { (it["type"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { p -> p.isString }?.content == org.siros.sdk.credentials.SecretSeedDelivery.MEMBER }
-        val seeds = matching.singleOrNull()?.get("value") as? kotlinx.serialization.json.JsonObject ?: return null
-        val hex = (seeds[namespace] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
-        return org.siros.sdk.credentials.SecretSeedCommitment.seedFromHex(hex)
+        val member = v01.singleOrNull()?.get("value") ?: return null
+        val parsed = org.siros.sdk.credentials.AuxiliaryDataV01.parseDeliveries(
+            kotlinx.serialization.json.JsonObject(mapOf(org.siros.sdk.credentials.AuxiliaryDataV01.RESPONSE_MEMBER to member)),
+        ) as? org.siros.sdk.credentials.AuxiliaryParse.Parsed ?: return null
+        // The credential's seed is the opening of its SSC slot (the claim named "ssc", whatever its namespace); the others are
+        // other secrets of the same response and are zeroed here. Not exactly one such slot: no seed.
+        val slot = parsed.deliveries.filter { it.path.last() == SSC_CLAIM }.singleOrNull()
+        parsed.deliveries.filter { it !== slot }.forEach { it.bytes.fill(0) }
+        return slot?.bytes
     }
 }
 

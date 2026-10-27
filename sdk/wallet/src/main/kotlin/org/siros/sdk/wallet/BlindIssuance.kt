@@ -234,7 +234,8 @@ internal class BlindIssuance(
         // check, its metadata is dropped below) nor the response to a Deferred Credential Request, so a seed in either is refused HERE,
         // the one place that sees the plaintext, with the notification_id so the issuer is told.
         if ((transactionId != null || deferred) && metadata != null && !metadata.malformed &&
-            org.siros.sdk.credentials.AuxiliaryDataShapes.all.any { it.carriesSecret(JsonObject(metadata.members)) }
+            (org.siros.sdk.credentials.AuxiliaryDataShapes.all.any { it.carriesSecret(JsonObject(metadata.members)) } ||
+                org.siros.sdk.credentials.LegacySecretMembers.carriedBy(JsonObject(metadata.members)))
         ) {
             throw BlindIssuanceException(DeliveredMetadataRefusal.DEFERRED_SEED.text, notificationId)
         }

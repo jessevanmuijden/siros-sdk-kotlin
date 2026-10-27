@@ -410,8 +410,6 @@ class BlindIssuanceTest {
         refusedKeepingNotificationId("""{"${"é".repeat(129)}":1}""")
         refusedKeepingNotificationId("""{"x":"${"p".repeat(CredentialMetadataShape.MAX_BYTES - 7)}"}""")
         refusedKeepingNotificationId("""{"x":1,"x":2}""")
-        refusedKeepingNotificationId("""{"org.siros.secret_seed":{"n":"00","n":"11"}}""")
-        refusedKeepingNotificationId("""{"org.siros.secret_seed":{"n":"00"},"org.siros.secret_seed":{"n":"11"}}""")
         // A duplicate hidden behind an escape is still the same name.
         refusedKeepingNotificationId("""{"a":1,"\u0061":2}""")
     }

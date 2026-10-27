@@ -560,13 +560,6 @@ data class SignRequestParams(
     @SerialName("transaction_data") val transactionData: List<TransactionData>? = null,
     /** The OID4VP `response_mode` of the request; required in an SCA key binding JWT (EC TS12 3.6). */
     @SerialName("response_mode") val responseMode: String? = null,
-    /**
-     * Holder commitments the issuer asked for (`["psc"]`), with the
-     * [credentialType] and the exact [credentialIssuer] identifier string
-     * (issuer metadata `credential_issuer`, verbatim) the wallet derives them
-     * for. The wallet puts the claim `org.siros.psc` into the `jwt` proof.
-     */
-    @SerialName("holder_commitments") val holderCommitments: List<String>? = null,
     @SerialName("credential_type") val credentialType: String? = null,
     @SerialName("credential_issuer") val credentialIssuer: String? = null,
     /**
