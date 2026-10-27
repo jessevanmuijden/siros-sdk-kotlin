@@ -487,10 +487,19 @@ public final class org/siros/sdk/wallet/PresentationLinkLedger {
 	public fun <init> ()V
 	public fun <init> (JILkotlin/jvm/functions/Function0;)V
 	public synthetic fun <init> (JILkotlin/jvm/functions/Function0;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
-	public final fun admit (Ljava/lang/String;)Z
+	public final fun admit (Ljava/lang/String;I)Z
+	public static synthetic fun admit$default (Lorg/siros/sdk/wallet/PresentationLinkLedger;Ljava/lang/String;IILjava/lang/Object;)Z
+	public final fun associate (Ljava/lang/String;I)V
+	public final fun completeFlow (Ljava/lang/String;)V
 	public final fun markCompleted (Ljava/lang/String;)V
+	public final fun rebind (Ljava/lang/String;I)V
 	public final fun release (Ljava/lang/String;)V
 	public final fun releaseAll ()V
+	public final fun releaseFlow (Ljava/lang/String;)V
+	public final fun releaseInFlight ()V
+	public final fun releaseOlderThan (I)V
+	public final fun releaseUnassociated ()V
+	public final fun releaseUpTo (I)V
 }
 
 public final class org/siros/sdk/wallet/PresentationLinkLedger$Companion {
