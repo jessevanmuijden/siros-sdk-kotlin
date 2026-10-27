@@ -152,6 +152,9 @@ class MainActivity : ComponentActivity() {
                     viewModel = viewModel(factory = vmFactory)
                     LaunchedEffect(Unit) {
                         dispatchIncomingUri(intent?.data)
+                        // The launching intent is handled once: an activity re-created later (a configuration change, a return from the
+                        // browser) would otherwise deliver the same deep link again from getIntent().
+                        setIntent(android.content.Intent(intent).apply { data = null })
                         pendingWscaIntent?.let {
                             dispatchWscaTestAction(it)
                             pendingWscaIntent = null

@@ -2564,13 +2564,15 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                     }
                     is DeepLinkType.PresentationRequest -> {
                         Log.i(TAG, "Routing to presentation")
-                        wallet.startPresentation(link.uri)
+                        // false: the SDK ignored a redelivered duplicate of a request already started; nothing will come through
+                        // the wallet state for this attempt, so its "contacting the verifier" indicator must not stay up.
+                        if (!wallet.startPresentation(link.uri)) _flowStarting.value = null
                     }
                     else -> {
                         // Fallback: treat unclassified URIs as presentation requests
                         // (covers plain https://...?request_uri= patterns from QR codes)
                         Log.i(TAG, "Routing to presentation (unclassified)")
-                        wallet.startPresentation(uri)
+                        if (!wallet.startPresentation(uri)) _flowStarting.value = null
                     }
                 }
             } catch (e: Exception) {

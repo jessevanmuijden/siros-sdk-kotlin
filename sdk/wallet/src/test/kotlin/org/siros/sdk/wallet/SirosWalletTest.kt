@@ -1635,6 +1635,67 @@ class SirosWalletTest {
     }
 
     @Test
+    fun startPresentation_aRedeliveredIdenticalLinkStartsNoSecondFlow_butARetryAfterAFailedStartDoes() = runTest(dispatcher) {
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val completeFlow = MutableSharedFlow<FlowCompleteMessage>()
+        val engine = mockEngineConstructor(flowErrors = flowErrors, flowComplete = completeFlow)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val link = "openid4vp://?client_id=issuer.example.com&request_uri=https%3A%2F%2Fissuer.example.com%2Fr%2F1&response_code=DMEpnhz"
+
+        assertTrue(wallet.startPresentation(link))
+        assertFalse("the issuer's page re-fires it on the way back: ignored, and the caller is told", wallet.startPresentation(link))
+        verify(exactly = 1) { engine.startPresentation(any(), any(), any()) }
+
+        assertTrue("a different request is a different flow", wallet.startPresentation("$link&x=other"))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+
+        // a start that failed is not remembered: the retry goes through
+        var calls = 0
+        every { engine.startPresentation(any(), any(), any()) } answers { if (calls++ == 0) throw IllegalStateException("socket down") }
+        val retry = "$link&y=retry"
+        runCatching { wallet.startPresentation(retry) }
+        assertTrue(wallet.startPresentation(retry))
+    }
+
+    @Test
+    fun startPresentation_aFlowErrorBeforeTheAnswerReleasesTheLink() = runTest(dispatcher) {
+        val flowErrors = MutableSharedFlow<FlowErrorMessage>()
+        val completeFlow = MutableSharedFlow<FlowCompleteMessage>()
+        val engine = mockEngineConstructor(flowErrors = flowErrors, flowComplete = completeFlow)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        every { engine.sendCredentialNotification(any(), any(), any(), any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+            "eventListener" to mockk<WalletEventListener>(relaxed = true),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val failed = "openid4vp://?client_id=v.example.com&request_uri=https%3A%2F%2Fv.example.com%2Fr%2F1"
+
+        assertTrue(wallet.startPresentation(failed))
+        // the engine reports an error for it (a connection loss, a refused request) before any answer was sent
+        flowErrors.emit(FlowErrorMessage(flowId = "f1", error = FlowError(code = "internal", message = "boom")))
+        advanceUntilIdle()
+        assertTrue("the Retry action resubmits the same link: it must go through", wallet.startPresentation(failed))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
+    }
+
+    @Test
     fun resumingAfterTheBrowser_theSocketItReplacesDoesNotReportTheOriginalFlowAsLost() = runTest(dispatcher) {
         // Pixel e2e on gdc: "Resuming authorization of flow X ... reconnecting" and 20 ms later "Flow X lost with its engine connection;
         // ending it locally" plus a failure in the UI, although the resumed flow completed under a new id. The resumption's own forced
@@ -1707,6 +1768,30 @@ class SirosWalletTest {
         generations.value = 2
         advanceUntilIdle()
         verify(exactly = 0) { listener.onFlowError("flow-auth", any(), any()) }
+    }
+
+    @Test
+    fun startPresentation_aConnectionReplacedBeforeTheFirstFlowEventReleasesTheLink() = runTest(dispatcher) {
+        val generations = MutableStateFlow(0)
+        val engine = mockEngineConstructor(generations = generations)
+        every { engine.startPresentation(any(), any(), any()) } just runs
+        coEvery { engine.awaitConnected(any()) } just runs
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com", tenantId = "tenant-1", redirectUri = "siros://callback"),
+            "presentationLinks" to PresentationLinkLedger(),
+            "credentialStore" to FakeCredentialStore(mutableListOf()),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        val link = "openid4vp://?client_id=v.example.com&request_uri=https%3A%2F%2Fv.example.com%2Fr%2F9"
+        assertTrue(wallet.startPresentation(link))
+        // the socket dies after the start but before any flow event: no flow id exists for the sweeps, yet the link must not stay blocked
+        generations.value = engine.connectionGeneration + 1
+        advanceUntilIdle()
+        assertTrue(wallet.startPresentation(link))
+        verify(exactly = 2) { engine.startPresentation(any(), any(), any()) }
     }
 
     /**
