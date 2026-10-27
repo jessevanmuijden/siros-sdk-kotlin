@@ -52,10 +52,17 @@ class Fido2EnrolmentSession(
 ) {
     constructor(manager: WscdManager, ask: suspend (PinRequest) -> ByteArray?) : this(manager::describeFido2Authenticator, ask)
 
-    private class Held(val pin: ByteArray, val chooseMinLength: Int?)
+    /**
+     * The prompt contract of the ceremony ([chooseMinLength] null: ENTER, else CHOOSE of that minimum length), which lives for the
+     * WHOLE ceremony, and the one-shot [pin], which is null once it has been handed out or refused.
+     */
+    private class Held(var pin: ByteArray?, val chooseMinLength: Int?)
 
     private val lock = Any()
     private var held: Held? = null
+
+    /** Every buffer [answer] handed to the host (the PIN itself or a copy of it): all are wiped when the ceremony ends. */
+    private val issued = mutableListOf<ByteArray>()
     private var keyChanged = false
 
     /**
@@ -93,6 +100,7 @@ class Fido2EnrolmentSession(
             synchronized(lock) {
                 held?.pin?.fill(0)
                 held = collected?.let { Held(it, if (info.clientPin == Fido2PinState.NOT_SET) info.minPinLength else null) }
+                issued.clear()
             }
             try {
                 return Fido2Enrolment(ceremony(), fresh)
@@ -123,27 +131,29 @@ class Fido2EnrolmentSession(
             is PinRequest.Choose -> h.chooseMinLength != null && request.minLength == h.chooseMinLength
         }
         if (!matches) {
-            h.pin.fill(0)
-            held = null
+            h.pin?.fill(0)
+            h.pin = null
             keyChanged = true
             throw Fido2EnrolmentException(Fido2EnrolmentFailure.KEY_CHANGED)
         }
         if (request.notice != null) {
             // A retry: the PIN just sent was refused, so it is never sent again.
-            h.pin.fill(0)
-            held = null
+            h.pin?.fill(0)
+            h.pin = null
             return null
         }
+        // The PIN was handed out already (or refused): the host asks, but the prompt was checked against the contract above.
+        val pin = h.pin ?: return null
         when (request) {
             is PinRequest.Enter -> {
-                held = null
-                h.pin
+                h.pin = null
+                pin.also { issued += it }
             }
             is PinRequest.Choose -> if (!request.confirm) {
-                h.pin.copyOf()
+                pin.copyOf().also { issued += it }
             } else {
-                held = null
-                h.pin
+                h.pin = null
+                pin.also { issued += it }
             }
         }
     }
@@ -151,6 +161,8 @@ class Fido2EnrolmentSession(
     /** Wipes what is still held. Called when the ceremony ends; call it too when the host abandons the enrolment. */
     fun clear() = synchronized(lock) {
         held?.pin?.fill(0)
+        issued.forEach { it.fill(0) }
+        issued.clear()
         held = null
     }
 

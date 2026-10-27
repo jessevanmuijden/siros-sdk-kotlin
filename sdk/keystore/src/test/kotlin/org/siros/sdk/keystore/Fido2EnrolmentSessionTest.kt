@@ -279,6 +279,63 @@ class Fido2EnrolmentSessionTest {
     }
 
     @Test
+    fun theKindAndMinimumLengthAreCheckedForTheWholeCeremony_evenAfterThePinWasConsumed() = runTest {
+        // ENTER consumed, then a CHOOSE prompt: KEY_CHANGED, not a fall-through to the host's dialog.
+        val e = Script(listOf(info(Fido2PinState.SET)), listOf("246810"))
+        val se = session(e)
+        try {
+            se.enrol {
+                assertArrayEquals("246810".toByteArray(), se.answer(PinRequest.Enter("fido2")))
+                se.answer(PinRequest.Choose("fido2", 4, confirm = false))
+                fail("an incompatible prompt after the PIN was consumed reached the host")
+            }
+            fail()
+        } catch (x: Fido2EnrolmentException) {
+            assertEquals(Fido2EnrolmentFailure.KEY_CHANGED, x.failure)
+        }
+        // CHOOSE consumed by its confirmation, then a retry of another minimum length, and an ENTER.
+        for (bad in listOf<PinRequest>(PinRequest.Choose("fido2", 8, confirm = false), PinRequest.Enter("fido2"))) {
+            val c = Script(listOf(info(Fido2PinState.NOT_SET)), listOf("654321", "654321"))
+            val sc = session(c)
+            try {
+                sc.enrol {
+                    sc.answer(PinRequest.Choose("fido2", 4, confirm = false))
+                    sc.answer(PinRequest.Choose("fido2", 4, confirm = true))
+                    sc.answer(bad)
+                    fail("an incompatible prompt after the PIN was consumed reached the host")
+                }
+                fail()
+            } catch (x: Fido2EnrolmentException) {
+                assertEquals(Fido2EnrolmentFailure.KEY_CHANGED, x.failure)
+            }
+        }
+        // A compatible prompt after consumption is simply not answered (the host asks).
+        val ok = Script(listOf(info(Fido2PinState.SET)), listOf("246810"))
+        val so = session(ok)
+        so.enrol {
+            so.answer(PinRequest.Enter("fido2"))
+            assertNull(so.answer(PinRequest.Enter("fido2", PinPromptNotice.WRONG_PIN)))
+            assertNull(so.answer(PinRequest.Enter("fido2")))
+        }
+    }
+
+    @Test
+    fun everyBufferHandedToTheHostIsWipedWhenTheCeremonyEnds_withoutTheHostZeroingIt() = runTest {
+        val s = Script(listOf(info(Fido2PinState.NOT_SET)), listOf("654321", "654321"))
+        val session = session(s)
+        lateinit var first: ByteArray
+        lateinit var confirm: ByteArray
+        session.enrol {
+            // The host (PinPrompter.choose) returns these to the native side and never zeroes them here.
+            first = session.answer(PinRequest.Choose("fido2", 4, confirm = false))!!
+            confirm = session.answer(PinRequest.Choose("fido2", 4, confirm = true))!!
+            assertArrayEquals("654321".toByteArray(), first)
+        }
+        assertTrue("the COPY handed out for the first CHOOSE prompt is wiped", first.all { it == 0.toByte() })
+        assertTrue(confirm.all { it == 0.toByte() })
+    }
+
+    @Test
     fun cancellingTheDialogEndsTheEnrolmentWithoutASecondTap() = runTest {
         val s = Script(listOf(info(Fido2PinState.SET)), emptyList())
         try {
