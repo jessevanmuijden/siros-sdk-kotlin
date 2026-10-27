@@ -44,6 +44,14 @@ class Fido2Enrolment<T>(val value: T, val info: Fido2AuthenticatorInfo)
  *
  * Every PIN buffer this class holds or receives and does not hand on is wiped. The suitability the library reports is
  * advisory until it has been checked on hardware. One instance serves one enrolment; [answer] may be called from another thread.
+ *
+ * PIN LIFETIME, STRUCTURALLY: every function below that ever holds a raw PIN buffer in a local variable while awaiting something
+ * else (another [describe] call, the user confirming a chosen PIN) registers that buffer into [pendingBuffers] first ([register])
+ * and removes it again once its own code has decided what becomes of it ([deregister]), then calls [refuseIfInvalidated] to check
+ * whether [clear] ran meanwhile. [clear] wipes and forgets every buffer in [pendingBuffers] - and [held]'s - the instant it runs,
+ * wherever in the flow that is, and sets [invalidated] for good; nothing that was already wiped by it is ever installed, compared
+ * or otherwise acted on afterward. Adding a new suspension point that captures a PIN byte array only has to follow this same
+ * register / do-the-suspending-call / deregister-then-refuseIfInvalidated shape, never a bespoke clear()-reachable field of its own.
  */
 class Fido2EnrolmentSession(
     private val describe: suspend () -> Fido2AuthenticatorInfo,
@@ -66,17 +74,38 @@ class Fido2EnrolmentSession(
     private var keyChanged = false
 
     /**
-     * The PIN collected for the CURRENT loop iteration, between [collect] returning it and it either being installed into [held]
-     * (the re-description after it matched) or discarded (a restart, an unsuitable re-description, [clear] in between). [clear]
-     * reaches it here even while the second [describe] call is still in flight - nothing else does, since it is not yet [held].
+     * Every raw PIN buffer currently alive in a local variable somewhere in this class WHILE a suspend call that does not involve
+     * it is in flight - [enrol]'s `collected` racing the second [describe], [choose]'s `first` racing its confirm prompt - tracked
+     * by reference (identity, not content) so [clear] can reach and wipe it from outside whichever call stack is holding it. See
+     * the class doc comment for the register/deregister/refuseIfInvalidated pattern every such site follows.
      */
-    private var pending: ByteArray? = null
+    private val pendingBuffers = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<ByteArray, Boolean>())
 
     /**
-     * Set by [clear]: a PIN already wiped by it must never be installed into [held] afterward, even if the describe call that was
-     * racing it goes on to succeed. Sticky for the life of this session - one session serves one [enrol] call.
+     * Set by [clear]: a PIN buffer already wiped by it must never be installed, compared or otherwise used afterward, even if the
+     * suspend call racing it goes on to succeed. Sticky for the life of this session - one session serves one [enrol] call.
      */
     private var invalidated = false
+
+    private fun register(buf: ByteArray?) {
+        if (buf != null) synchronized(lock) { pendingBuffers += buf }
+    }
+
+    private fun deregister(buf: ByteArray?) {
+        if (buf != null) synchronized(lock) { pendingBuffers -= buf }
+    }
+
+    /**
+     * Throws [Fido2EnrolmentFailure.CANCELLED] (wiping every one of [buffers], since none of them was in [pendingBuffers] for
+     * [clear] to have reached - the caller just [deregister]ed them) if [clear] ran since this buffer started being used. Every
+     * site that registers a buffer calls this right after deregistering it, before doing anything else with it.
+     */
+    private fun refuseIfInvalidated(info: Fido2AuthenticatorInfo?, vararg buffers: ByteArray?) {
+        if (synchronized(lock) { invalidated }) {
+            buffers.forEach { it?.fill(0) }
+            throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+        }
+    }
 
     /**
      * Runs the enrolment: [onSecondTap] is called when the user has to present the key again (after the PIN was typed; over USB
@@ -89,21 +118,19 @@ class Fido2EnrolmentSession(
         while (true) {
             refuseIfUnsuitable(info)
             val collected = collect(info)
-            synchronized(lock) {
-                if (invalidated) {
-                    collected?.fill(0)
-                    throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
-                }
-                pending = collected
-            }
+            register(collected)
+            refuseIfInvalidated(info, collected)
             val fresh: Fido2AuthenticatorInfo
             try {
                 onSecondTap()
                 fresh = describe()
             } catch (e: Throwable) {
+                deregister(collected)
                 collected?.fill(0)
                 throw e
             }
+            deregister(collected)
+            refuseIfInvalidated(fresh, collected)
             if (!info.sameEnrolmentSituationAs(fresh)) {
                 collected?.fill(0)
                 Timber.i("The security key presented differs from the one the PIN dialog was built for; asking again")
@@ -118,15 +145,8 @@ class Fido2EnrolmentSession(
                 throw e
             }
             synchronized(lock) {
-                if (invalidated) {
-                    // clear() ran (and wiped collected, the same array as pending) while the second describe() above was in flight;
-                    // it must never be installed just because that describe() went on to succeed anyway.
-                    pending = null
-                    throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, fresh)
-                }
                 held?.pin?.fill(0)
                 held = collected?.let { Held(it, if (info.clientPin == Fido2PinState.NOT_SET) info.minPinLength else null) }
-                pending = null
                 issued.clear()
             }
             try {
@@ -186,15 +206,15 @@ class Fido2EnrolmentSession(
     }
 
     /**
-     * Wipes what is still held AND the PIN of a loop iteration in flight (collected but not yet installed into [held] - the second
-     * describe() call this is racing may still be waiting), and invalidates this session for good: a PIN wiped here is never
-     * installed afterward, even if that describe() goes on to succeed. Called when the ceremony ends; call it too when the host
-     * abandons the enrolment.
+     * Wipes what is still [held] and every buffer currently in [pendingBuffers] (a local variable elsewhere in this class racing a
+     * suspend call with a PIN already in hand), then invalidates this session for good: a buffer wiped here is never installed,
+     * compared or otherwise used afterward, even if the suspend call racing it goes on to succeed. Called when the ceremony ends;
+     * call it too when the host abandons the enrolment.
      */
     fun clear() = synchronized(lock) {
         held?.pin?.fill(0)
-        pending?.fill(0)
-        pending = null
+        pendingBuffers.forEach { it.fill(0) }
+        pendingBuffers.clear()
         issued.forEach { it.fill(0) }
         issued.clear()
         held = null
@@ -234,15 +254,22 @@ class Fido2EnrolmentSession(
                 notice = PinPromptNotice.TOO_SHORT
                 return@repeat
             }
+            // `first` is complete and valid but not yet confirmed: alive here while the confirm prompt below awaits the user, so
+            // it is registered for clear() to reach - the same shape as enrol()'s `collected` around its own second describe() call.
+            register(first)
             val again = try {
                 ask(PinRequest.Choose(pluginId, min, confirm = true, notice = null))
             } catch (e: Throwable) {
+                deregister(first)
                 first.fill(0)
                 throw e
             } ?: run {
+                deregister(first)
                 first.fill(0)
                 throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
             }
+            deregister(first)
+            refuseIfInvalidated(info, first, again)
             val same = java.security.MessageDigest.isEqual(first, again)
             again.fill(0)
             if (same) return first

@@ -402,6 +402,44 @@ class Fido2EnrolmentSessionTest {
     }
 
     @Test
+    fun clearDuringTheChooseConfirmationWipesTheFirstPinImmediately_andRefusesToInstallItIfConfirmationThenResumes() = runTest {
+        val info1 = info(Fido2PinState.NOT_SET, min = 6)
+        val secondAskEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resumeSecondAsk = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var asks = 0
+        var firstHandedOut: ByteArray? = null
+        suspend fun describe(): Fido2AuthenticatorInfo = info1
+        suspend fun ask(request: PinRequest): ByteArray? {
+            asks++
+            if (asks == 1) return "654321".toByteArray().also { firstHandedOut = it }
+            secondAskEntered.complete(Unit)
+            resumeSecondAsk.await()
+            return "654321".toByteArray()
+        }
+        val session = Fido2EnrolmentSession(::describe, ::ask)
+        var caught: Fido2EnrolmentException? = null
+        var ceremonyRan = false
+        val job = launch {
+            try {
+                session.enrol { ceremonyRan = true }
+            } catch (e: Fido2EnrolmentException) {
+                caught = e
+            }
+        }
+        secondAskEntered.await()
+        // The host abandons the enrolment WHILE the confirm prompt is still in flight: `first` is valid and already chosen, but
+        // not yet compared against the confirmation, so it is not yet reachable through held either.
+        session.clear()
+        assertTrue("wiped the instant clear() ran, before the confirmation even resumed", firstHandedOut!!.all { it == 0.toByte() })
+        // The user goes on to type the SAME pin to confirm anyway - the wiped PIN must never be installed or used regardless.
+        resumeSecondAsk.complete(Unit)
+        advanceUntilIdle()
+        assertFalse("the ceremony never ran with the wiped PIN", ceremonyRan)
+        assertEquals(Fido2EnrolmentFailure.CANCELLED, caught?.failure)
+        assertTrue("the session never answers a Choose prompt with the wiped PIN", session.answer(PinRequest.Choose("fido2", 6, confirm = false)) == null)
+    }
+
+    @Test
     fun theLibrarysDescriptionIsMappedFieldByField() {
         val ffi = FfiAuthenticatorInfo(
             listOf("FIDO_2_0", "FIDO_2_1"), ByteArray(16) { it.toByte() }, FfiClientPinState.NOT_SET, 6u, true, null,
