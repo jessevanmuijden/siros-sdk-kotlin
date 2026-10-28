@@ -36,6 +36,15 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          # The FaceTec AAR this job's own "Configure the FaceTec SDK repository" step below can download is
+          # proprietary (sirosfoundation/vendor-maven-packages, gated on FACETEC_MAVEN_TOKEN). setup-gradle's default
+          # Gradle Home cache (~/.gradle/caches/modules-2) is saved on a main-branch run and restored on pull_request
+          # runs, INCLUDING forks - so a cached copy would let any fork PR retrieve the licensed artifact without
+          # either vendor secret, bypassing the private registry's access control entirely. Excluded from both save
+          # and restore so the artifact never enters the shared cache in the first place.
+          gradle-home-cache-excludes: |
+            caches/modules-2/files-2.1/com.facetec
 
       - name: Check the bridge capability vocabulary is generated from its spec
         # spec/bridge-capabilities.json is the single source of truth for the
