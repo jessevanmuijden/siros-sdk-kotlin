@@ -6966,6 +6966,56 @@ class SirosWalletTest {
         assertEquals(listOf("Credential Two"), wallet.presentationHistory.single().credentialNames)
     }
 
+    @Test
+    fun connectEngine_matchRequest_recordsConsentForTheLegacyMatchResponsePath() = runTest(dispatcher) {
+        // Defence in depth (go-wallet-backend#502): the legacy match_request/match_response round trip (this test) is a
+        // SEPARATE, genuinely interactive consent mechanism from handleCredentialSelection's "consent" flow action - it
+        // must record consent too, or a sign_presentation later answered through this same transport would find no
+        // record for the flow (refused, per ConsentGuard.verify's NoRecord) despite the user having just consented here.
+        val matchFlow = MutableSharedFlow<MatchRequestMessage>()
+        val listener = mockk<WalletEventListener>()
+        val store = FakeCredentialStore(
+            mutableListOf(
+                StoredCredential(
+                    id = 2L, format = "dc+sd-jwt", raw = "raw-2",
+                    metadata = CredentialMetadata(name = "Credential Two", vct = "urn:example:vct"),
+                    batchId = 2L, instanceId = 0,
+                ),
+            )
+        )
+        coEvery { listener.onCredentialSelectionRequired(any()) } returns listOf(2L)
+        val engine = mockEngineConstructor(matchRequests = matchFlow)
+        val keystore = mockk<KeystoreManager>()
+        every { keystore.isUnlocked } returns false
+        every { keystore.listKeys() } returns listOf(KeyInfo("test-kid", "ES256", 0L))
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice", credentials = store.getAll())),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to store,
+            "keystore" to keystore,
+            "eventListener" to listener,
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "_presentationHistory" to mutableListOf<PresentationRecord>(),
+        )
+
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        matchFlow.emit(MatchRequestMessage(flowId = "flow-match", dcqlQuery = null))
+        advanceUntilIdle()
+
+        @Suppress("UNCHECKED_CAST")
+        val records = getField(wallet, "consentRecordsByFlow") as Map<String, ConsentRecord>
+        // containsKey, not records["flow-match"] != null: newWallet's default consentRecordsByFlow answers ANY key with a
+        // permissive record (so ~160 unrelated tests don't need to know about this guard) - its get() never returns null,
+        // so only containsKey on the raw map actually distinguishes "nothing was recorded" from "recorded, unrestricted".
+        assertTrue("the legacy match_request/match_response path must record consent too", records.containsKey("flow-match"))
+        val record = records.getValue("flow-match")
+        // A non-DCQL ("_default") match consents to the whole credential - recorded as null, not an empty claim set.
+        assertTrue(record.contains("_default", "2"))
+        assertEquals(null, record["_default", "2"])
+    }
+
     /**
      * Regression: an engine-relayed `mso_mdoc_zk` query must offer the plain
      * mdoc it can be proven from. An earlier version dropped ZK queries'
@@ -7325,6 +7375,59 @@ class SirosWalletTest {
         assertTrue(missingResult.matches.isEmpty())
         // only a CODE reaches the engine: nothing of what was asked for, nothing of what is stored
         assertEquals("no_matching_credential", missingResult.noMatchReason)
+    }
+
+    @Test
+    fun wmpMatchRequest_recordsConsent_theWmpProfileHasNoSeparateInteractiveSelectionStep() = runBlocking {
+        // Defence in depth (go-wallet-backend#502): the WMP profile has no onCredentialSelectionRequired call of its own -
+        // whatever handleWmpMatchRequest offers IS the consent for this flow (there is no later, separate "ask the user"
+        // moment before a sign_presentation can arrive). Without this, every fresh WMP presentation with a non-empty
+        // credentials_to_include would be wrongly refused with NoRecord.
+        val store = FakeCredentialStore(
+            mutableListOf(
+                StoredCredential(
+                    id = 1L, format = "dc+sd-jwt", raw = "raw-pid",
+                    metadata = CredentialMetadata(name = "PID", vct = "urn:eu.europa.ec.eudi:pid:1"),
+                    batchId = 1L, instanceId = 0,
+                ),
+            )
+        )
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to store,
+        )
+
+        invokeWmpMatchRequest(wallet, "flow-wmp", vctQueryPayload("urn:eu.europa.ec.eudi:pid:1"))
+
+        @Suppress("UNCHECKED_CAST")
+        val records = getField(wallet, "consentRecordsByFlow") as Map<String, ConsentRecord>
+        // containsKey, not records["flow-wmp"] != null: newWallet's default consentRecordsByFlow answers ANY key with a
+        // permissive record, so only containsKey on the raw map distinguishes "nothing was recorded" from "recorded".
+        assertTrue("WMP's own match_request handler must record consent too", records.containsKey("flow-wmp"))
+        val record = records.getValue("flow-wmp")
+        assertTrue(record.contains("q-vct", "1"))
+    }
+
+    @Test
+    fun wmpMatchRequest_withNoDcqlQuery_recordsConsentForEveryCredentialUnrestricted() = runBlocking {
+        val store = FakeCredentialStore(mutableListOf(StoredCredential(id = 3L, format = "dc+sd-jwt", raw = "raw", batchId = 3L, instanceId = 0)))
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to store,
+        )
+
+        invokeWmpMatchRequest(wallet, "flow-wmp-noquery", buildJsonObject {})
+
+        @Suppress("UNCHECKED_CAST")
+        val records = getField(wallet, "consentRecordsByFlow") as Map<String, ConsentRecord>
+        assertTrue(records.containsKey("flow-wmp-noquery"))
+        val record = records.getValue("flow-wmp-noquery")
+        assertTrue(record.contains(null, "3"))
+        assertEquals(null, record[null, "3"])
     }
 
     /**
@@ -13081,6 +13184,15 @@ class SirosWalletTest {
         if ("circuitZkClientMetadataByFlow" !in values) {
             values["circuitZkClientMetadataByFlow"] = mutableMapOf<String, JsonObject>()
         }
+        if ("consentRecordsByFlow" !in values) {
+            // A test not about ConsentGuard itself should not have to know every flow id it touches needs a seeded record:
+            // this map answers every lookup with ConsentRecord.unrestrictedForTests() (still a real, non-null record, so the
+            // "no consent recorded" refusal never fires), while staying a normal mutable map for put()/remove() elsewhere.
+            // A test that DOES exercise ConsentGuard passes its own "consentRecordsByFlow" map instead.
+            values["consentRecordsByFlow"] = object : java.util.HashMap<String, ConsentRecord>() {
+                override fun get(key: String): ConsentRecord = super.get(key) ?: ConsentRecord.unrestrictedForTests()
+            }
+        }
         if ("trustDecisionCache" !in values) {
             values["trustDecisionCache"] = TrustDecisionCache(java.time.Duration.ZERO)
         }
@@ -15439,6 +15551,131 @@ class SirosWalletTest {
         assertFalse(error.captured.contains("not.a.valid.jwe.value"))
         verify(exactly = 1) { listener.onFlowError("flow-d", any(), any()) }
         assertFalse("the issuance is over, so is its key", blind.holdsKey("flow-d"))
+    }
+
+    @Test
+    fun legacySignPresentation_refusesWhenCredentialsToIncludeAsksForMoreThanWasConsented() = runTest(dispatcher) {
+        // Defence in depth (go-wallet-backend#502): credentials_to_include round-trips from this wallet's OWN "consent" flow
+        // action - a buggy or compromised engine could instead ask to disclose more than the user actually consented to.
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.signVpToken(any(), any(), any(), any(), any()) } returns "should never be used"
+        val cred = StoredCredential(id = 7L, format = "dc+sd-jwt", raw = "raw-sd-jwt", batchId = 1L, instanceId = 0)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to keystore,
+            "eventListener" to listener,
+            "credentialStore" to FakeCredentialStore(mutableListOf(cred)),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        // Set AFTER connectEngine, not via newWallet: connectEngine clears consentRecordsByFlow at the start of every
+        // connection (a flow id of a replaced connection must not inherit stale consent - see clearPerFlowAuthorizationState's
+        // doc comment), so seeding it before would be wiped before the sign request ever arrives, and the test would then pass
+        // for the wrong reason (NoRecord, not ExtraClaims).
+        // The user consented to disclosing ONLY given_name for this query/credential - not the permissive test default.
+        setField(wallet, "consentRecordsByFlow", mutableMapOf("flow-guard" to ConsentRecord(listOf(ConsentedSelection("pid", "7", setOf("given_name"))))))
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-guard", messageId = "msg-guard", action = "sign_presentation",
+                params = SignRequestParams(
+                    audience = "admin-audience", nonce = "n",
+                    // The engine asks for every claim although the user only consented to one.
+                    credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pid", credentialId = "7", disclosedClaims = listOf("given_name", "family_name", "birth_date"))),
+                    verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "client-id-1", clientIdScheme = "x509_san_dns", responseMode = "direct_post.jwt", responseUri = "https://verifier.example.com/response", signed = true, signatureVerification = "verified"),
+                ),
+            )
+        )
+        repeat(5) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            advanceUntilIdle()
+        }
+        coVerify(exactly = 0) { keystore.signVpToken(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-guard", match { it.contains("does not match what was consented to") }, any()) }
+    }
+
+    @Test
+    fun connectingANewEngineSession_clearsStalePerFlowConsentFromAReplacedConnection() = runTest(dispatcher) {
+        // Defence in depth (go-wallet-backend#502): a flow id of a replaced/ended session reused by a later one (the
+        // backend's flow id namespace is not guaranteed session-scoped) must not inherit stale consent recorded under
+        // that id by the PRIOR session - see clearPerFlowAuthorizationState's doc comment.
+        val store = FakeCredentialStore(mutableListOf())
+        mockEngineConstructor()
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            "credentialStore" to store,
+        )
+        setField(
+            wallet, "consentRecordsByFlow",
+            mutableMapOf("stale-flow" to ConsentRecord(listOf(ConsentedSelection("pid", "7", setOf("given_name"))))),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        @Suppress("UNCHECKED_CAST")
+        val remaining = getField(wallet, "consentRecordsByFlow") as Map<String, ConsentRecord>
+        assertTrue("a stale flow's consent must not survive a new/replaced engine connection", remaining.isEmpty())
+    }
+
+    @Test
+    fun legacySignPresentation_mdocConsentedAsAWhole_discloses_everything_not_nothing() = runTest(dispatcher) {
+        // Defence in depth (go-wallet-backend#502), correctness: a credential consented to as a WHOLE (no DCQL claims
+        // restriction) is recorded with claims = null, never an empty set - MdocDeviceResponseBuilder reads a non-null
+        // EMPTY disclosed-claims list as "disclose nothing" but null as "disclose everything" (unlike SD-JWT's signer,
+        // which treats null and empty the same). Collapsing "whole credential" to an empty set here would silently strip
+        // every element of a legitimately whole-attestation-consented mdoc.
+        // Production code decodes cred.raw via android.util.Base64 before calling the keystore - the Android SDK stub jar
+        // throws on any real call in a plain (non-Robolectric) JUnit test (see handleDCAPIRequest_mdocCredential_... above).
+        io.mockk.mockkStatic(android.util.Base64::class)
+        every { android.util.Base64.decode(any<String>(), any()) } returns "fake-cbor".toByteArray()
+        every { android.util.Base64.encodeToString(any(), any()) } returns "ZGV2aWNlLXJlc3BvbnNl"
+        try {
+            val signFlow = MutableSharedFlow<SignRequestMessage>()
+            val engine = mockEngineConstructor(signRequests = signFlow)
+            every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+            val keystore = mockk<KeystoreManager>(relaxed = true)
+            coEvery { keystore.signMdocPresentation(any(), any(), any(), any(), any(), any(), any()) } returns byteArrayOf(1, 2, 3)
+            val cred = StoredCredential(id = 9L, format = "mso_mdoc", raw = "ZmFrZS1jYm9y", batchId = 1L, instanceId = 0)
+            val wallet = newWallet(
+                "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+                "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+                "keystore" to keystore,
+                "credentialStore" to FakeCredentialStore(mutableListOf(cred)),
+                "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+                "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            )
+            invokeConnectEngine(wallet, "app-token")
+            advanceUntilIdle()
+            // Whole-credential consent: claims = null, as handleCredentialSelection records a non-DCQL/no-claims-array match.
+            setField(wallet, "consentRecordsByFlow", mutableMapOf("flow-mdoc" to ConsentRecord(listOf(ConsentedSelection("pid", "9", null)))))
+            signFlow.emit(
+                SignRequestMessage(
+                    flowId = "flow-mdoc", messageId = "msg-mdoc", action = "sign_presentation",
+                    params = SignRequestParams(
+                        audience = "admin-audience", nonce = "n",
+                        // The engine's own disclosedClaims value here is irrelevant - and MUST be ignored - either way.
+                        credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pid", credentialId = "9", disclosedClaims = null)),
+                        verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "client-id-1", clientIdScheme = "x509_san_dns", responseMode = "direct_post.jwt", responseUri = "https://verifier.example.com/response", signed = true, signatureVerification = "verified"),
+                    ),
+                )
+            )
+            repeat(5) {
+                runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+                advanceUntilIdle()
+            }
+            coVerify(exactly = 1) { keystore.signMdocPresentation(any(), isNull(), any(), any(), any(), any(), any()) }
+            verify(exactly = 1) { engine.sendSignResponse(flowId = "flow-mdoc", vpToken = any(), messageId = "msg-mdoc") }
+        } finally {
+            io.mockk.unmockkStatic(android.util.Base64::class)
+        }
     }
 
     @Test
