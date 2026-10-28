@@ -865,6 +865,8 @@ class SirosWallet private constructor(
         // This session's issuance material goes with its connections and keystore, whether or not the replacement login
         // succeeds (a login that ends in WalletState.Error leaves no new connection to replace it).
         blindIssuance.clear()
+        // A flow id of this cut-off session reused by the replacement login must not inherit its consent - see the doc comment.
+        clearPerFlowAuthorizationState()
         engineStateJob?.cancel()
         engineStateJob = null
         engineSession?.disconnect()
@@ -1897,6 +1899,8 @@ class SirosWallet private constructor(
         presentationLinks?.releaseInFlight()
         // A zkp_req signing still waiting on the user belongs to the session that ends here: nothing of it may act on a later one.
         stopAllZkSigning()
+        // A flow id of this ended session reused by a later one must not inherit its consent - see the doc comment.
+        clearPerFlowAuthorizationState()
         engineStateJob?.cancel()
         engineStateJob = null
         engineSession?.disconnect()
@@ -8002,7 +8006,7 @@ class SirosWallet private constructor(
                 verifier = verifier,
                 requestSigned = null,
                 disclosures = selected.mapNotNull { (ref, c) ->
-                    c?.let { org.siros.sdk.wallet.transaction.DisclosureInput(ref.credentialQueryId, it.metadata?.name, consentVerified[ref.credentialQueryId to ref.credentialId].orEmpty().toList()) }
+                    c?.let { org.siros.sdk.wallet.transaction.DisclosureInput(ref.credentialQueryId, it.metadata?.name, consentVerified[ref.credentialQueryId to ref.credentialId]?.toList()) }
                 },
             ),
             declared = declared,
@@ -8014,7 +8018,7 @@ class SirosWallet private constructor(
                 "A selected credential is not in the wallet",
             )
             val binding = plan.bindingFor(ref.credentialQueryId)
-            val consentedClaims = consentVerified[ref.credentialQueryId to ref.credentialId].orEmpty().toList()
+            val consentedClaims = consentVerified[ref.credentialQueryId to ref.credentialId]?.toList()
             tokens += ref.credentialQueryId to if (binding != null) {
                 signScaVp(c, consentedClaims, nonce, audience, binding, plan)
             } else {
@@ -8307,6 +8311,10 @@ class SirosWallet private constructor(
             // candidate, which is what this handler always answered. The bug
             // was answering that for a real query too.
             Timber.w("WMP match request for flow $flowId carries no dcql_query; offering every stored credential")
+            // This IS WMP's consent for this flow: the profile has no separate interactive selection step (see
+            // ConsentGuard's doc comment on why this matters) - whatever is offered here is what a LATER sign_presentation
+            // may validly ask to disclose. No query at all: every credential, unrestricted (null, not an empty set).
+            consentRecordsByFlow[flowId] = ConsentRecord(allCreds.map { cred -> ConsentedSelection(null, cred.id.toString(), null) })
             return org.siros.sdk.transport.wmp.openid4x.MatchResult(
                 matches = allCreds.map { cred ->
                     org.siros.sdk.transport.wmp.openid4x.CredentialMatch(
@@ -8327,18 +8335,24 @@ class SirosWallet private constructor(
         val matchResultByCredentialId = buildMap {
             for (r in matchResults) for (c in r.candidates) putIfAbsent(c.id, r)
         }
+        // Each requestedClaims entry is a full DCQL claim path; only its last segment is the disclosable element id (see
+        // the legacy consent payload's identical mapNotNull). Empty/absent means the whole credential: null, not an empty
+        // set (see ConsentedSelection's doc comment - mdoc specifically needs that distinction).
+        val claimsByCredentialId = matchResultByCredentialId.mapValues { (_, result) ->
+            result.requestedClaims.mapNotNull { it.lastOrNull() }.distinct().toSet().ifEmpty { null }
+        }
         val matches = matchResultByCredentialId.map { (credentialId, result) ->
             org.siros.sdk.transport.wmp.openid4x.CredentialMatch(
                 credentialId = credentialId.toString(),
                 credentialQueryId = result.queryId,
-                // Each requestedClaims entry is a full DCQL claim path; only
-                // its last segment is the disclosable element id (see the
-                // legacy consent payload's identical mapNotNull).
-                disclosedClaims = result.requestedClaims.mapNotNull { it.lastOrNull() }.distinct()
-                    .takeIf { it.isNotEmpty() },
+                disclosedClaims = claimsByCredentialId[credentialId]?.toList(),
             )
         }
         if (matches.isNotEmpty()) {
+            // This IS WMP's consent for this flow - see the no-dcql_query branch's identical comment above.
+            consentRecordsByFlow[flowId] = ConsentRecord(matchResultByCredentialId.map { (credentialId, result) ->
+                ConsentedSelection(result.queryId, credentialId.toString(), claimsByCredentialId[credentialId])
+            })
             return org.siros.sdk.transport.wmp.openid4x.MatchResult(matches = matches)
         }
         val reason = noMatchReason(dcqlQuery, allCreds.size)
@@ -8501,6 +8515,8 @@ class SirosWallet private constructor(
         engineSession?.disconnect()
         // Flows of the replaced connection are abandoned: so are their response keys.
         blindIssuance.clear()
+        // A flow id of the replaced connection reused by the new one must not inherit its consent - see the doc comment.
+        clearPerFlowAuthorizationState()
 
         // Resolve engine URL: explicit config > discovery > same as backend
         val engineBaseUrl = config.engineUrl
@@ -8716,11 +8732,15 @@ class SirosWallet private constructor(
                                     val matchResult = storedMatchResults?.firstOrNull { r ->
                                         r.queryId == ref.credentialQueryId || r.candidates.any { it.id == cred.id }
                                     }
-                                    val consentedClaims = consentVerified[ref.credentialQueryId to ref.credentialId].orEmpty().toList()
+                                    // null = whole credential consented, no claim-level restriction - must stay null
+                                    // downstream (never defaulted to an empty list: mdoc's signer reads an empty,
+                                    // non-null disclosed-claims list as "disclose nothing", the opposite of null's
+                                    // "disclose everything" - see ConsentedSelection's doc comment).
+                                    val consentedClaims = consentVerified[ref.credentialQueryId to ref.credentialId]?.toList()
                                     Timber.d(
                                         "sign_presentation: credentialQueryId=${ref.credentialQueryId} " +
                                             "credId=${cred.id} matchResult.format=${matchResult?.format} " +
-                                            "zkSystemTypes=${matchResult?.zkSystemTypes} disclosedClaims.size=${consentedClaims.size}"
+                                            "zkSystemTypes=${matchResult?.zkSystemTypes} disclosedClaims.size=${consentedClaims?.size}"
                                     )
 
                                     if (matchResult?.format?.equals("mso_mdoc_zk", ignoreCase = true) == true) {
@@ -8736,7 +8756,7 @@ class SirosWallet private constructor(
                                         val kid = cred.kid ?: keystore.listKeys().firstOrNull()?.keyId
                                         // Only bind a pseudonym when actually disclosed for this
                                         // query - see handleDCAPIRequest's identical comment.
-                                        val wantsPseudonym = consentedClaims.contains(LongfellowZkProofSystem.PSEUDONYM_CLAIM)
+                                        val wantsPseudonym = consentedClaims?.contains(LongfellowZkProofSystem.PSEUDONYM_CLAIM) == true
                                         val verifierIdentity = if (wantsPseudonym) {
                                             // audience has already been checked against the
                                             // trust-evaluated verifier identifier by
@@ -8780,7 +8800,7 @@ class SirosWallet private constructor(
                                                     credentialBytes = credBytes,
                                                     requestedSystems = matchResult.zkSystemTypes.orEmpty(),
                                                     sessionTranscript = sessionTranscript,
-                                                    requestedClaims = consentedClaims,
+                                                    requestedClaims = consentedClaims.orEmpty(),
                                                     verifierIdentity = verifierIdentity,
                                                 ),
                                                 signer = { algorithm, data ->
@@ -9062,6 +9082,12 @@ class SirosWallet private constructor(
                         }
                     } else null
                     if (zkSelection != null) {
+                        // Recorded in parallel, same as handleCredentialSelection: this IS the real interactive consent for
+                        // this (legacy match_request/match_response) transport - the engine's LATER sign_presentation must be
+                        // checked against this, not trusted as-is. See ConsentGuard's doc comment.
+                        consentRecordsByFlow[msg.flowId] = ConsentRecord(zkSelection.mapNotNull { (r, id) ->
+                            allCreds.find { it.id == id }?.let { ConsentedSelection(r.queryId, id.toString(), emptySet()) }
+                        })
                         engine.sendMatchResponse(msg.flowId, zkSelection.mapNotNull { (r, id) ->
                             allCreds.find { it.id == id }?.let { cred ->
                                 CredentialMatch(credentialQueryId = r.queryId, credentialId = cred.id.toString(), format = cred.format, vct = CredentialUtils.vctOf(cred), availableClaims = null)
@@ -9069,6 +9095,19 @@ class SirosWallet private constructor(
                         })
                         return@collect
                     }
+                    // Recorded in parallel, same as handleCredentialSelection: this IS the real interactive consent for this
+                    // (legacy match_request/match_response) transport - see ConsentGuard's doc comment. Empty/absent
+                    // requestedClaims means the whole credential was consented (no DCQL claims array) - recorded as null, not
+                    // an empty set (see ConsentedSelection's doc comment for why mdoc specifically needs that distinction).
+                    consentRecordsByFlow[msg.flowId] = ConsentRecord(selectedIds.mapNotNull { id ->
+                        allCreds.find { it.id == id }?.let { cred ->
+                            ConsentedSelection(
+                                matchResultByCredentialId[id]?.queryId,
+                                cred.id.toString(),
+                                matchResultByCredentialId[id]?.requestedClaims?.mapNotNull { it.lastOrNull() }?.distinct()?.toSet()?.ifEmpty { null },
+                            )
+                        }
+                    })
                     val matches = selectedIds.mapNotNull { id ->
                         allCreds.find { it.id == id }?.let { cred ->
                             val queryId = matchResultByCredentialId[id]?.queryId
@@ -10891,6 +10930,20 @@ class SirosWallet private constructor(
     }
 
     /**
+     * Drops EVERY flow's recorded consent, not just one - called wherever this wallet instance tears down or replaces its
+     * engine session (logout, a cut-off-driven re-login, reconnecting with a new session) while staying alive for reuse.
+     * Without this, a flow id from the ended session that happens to be reused by a later one (the backend's flow id
+     * namespace is not guaranteed session-scoped) would find a stale [ConsentRecord] still sitting in
+     * [consentRecordsByFlow] and let [ConsentGuard] pass a credential/query pair the CURRENT session's user never actually
+     * consented to. The per-flow connection-generation checks elsewhere guard against a stale MESSAGE arriving late on a
+     * replaced socket; they do not guard against this, since a message legitimately tagged with the NEW generation is not
+     * stale by that check even if it reuses an old flow id.
+     */
+    private fun clearPerFlowAuthorizationState() {
+        consentRecordsByFlow.clear()
+    }
+
+    /**
      * Handle credential_selection step from the engine.
      *
      * The backend sends DCQL query + verifier info in a flow_progress message.
@@ -11133,7 +11186,10 @@ class SirosWallet private constructor(
                                     ?.mapNotNull { it.lastOrNull() }
                                     ?.distinct()
                                     ?: emptyList()
-                                consentedSelections += ConsentedSelection(matchResult?.queryId, id.toString(), requestedClaims.toSet())
+                                // Empty requestedClaims means the whole credential was consented (no DCQL claims array, or a
+                                // non-DCQL match) - recorded as null, not an empty set: see ConsentedSelection's doc comment
+                                // for why the two are not interchangeable downstream (mdoc's signer in particular).
+                                consentedSelections += ConsentedSelection(matchResult?.queryId, id.toString(), requestedClaims.toSet().ifEmpty { null })
                                 put("disclosed_claims", kotlinx.serialization.json.buildJsonArray {
                                     for (claim in requestedClaims) {
                                         add(kotlinx.serialization.json.JsonPrimitive(claim))

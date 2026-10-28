@@ -12,7 +12,7 @@ import org.siros.sdk.transport.engine.CredentialRef
  * round-trips it, only as a reference to be checked against what this wallet itself reported consenting to.
  */
 class ConsentGuardTest {
-    private fun record(vararg entries: Triple<String?, String, Set<String>>) =
+    private fun record(vararg entries: Triple<String?, String, Set<String>?>) =
         ConsentRecord(entries.map { (q, c, claims) -> ConsentedSelection(q, c, claims) })
 
     private fun ref(queryId: String?, credentialId: String, claims: List<String>? = null) =
@@ -109,6 +109,25 @@ class ConsentGuardTest {
         } catch (e: ConsentMismatchException) {
             assertTrue(e.reason is ConsentMismatchReason.ExtraClaims)
         }
+    }
+
+    @Test
+    fun aWholeCredentialConsentIsRecordedAsNull_distinctFromAnExplicitEmptyClaimSet() {
+        // A DCQL query with no `claims` array (or a non-DCQL match) means "the whole credential was consented", recorded as
+        // null - NOT an empty set. The engine may then ask for any specific claims (it already showed the user everything),
+        // and the claims to actually disclose downstream must stay null (never defaulted to empty - see mdoc's semantics
+        // below, where an empty disclosed-claims list means "disclose nothing").
+        val r = record(Triple("q1", "1", null))
+        val result = ConsentGuard.verify(r, listOf(ref("q1", "1", listOf("given_name", "family_name"))))
+        assertEquals(null, result["q1" to "1"])
+    }
+
+    @Test
+    fun aWholeCredentialConsentAcceptsNoDisclosedClaimsToo() {
+        val r = record(Triple("q1", "1", null))
+        val result = ConsentGuard.verify(r, listOf(ref("q1", "1", null)))
+        assertTrue(result.containsKey("q1" to "1"))
+        assertEquals(null, result["q1" to "1"])
     }
 
     @Test
