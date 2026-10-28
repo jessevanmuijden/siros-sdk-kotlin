@@ -5558,6 +5558,14 @@ class SirosWallet private constructor(
     private val circuitZkClientMetadataByFlow = mutableMapOf<String, JsonObject>()
 
     /**
+     * What this wallet itself reported consenting to for a flow, exactly as sent in the `consent` flow action - see
+     * [ConsentGuard]'s doc comment for why `sign_presentation`'s `credentials_to_include` must be checked against this rather
+     * than trusted as the engine round-trips it. PEEKED (never removed) by a sign handler: more than one `sign_presentation`
+     * can arrive for a flow (a retried request, several queries signed one at a time). Removed only in [clearFlowMatchState].
+     */
+    private val consentRecordsByFlow = mutableMapOf<String, ConsentRecord>()
+
+    /**
      * Fires [ZkMdocPresentation.prewarmVega] for every ZK-eligible match as
      * soon as a verifier's request names its claims - well before the user
      * has approved anything, let alone before `sign_presentation` arrives -
@@ -7888,7 +7896,7 @@ class SirosWallet private constructor(
                         wmpPresentationResult(
                             params,
                             signScaPresentation(
-                                params.credentialsToInclude.orEmpty(), params.nonce, params.audience, params.responseMode,
+                                flowId, params.credentialsToInclude.orEmpty(), params.nonce, params.audience, params.responseMode,
                                 wire, verifierName, wmpSessionDeclaredTransactionData,
                             ),
                         )
@@ -7897,6 +7905,9 @@ class SirosWallet private constructor(
                         throw e
                     }
                 }
+                // Defence in depth: see ConsentGuard's doc comment. This fallback path reads no per-ref claims, but the
+                // referenced credential/query must still be one the user actually consented to.
+                ConsentGuard.verify(consentRecordsByFlow[flowId], params.credentialsToInclude.orEmpty())
                 val vpToken = keystore.signPresentation(
                     nonce = params.nonce,
                     audience = params.audience,
@@ -7953,6 +7964,7 @@ class SirosWallet private constructor(
      * the same (combined) request is refused before the user is asked.
      */
     private suspend fun signScaPresentation(
+        flowId: String,
         refs: List<org.siros.sdk.transport.engine.CredentialRef>,
         nonce: String,
         audience: String,
@@ -7961,6 +7973,9 @@ class SirosWallet private constructor(
         verifierName: String?,
         declared: Boolean,
     ): List<Pair<String?, String>> {
+        // Defence in depth: see ConsentGuard's doc comment. Checked for the whole batch before anything is signed; only the
+        // consented claims are ever used below, never a ref's own disclosedClaims.
+        val consentVerified = ConsentGuard.verify(consentRecordsByFlow[flowId], refs)
         val all = credentialStore.getAll()
         val selected = refs.map { ref -> ref to all.find { it.id == ref.credentialId.toLongOrNull() } }
         val verifier = verifierName ?: audience
@@ -7987,7 +8002,7 @@ class SirosWallet private constructor(
                 verifier = verifier,
                 requestSigned = null,
                 disclosures = selected.mapNotNull { (ref, c) ->
-                    c?.let { org.siros.sdk.wallet.transaction.DisclosureInput(ref.credentialQueryId, it.metadata?.name, ref.disclosedClaims) }
+                    c?.let { org.siros.sdk.wallet.transaction.DisclosureInput(ref.credentialQueryId, it.metadata?.name, consentVerified[ref.credentialQueryId to ref.credentialId].orEmpty().toList()) }
                 },
             ),
             declared = declared,
@@ -7999,10 +8014,11 @@ class SirosWallet private constructor(
                 "A selected credential is not in the wallet",
             )
             val binding = plan.bindingFor(ref.credentialQueryId)
+            val consentedClaims = consentVerified[ref.credentialQueryId to ref.credentialId].orEmpty().toList()
             tokens += ref.credentialQueryId to if (binding != null) {
-                signScaVp(c, ref.disclosedClaims, nonce, audience, binding, plan)
+                signScaVp(c, consentedClaims, nonce, audience, binding, plan)
             } else {
-                keystore.signVpToken(c.raw, ref.disclosedClaims, nonce, audience, c.kid)
+                keystore.signVpToken(c.raw, consentedClaims, nonce, audience, c.kid)
             }
         }
         return tokens
@@ -8115,6 +8131,12 @@ class SirosWallet private constructor(
                 val queryId = ref.credentialQueryId ?: refuse("selection-query", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
                 if (selectionByQuery.put(queryId, id).let { it != null && it != id }) refuse("selection-ambiguous", org.siros.sdk.wallet.dcapi.DCAPIRefusalReason.SELECTED_CREDENTIAL_UNAVAILABLE)
             }
+            // NOT guarded by ConsentGuard here, deliberately: a zkp_req query's credential assignment can legitimately differ
+            // from what consent-time recorded (confirmed by circuitZkRedirect_aCredentialReusedAcrossQueries_keepsEveryQueriesOwnChoice
+            // et al. - the engine may validly reassign which eligible credential answers which query between consent and sign).
+            // This path's own checks (every ref names a query that was actually matched, above) plus its FRESH
+            // presentationConsentHandler ask inside answerCircuitZkQueries - built from the credential about to be used, not a
+            // stale record - are its defence in depth instead. See ConsentGuard's doc comment for the three sites it does guard.
             val picked = selectionByQuery.values.distinct()
             val origin = try {
                 java.net.URI(responseUri).let { u -> "${u.scheme}://${u.authority}" }
@@ -8224,6 +8246,7 @@ class SirosWallet private constructor(
             val verifierName = lastTrustResults[msg.flowId]?.entityName
             validateAudience(msg.flowId, audience)
             val presented = signScaPresentation(
+                flowId = msg.flowId,
                 refs = params.credentialsToInclude.orEmpty(),
                 nonce = params.nonce ?: "",
                 audience = audience,
@@ -8675,6 +8698,11 @@ class SirosWallet private constructor(
                                     "sign_presentation: flow=${msg.flowId} storedMatchResults=" +
                                         "${storedMatchResults?.map { "${it.queryId}:${it.format}" }}"
                                 )
+                                // Defence in depth: credentials_to_include round-trips from the consent this wallet itself sent
+                                // (handleCredentialSelection) - the engine must not be trusted to echo it back unchanged. Checked
+                                // for the WHOLE batch before anything is signed; only the consented claims are ever used below,
+                                // never ref.disclosedClaims itself (a null/empty value there is not a safe "nothing more").
+                                val consentVerified = ConsentGuard.verify(consentRecordsByFlow[msg.flowId], credsToInclude)
                                 val vpParts = credsToInclude.mapNotNull { ref ->
                                   val presentedToken: String? = run {
                                     // ref.credentialId arrives as a string over the WMP wire
@@ -8688,10 +8716,11 @@ class SirosWallet private constructor(
                                     val matchResult = storedMatchResults?.firstOrNull { r ->
                                         r.queryId == ref.credentialQueryId || r.candidates.any { it.id == cred.id }
                                     }
+                                    val consentedClaims = consentVerified[ref.credentialQueryId to ref.credentialId].orEmpty().toList()
                                     Timber.d(
                                         "sign_presentation: credentialQueryId=${ref.credentialQueryId} " +
                                             "credId=${cred.id} matchResult.format=${matchResult?.format} " +
-                                            "zkSystemTypes=${matchResult?.zkSystemTypes} disclosedClaims=${ref.disclosedClaims}"
+                                            "zkSystemTypes=${matchResult?.zkSystemTypes} disclosedClaims.size=${consentedClaims.size}"
                                     )
 
                                     if (matchResult?.format?.equals("mso_mdoc_zk", ignoreCase = true) == true) {
@@ -8707,7 +8736,7 @@ class SirosWallet private constructor(
                                         val kid = cred.kid ?: keystore.listKeys().firstOrNull()?.keyId
                                         // Only bind a pseudonym when actually disclosed for this
                                         // query - see handleDCAPIRequest's identical comment.
-                                        val wantsPseudonym = ref.disclosedClaims?.contains(LongfellowZkProofSystem.PSEUDONYM_CLAIM) == true
+                                        val wantsPseudonym = consentedClaims.contains(LongfellowZkProofSystem.PSEUDONYM_CLAIM)
                                         val verifierIdentity = if (wantsPseudonym) {
                                             // audience has already been checked against the
                                             // trust-evaluated verifier identifier by
@@ -8751,7 +8780,7 @@ class SirosWallet private constructor(
                                                     credentialBytes = credBytes,
                                                     requestedSystems = matchResult.zkSystemTypes.orEmpty(),
                                                     sessionTranscript = sessionTranscript,
-                                                    requestedClaims = ref.disclosedClaims ?: emptyList(),
+                                                    requestedClaims = consentedClaims,
                                                     verifierIdentity = verifierIdentity,
                                                 ),
                                                 signer = { algorithm, data ->
@@ -8776,7 +8805,7 @@ class SirosWallet private constructor(
                                         val credBytes = android.util.Base64.decode(cred.raw, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
                                         val deviceResponse = keystore.signMdocPresentation(
                                             credentialBytes = credBytes,
-                                            disclosedClaims = ref.disclosedClaims,
+                                            disclosedClaims = consentedClaims,
                                             nonce = nonce,
                                             audience = audience,
                                             responseUri = params?.responseUri ?: "",
@@ -8788,7 +8817,7 @@ class SirosWallet private constructor(
                                         // SD-JWT VP token with KB-JWT
                                         keystore.signVpToken(
                                             credential = cred.raw,
-                                            disclosedClaims = ref.disclosedClaims,
+                                            disclosedClaims = consentedClaims,
                                             nonce = nonce,
                                             audience = audience,
                                             kid = cred.kid,
@@ -10858,6 +10887,7 @@ class SirosWallet private constructor(
     private fun clearFlowMatchState(flowId: String) {
         pendingMatchResultsByFlow.remove(flowId)
         circuitZkClientMetadataByFlow.remove(flowId)
+        consentRecordsByFlow.remove(flowId)
     }
 
     /**
@@ -11051,11 +11081,16 @@ class SirosWallet private constructor(
 
                 // Build consent payload with selected credentials
                 // Must match backend ConsentSelection: credential_query_id, credential_id, disclosed_claims
+                // Recorded in parallel (ConsentedSelection, never mutated afterward): the engine's LATER sign_presentation
+                // round-trips credentials_to_include from exactly this, and a buggy or compromised engine asking to disclose
+                // more than this must be refused rather than trusted - see ConsentGuard's doc comment.
+                val consentedSelections = mutableListOf<ConsentedSelection>()
                 val consentPayload = kotlinx.serialization.json.buildJsonObject {
                     put("selected_credentials", kotlinx.serialization.json.buildJsonArray {
                         if (zkSelection != null) {
                             // zkp_req: one selection per query, a credential reusable across queries, no disclosed claims.
                             for ((r, id) in zkSelection) {
+                                consentedSelections += ConsentedSelection(r.queryId, id.toString(), emptySet())
                                 add(kotlinx.serialization.json.buildJsonObject {
                                     put("credential_query_id", kotlinx.serialization.json.JsonPrimitive(r.queryId))
                                     put("credential_id", kotlinx.serialization.json.JsonPrimitive(id.toString()))
@@ -11098,6 +11133,7 @@ class SirosWallet private constructor(
                                     ?.mapNotNull { it.lastOrNull() }
                                     ?.distinct()
                                     ?: emptyList()
+                                consentedSelections += ConsentedSelection(matchResult?.queryId, id.toString(), requestedClaims.toSet())
                                 put("disclosed_claims", kotlinx.serialization.json.buildJsonArray {
                                     for (claim in requestedClaims) {
                                         add(kotlinx.serialization.json.JsonPrimitive(claim))
@@ -11107,6 +11143,7 @@ class SirosWallet private constructor(
                         }
                     })
                 }
+                consentRecordsByFlow[flowId] = ConsentRecord(consentedSelections)
                 engine.sendFlowAction(flowId, "consent", consentPayload)
             } catch (e: Throwable) {
                 // Not only Exception: a native matcher/prover linkage Error would otherwise kill this coroutine with no log and no

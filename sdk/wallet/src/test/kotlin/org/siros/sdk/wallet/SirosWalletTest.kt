@@ -13081,6 +13081,15 @@ class SirosWalletTest {
         if ("circuitZkClientMetadataByFlow" !in values) {
             values["circuitZkClientMetadataByFlow"] = mutableMapOf<String, JsonObject>()
         }
+        if ("consentRecordsByFlow" !in values) {
+            // A test not about ConsentGuard itself should not have to know every flow id it touches needs a seeded record:
+            // this map answers every lookup with ConsentRecord.unrestrictedForTests() (still a real, non-null record, so the
+            // "no consent recorded" refusal never fires), while staying a normal mutable map for put()/remove() elsewhere.
+            // A test that DOES exercise ConsentGuard passes its own "consentRecordsByFlow" map instead.
+            values["consentRecordsByFlow"] = object : java.util.HashMap<String, ConsentRecord>() {
+                override fun get(key: String): ConsentRecord = super.get(key) ?: ConsentRecord.unrestrictedForTests()
+            }
+        }
         if ("trustDecisionCache" !in values) {
             values["trustDecisionCache"] = TrustDecisionCache(java.time.Duration.ZERO)
         }
@@ -15439,6 +15448,50 @@ class SirosWalletTest {
         assertFalse(error.captured.contains("not.a.valid.jwe.value"))
         verify(exactly = 1) { listener.onFlowError("flow-d", any(), any()) }
         assertFalse("the issuance is over, so is its key", blind.holdsKey("flow-d"))
+    }
+
+    @Test
+    fun legacySignPresentation_refusesWhenCredentialsToIncludeAsksForMoreThanWasConsented() = runTest(dispatcher) {
+        // Defence in depth (go-wallet-backend#502): credentials_to_include round-trips from this wallet's OWN "consent" flow
+        // action - a buggy or compromised engine could instead ask to disclose more than the user actually consented to.
+        val signFlow = MutableSharedFlow<SignRequestMessage>()
+        val listener = mockk<WalletEventListener>(relaxed = true)
+        val engine = mockEngineConstructor(signRequests = signFlow)
+        every { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } just runs
+        val keystore = mockk<KeystoreManager>(relaxed = true)
+        coEvery { keystore.signVpToken(any(), any(), any(), any(), any()) } returns "should never be used"
+        val cred = StoredCredential(id = 7L, format = "dc+sd-jwt", raw = "raw-sd-jwt", batchId = 1L, instanceId = 0)
+        val wallet = newWallet(
+            "_state" to MutableStateFlow<WalletState>(WalletState.Ready(userId = "user-1", displayName = "Alice")),
+            "scope" to CoroutineScope(dispatcher + SupervisorJob()),
+            "keystore" to keystore,
+            "eventListener" to listener,
+            "credentialStore" to FakeCredentialStore(mutableListOf(cred)),
+            "lastTrustResults" to mutableMapOf<String, TrustResult>(),
+            "config" to WalletConfig(backendUrl = "https://wallet.example.com"),
+            // The user consented to disclosing ONLY given_name for this query/credential - not the permissive test default.
+            "consentRecordsByFlow" to mutableMapOf("flow-guard" to ConsentRecord(listOf(ConsentedSelection("pid", "7", setOf("given_name"))))),
+        )
+        invokeConnectEngine(wallet, "app-token")
+        advanceUntilIdle()
+        signFlow.emit(
+            SignRequestMessage(
+                flowId = "flow-guard", messageId = "msg-guard", action = "sign_presentation",
+                params = SignRequestParams(
+                    audience = "admin-audience", nonce = "n",
+                    // The engine asks for every claim although the user only consented to one.
+                    credentialsToInclude = listOf(org.siros.sdk.transport.engine.CredentialRef(credentialQueryId = "pid", credentialId = "7", disclosedClaims = listOf("given_name", "family_name", "birth_date"))),
+                    verifiedRequest = org.siros.sdk.transport.VerifiedRequest(clientId = "client-id-1", clientIdScheme = "x509_san_dns", responseMode = "direct_post.jwt", responseUri = "https://verifier.example.com/response", signed = true, signatureVerification = "verified"),
+                ),
+            )
+        )
+        repeat(5) {
+            runBlocking(Dispatchers.Default) { kotlinx.coroutines.delay(50) }
+            advanceUntilIdle()
+        }
+        coVerify(exactly = 0) { keystore.signVpToken(any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { engine.sendSignResponse(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        verify(exactly = 1) { listener.onFlowError("flow-guard", match { it.contains("does not match what was consented to") }, any()) }
     }
 
     @Test
