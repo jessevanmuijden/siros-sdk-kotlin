@@ -49,6 +49,23 @@ jobs:
         # change is recorded with `./gradlew apiDump` and reviewed as a diff.
         run: ./gradlew apiCheck --no-daemon
 
+      - name: Configure the FaceTec SDK repository
+        # Supplies the AAR that FaceTec10ApiContractTest checks FaceTecApi's reflection
+        # against. Without it that test assumes-out, which is how the FaceTec 9 -> 10 break
+        # (#246) reached main unnoticed. Secrets are absent on forked-PR runs, so a missing
+        # URL warns and the test skips as before rather than failing the build.
+        env:
+          FACETEC_MAVEN_URL: ${{ secrets.FACETEC_MAVEN_URL }}
+          FACETEC_MAVEN_TOKEN: ${{ secrets.VENDOR_PACKAGES_TOKEN }}
+        run: |
+          if [ -n "$FACETEC_MAVEN_URL" ]; then
+            echo "facetecMavenUrl=$FACETEC_MAVEN_URL" >> gradle.properties
+            echo "facetecMavenToken=$FACETEC_MAVEN_TOKEN" >> gradle.properties
+            echo "FaceTec repository configured; the AAR contract check will run."
+          else
+            echo "::warning title=FaceTec contract check skipped::FACETEC_MAVEN_URL is not set, so FaceTec10ApiContractTest cannot see a real AAR and will skip."
+          fi
+
       - name: Run unit tests
         # No module is excluded. The sample app's unit tests used to be, which
         # let its test source set stop compiling for months without CI noticing

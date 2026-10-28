@@ -114,6 +114,31 @@ dependencyResolutionManagement {
         // See VegaProofSystem.kt's own doc comment for the crate's current
         // status (expert review still pending - not for real relying-party
         // use yet, but the circuit is published for early testing).
+        // FaceTec SDK AAR (proprietary; sirosfoundation/vendor-maven-packages). Declared only
+        // when facetecMavenUrl is set, so a build without access resolves everything else
+        // exactly as before. It is not a dependency of any module: FaceTecApi binds the SDK by
+        // reflection, and the AAR is read as a file by FaceTec10ApiContractTest to check that
+        // every class and method that reflection looks up still exists. See
+        // sdk/idv/build.gradle.kts. includeGroup keeps the private repository out of the
+        // resolution path for everything else.
+        val facetecMavenUrl = providers.gradleProperty("facetecMavenUrl")
+            .orElse(providers.environmentVariable("FACETEC_MAVEN_URL"))
+            .getOrElse("")
+        if (facetecMavenUrl.isNotBlank()) {
+            maven {
+                name = "FaceTecVendorPackages"
+                url = uri(facetecMavenUrl)
+                credentials {
+                    username = providers.gradleProperty("gpr.user").orElse(
+                        providers.environmentVariable("GITHUB_ACTOR")
+                    ).getOrElse("")
+                    password = providers.gradleProperty("facetecMavenToken").orElse(
+                        providers.environmentVariable("FACETEC_MAVEN_TOKEN")
+                    ).getOrElse("")
+                }
+                content { includeGroup("com.facetec") }
+            }
+        }
         maven {
             name = "GitHubPackagesZkCredVega"
             url = uri("https://maven.pkg.github.com/sirosfoundation/zk-cred-vega")
