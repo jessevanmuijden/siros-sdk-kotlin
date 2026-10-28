@@ -1,0 +1,321 @@
+// Copyright 2026 SIROS Foundation. BSD 2-Clause License.
+package org.siros.sdk.keystore
+
+import androidx.annotation.StringRes
+import timber.log.Timber
+
+/** Why a FIDO2 enrolment ended before the key was enrolled. A short localised text for the user is [messageRes]. */
+enum class Fido2EnrolmentFailure(@StringRes val messageRes: Int) {
+    /** The authenticator cannot be enrolled as it is (see [Fido2EnrolmentException.reason]); asked before any PIN was collected. */
+    UNSUITABLE(R.string.siros_enrol_unsuitable),
+
+    /** The authenticator presented differs from the one the user was asked about, or changed while the ceremony started. */
+    KEY_CHANGED(R.string.siros_enrol_key_changed),
+
+    /** The user declined to type (or choose) a PIN. */
+    CANCELLED(R.string.siros_enrol_cancelled),
+}
+
+/** An enrolment that ended without a key. Carries only the [failure], the key's [info] and the library's [reason] text - never PIN material. */
+class Fido2EnrolmentException(
+    val failure: Fido2EnrolmentFailure,
+    val info: Fido2AuthenticatorInfo? = null,
+    /** For [Fido2EnrolmentFailure.UNSUITABLE]: why, in the library's English text (logs and support; not localised). */
+    val reason: String? = null,
+) : Exception("FIDO2 enrolment ended: $failure")
+
+/** The outcome of an enrolment: what the ceremony returned and the authenticator it ran against (its [Fido2AuthenticatorInfo.aaguid] names the model). */
+class Fido2Enrolment<T>(val value: T, val info: Fido2AuthenticatorInfo)
+
+/**
+ * "Discover, then ask": the enrolment of a FIDO2 security key with a dialog that fits the key actually presented.
+ *
+ * 1. FIRST TAP: describe the authenticator ([describe]; no PIN is asked for or sent). An authenticator that cannot be
+ *    enrolled is refused here, before any PIN is collected.
+ * 2. ASK: the dialog fits the key - ENTER the PIN of a key that has one, CHOOSE (and confirm) one for a key that has
+ *    none, nothing for a key without PIN support. The user types with the key set aside.
+ * 3. SECOND TAP (or the same connection, over USB): describe AGAIN and compare the PIN state, minimum PIN length and AAGUID
+ *    with what the dialog was built for. Any difference discards the typed PIN and restarts at step 2 with what the key now
+ *    says: a PIN is never sent on the strength of the first description.
+ * 4. CEREMONY: [ceremony] (register + activate the lifecycle) runs; the PIN prompts it raises are answered from the collected
+ *    PIN by [answer], which the host's AuthProvider consults FIRST. A prompt of another kind than the dialog was built for
+ *    (the key changed after the second description) is refused and the enrolment fails with
+ *    [Fido2EnrolmentFailure.KEY_CHANGED]; the typed PIN is gone after the ceremony, whatever its outcome.
+ *
+ * Every PIN buffer this class holds or receives and does not hand on is wiped. The suitability the library reports is
+ * advisory until it has been checked on hardware. One instance serves one enrolment; [answer] may be called from another thread.
+ *
+ * PIN LIFETIME, STRUCTURALLY: every function below that ever holds a raw PIN buffer in a local variable while awaiting something
+ * else (another [describe] call, the user confirming a chosen PIN) registers that buffer into [pendingBuffers] the instant it
+ * has one ([registerAndCheckInvalidated], which ALSO checks [invalidated] inside the same lock acquisition - a check and the
+ * act on its result must never be two separate critical sections, or [clear] can run in the gap between them and reach
+ * neither the not-yet-registered buffer nor the already-past check). The buffer then stays registered - nothing deregisters it
+ * early "to be safe" - all the way to whichever single point resolves what becomes of it: installed into [held] (that
+ * transfer and the final invalidation check are the SAME critical section too), handed further up the call stack to another
+ * function's own registerAndCheckInvalidated (harmless to register twice), or discarded ([deregisterDiscardAndCheckInvalidated]
+ * - restarting, an unsuitable re-description, a mismatched confirmation). [clear] wipes and forgets every buffer in
+ * [pendingBuffers] - and [held]'s - the instant it runs, wherever in the flow that is, and sets [invalidated] for good; nothing
+ * already wiped by it is ever installed, compared or otherwise acted on afterward. A new suspension point that captures a PIN
+ * byte array only has to follow this same register-and-check / do-the-suspending-call / resolve-and-check shape, with the
+ * check and the act on it always inside one lock, never a bespoke clear()-reachable field of its own.
+ */
+class Fido2EnrolmentSession(
+    private val describe: suspend () -> Fido2AuthenticatorInfo,
+    private val ask: suspend (PinRequest) -> ByteArray?,
+    private val pluginId: String = "fido2",
+) {
+    constructor(manager: WscdManager, ask: suspend (PinRequest) -> ByteArray?) : this(manager::describeFido2Authenticator, ask)
+
+    /**
+     * The prompt contract of the ceremony ([chooseMinLength] null: ENTER, else CHOOSE of that minimum length), which lives for the
+     * WHOLE ceremony, and the one-shot [pin], which is null once it has been handed out or refused.
+     */
+    private class Held(var pin: ByteArray?, val chooseMinLength: Int?)
+
+    private val lock = Any()
+    private var held: Held? = null
+
+    /** Every buffer [answer] handed to the host (the PIN itself or a copy of it): all are wiped when the ceremony ends. */
+    private val issued = mutableListOf<ByteArray>()
+    private var keyChanged = false
+
+    /**
+     * Every raw PIN buffer currently alive in a local variable somewhere in this class WHILE a suspend call that does not involve
+     * it is in flight - [enrol]'s `collected` racing the second [describe], [choose]'s `first` racing its confirm prompt - tracked
+     * by reference (identity, not content) so [clear] can reach and wipe it from outside whichever call stack is holding it. See
+     * the class doc comment for the register-and-check / resolve-and-check pattern every such site follows.
+     */
+    private val pendingBuffers = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<ByteArray, Boolean>())
+
+    /**
+     * Set by [clear]: a PIN buffer already wiped by it must never be installed, compared or otherwise used afterward, even if the
+     * suspend call racing it goes on to succeed. Sticky for the life of this session - one session serves one [enrol] call.
+     */
+    private var invalidated = false
+
+    /**
+     * TEST-ONLY. Invoked, synchronously, once per loop iteration right before the install's own atomic check - the exact gap a
+     * non-atomic check-then-install (a real bug) used to leave open, too narrow to land reliably from a real concurrent
+     * thread. Null (the default) in production; a test sets it to call [clear] from here to prove the install still refuses.
+     */
+    internal var testHookBeforeInstall: (() -> Unit)? = null
+
+    /**
+     * Registers [buf] (if non-null) AND checks [invalidated] inside the SAME lock acquisition: a check and an act on its result
+     * must never be two separate critical sections, or [clear] can run in the gap between them and reach neither the buffer
+     * (not yet registered) nor this decision (already past the check). [buf] is wiped here, not by [clear], when it is already
+     * too late by the time this runs.
+     */
+    private fun registerAndCheckInvalidated(buf: ByteArray?, info: Fido2AuthenticatorInfo?) {
+        synchronized(lock) {
+            if (buf != null) pendingBuffers += buf
+            if (invalidated) {
+                buf?.fill(0)
+                throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+            }
+        }
+    }
+
+    /**
+     * Removes [buf] from [pendingBuffers] and wipes it, UNCONDITIONALLY (the caller is discarding it regardless - a restart, a
+     * re-description that turned out unsuitable), then throws [Fido2EnrolmentFailure.CANCELLED] if [clear] ran while it was
+     * pending (it was already wiped by clear()'s own sweep in that case, since it stayed registered until this very call - the
+     * `fill(0)` here is then a harmless no-op): the loop must not keep asking the user for a key the host has abandoned.
+     */
+    private fun deregisterDiscardAndCheckInvalidated(buf: ByteArray?, info: Fido2AuthenticatorInfo?) {
+        synchronized(lock) {
+            if (buf != null) pendingBuffers -= buf
+            buf?.fill(0)
+            if (invalidated) throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+        }
+    }
+
+    /**
+     * Runs the enrolment: [onSecondTap] is called when the user has to present the key again (after the PIN was typed; over USB
+     * the key is still in place and a host shows nothing), then [ceremony] runs with the collected PIN ready for [answer].
+     */
+    suspend fun <T> enrol(onSecondTap: () -> Unit = {}, ceremony: suspend () -> T): Fido2Enrolment<T> {
+        synchronized(lock) { keyChanged = false }
+        var info = describe()
+        var restarts = 0
+        while (true) {
+            refuseIfUnsuitable(info)
+            val collected = collect(info)
+            // Registered and checked atomically: see registerAndCheckInvalidated's doc comment for why this must not be two
+            // separate critical sections. `collected` stays registered (nothing deregisters it below) all the way to whichever
+            // of the three exits below resolves it - there is no point after this where it is both live and unprotected.
+            registerAndCheckInvalidated(collected, info)
+            val fresh: Fido2AuthenticatorInfo
+            try {
+                onSecondTap()
+                fresh = describe()
+            } catch (e: Throwable) {
+                synchronized(lock) { collected?.let { pendingBuffers -= it } }
+                collected?.fill(0)
+                throw e
+            }
+            if (!info.sameEnrolmentSituationAs(fresh)) {
+                deregisterDiscardAndCheckInvalidated(collected, fresh)
+                Timber.i("The security key presented differs from the one the PIN dialog was built for; asking again")
+                if (++restarts > MAX_RESTARTS) throw Fido2EnrolmentException(Fido2EnrolmentFailure.KEY_CHANGED, fresh)
+                info = fresh
+                continue
+            }
+            try {
+                refuseIfUnsuitable(fresh)
+            } catch (e: Fido2EnrolmentException) {
+                deregisterDiscardAndCheckInvalidated(collected, fresh)
+                throw e
+            }
+            // Test-only seam: the exact gap a non-atomic check-then-install left open (a real bug, found by review: the
+            // narrow window between this point and the lock below is a handful of synchronous statements, too fast to land
+            // reliably from a real concurrent thread in a test). Null and never invoked outside tests.
+            testHookBeforeInstall?.invoke()
+            // The invalidation check and the transfer into `held` are the SAME critical section: clear() running anywhere up to
+            // and including this point either wipes `collected` here (it is still registered) and is caught by the check below,
+            // or - impossible, since both run under `lock` - interleaves with the install itself.
+            synchronized(lock) {
+                collected?.let { pendingBuffers -= it }
+                if (invalidated) {
+                    collected?.fill(0)
+                    throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, fresh)
+                }
+                held?.pin?.fill(0)
+                held = collected?.let { Held(it, if (info.clientPin == Fido2PinState.NOT_SET) info.minPinLength else null) }
+                issued.clear()
+            }
+            try {
+                return Fido2Enrolment(ceremony(), fresh)
+            } catch (e: Throwable) {
+                if (synchronized(lock) { keyChanged }) throw Fido2EnrolmentException(Fido2EnrolmentFailure.KEY_CHANGED, fresh).also { it.addSuppressed(e) }
+                throw e
+            } finally {
+                clear()
+                // answer() hands the collected buffer itself to the ceremony and clears `held`, so clear() above no longer reaches it:
+                // wipe it here, after a successful AND a failed ceremony.
+                collected?.fill(0)
+            }
+        }
+    }
+
+    /**
+     * The collected PIN for a prompt of the ceremony, or null when the host has to ask (a retry notice, no PIN collected). An ENTER
+     * answers a first ENTER prompt; a CHOOSE answers both prompts (choose, confirm) of a CHOOSE built for the same minimum length.
+     * A prompt for another plugin gets null and leaves the PIN alone. A prompt of the other kind wipes the PIN and throws [Fido2EnrolmentException] ([Fido2EnrolmentFailure.KEY_CHANGED]).
+     */
+    fun answer(request: PinRequest): ByteArray? = synchronized(lock) {
+        // A prompt of ANOTHER plugin (a shared AuthProvider asks for r2ps, say) is not ours to answer: null, and the held PIN is
+        // neither returned nor consumed.
+        if (request.pluginId != pluginId) return null
+        val h = held ?: return null
+        val matches = when (request) {
+            is PinRequest.Enter -> h.chooseMinLength == null
+            is PinRequest.Choose -> h.chooseMinLength != null && request.minLength == h.chooseMinLength
+        }
+        if (!matches) {
+            h.pin?.fill(0)
+            h.pin = null
+            keyChanged = true
+            throw Fido2EnrolmentException(Fido2EnrolmentFailure.KEY_CHANGED)
+        }
+        if (request.notice != null) {
+            // A retry: the PIN just sent was refused, so it is never sent again.
+            h.pin?.fill(0)
+            h.pin = null
+            return null
+        }
+        // The PIN was handed out already (or refused): the host asks, but the prompt was checked against the contract above.
+        val pin = h.pin ?: return null
+        when (request) {
+            is PinRequest.Enter -> {
+                h.pin = null
+                pin.also { issued += it }
+            }
+            is PinRequest.Choose -> if (!request.confirm) {
+                pin.copyOf().also { issued += it }
+            } else {
+                h.pin = null
+                pin.also { issued += it }
+            }
+        }
+    }
+
+    /**
+     * Wipes what is still [held] and every buffer currently in [pendingBuffers] (a local variable elsewhere in this class racing a
+     * suspend call with a PIN already in hand), then invalidates this session for good: a buffer wiped here is never installed,
+     * compared or otherwise used afterward, even if the suspend call racing it goes on to succeed. Called when the ceremony ends;
+     * call it too when the host abandons the enrolment.
+     */
+    fun clear() = synchronized(lock) {
+        held?.pin?.fill(0)
+        pendingBuffers.forEach { it.fill(0) }
+        pendingBuffers.clear()
+        issued.forEach { it.fill(0) }
+        issued.clear()
+        held = null
+        invalidated = true
+    }
+
+    private fun refuseIfUnsuitable(info: Fido2AuthenticatorInfo) {
+        val s = info.suitability
+        if (s is Fido2Suitability.Unsuitable) throw Fido2EnrolmentException(Fido2EnrolmentFailure.UNSUITABLE, info, s.reason)
+        // Fail closed, whatever the library says: a PIN with no attempts left cannot be entered.
+        if (info.clientPin == Fido2PinState.SET && info.pinRetries == 0) {
+            throw Fido2EnrolmentException(Fido2EnrolmentFailure.UNSUITABLE, info, "the PIN is blocked")
+        }
+    }
+
+    /** The PIN the dialog collects for [info]; null for a key without PIN support. The user cancelling ends the enrolment. */
+    private suspend fun collect(info: Fido2AuthenticatorInfo): ByteArray? = when (info.clientPin) {
+        Fido2PinState.UNSUPPORTED -> null
+        Fido2PinState.SET -> ask(PinRequest.Enter(pluginId)) ?: throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+        Fido2PinState.NOT_SET -> choose(info)
+    }
+
+    private suspend fun choose(info: Fido2AuthenticatorInfo): ByteArray {
+        val min = info.minPinLength
+        var notice: PinPromptNotice? = null
+        repeat(PinPrompter.MAX_CHOOSE_ROUNDS) {
+            val first = ask(PinRequest.Choose(pluginId, min, confirm = false, notice = notice))
+                ?: throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+            val length = PinPrompter.codePoints(first)
+            if (length == null) {
+                first.fill(0)
+                notice = PinPromptNotice.NOT_ACCEPTED
+                return@repeat
+            }
+            if (length < min) {
+                first.fill(0)
+                notice = PinPromptNotice.TOO_SHORT
+                return@repeat
+            }
+            // `first` is complete and valid but not yet confirmed: alive here while the confirm prompt below awaits the user, so
+            // it is registered for clear() to reach - the same shape as enrol()'s `collected` around its own second describe()
+            // call. Registered and checked atomically (see registerAndCheckInvalidated), and - on success - left registered
+            // when handed up to collect()'s caller: enrol() registers (a no-op, already there) and checks it again right away,
+            // so there is no gap between here and the one place that actually installs it.
+            registerAndCheckInvalidated(first, info)
+            val again = try {
+                ask(PinRequest.Choose(pluginId, min, confirm = true, notice = null))
+            } catch (e: Throwable) {
+                synchronized(lock) { pendingBuffers -= first }
+                first.fill(0)
+                throw e
+            } ?: run {
+                deregisterDiscardAndCheckInvalidated(first, info)
+                throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+            }
+            val same = java.security.MessageDigest.isEqual(first, again)
+            again.fill(0)
+            if (same) return first
+            deregisterDiscardAndCheckInvalidated(first, info)
+            notice = PinPromptNotice.MISMATCH
+        }
+        throw Fido2EnrolmentException(Fido2EnrolmentFailure.CANCELLED, info)
+    }
+
+    private companion object {
+        /** How many times a changed key may restart the dialog before the enrolment gives up. */
+        const val MAX_RESTARTS = 2
+    }
+}

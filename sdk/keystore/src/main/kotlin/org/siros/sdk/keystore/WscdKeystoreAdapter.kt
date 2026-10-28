@@ -129,6 +129,9 @@ class WscdKeystoreAdapter private constructor(
     override fun exportFido2State(): ByteArray =
         requireWscdManager().exportFido2State()
 
+    override suspend fun describeFido2Authenticator(): Fido2AuthenticatorInfo =
+        requireWscdManager().describeFido2Authenticator()
+
     /**
      * The persisted (privatedata-synced) copy of every hardware-backed WSCD
      * plugin's key metadata - see [JweKeystore.exportWscdCredentials]'s doc

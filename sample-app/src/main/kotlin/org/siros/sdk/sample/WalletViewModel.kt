@@ -1621,6 +1621,16 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private val _fido2AwaitingPresentation = MutableStateFlow(false)
     val fido2AwaitingPresentation: StateFlow<Boolean> = _fido2AwaitingPresentation
 
+    /**
+     * Enrolment's FIRST tap is discovering the key (the SDK's `describe`, no PIN yet): `fido2AwaitingPresentation` only
+     * turns on from `onSecondTap`, so without this the user who just accepted an auto-enroll offer sees nothing at all
+     * until either a PIN dialog or (for a key without one) the ceremony's own activity - discovery can silently time
+     * out with no indication the wallet is waiting for anything. Cleared on the first PIN prompt (tap 1 resolved) or,
+     * for a key without PIN support, when the ceremony itself starts; always cleared in `enrollWscd`'s `finally`.
+     */
+    private val _fido2EnrolmentDiscovering = MutableStateFlow(false)
+    val fido2EnrolmentDiscovering: StateFlow<Boolean> = _fido2EnrolmentDiscovering
+
     /** The currently in-flight enroll/rotate coroutine, if any - lets [cancelWscdLifecycleOp] abort it. */
     private var wscdLifecycleJob: kotlinx.coroutines.Job? = null
 
@@ -1855,40 +1865,20 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * Identity binding is handled separately via OID4VCI credential issuance
      * (deferred flow + key attestation), not at this layer.
      */
+    /** The FIDO2 enrolment in progress: its collected PIN answers the ceremony's PIN prompts (see [requestFido2Pin]). */
+    @Volatile
+    private var fido2Enrolment: org.siros.sdk.keystore.Fido2EnrolmentSession? = null
+
     fun enrollWscd() {
         if (_wscdLifecycleBusy.value) return
         _wscdLifecycleBusy.value = true
         _enrollmentInProgress.value = true
         wscdLifecycleJob = viewModelScope.launch {
             try {
-                // Collect the FIDO2 PIN BEFORE touching the transport at all
-                // - see _fido2AwaitingPresentation's doc comment for why
-                // this can't happen mid-ceremony (the old behavior) without
-                // forcing the user to set an NFC key down to type.
-                if (activePluginId == "fido2" && typesPinAheadFor(_fido2TransportMode.value)) {
-                    val pin = awaitFido2PinEntry()
-                    if (pin == null) {
-                        _errorMessage.value = "Enrollment cancelled"
-                        return@launch
-                    }
-                    typedAheadPin.hold(pin.toByteArray())
-                    _fido2AwaitingPresentation.value = true
-                }
-                // A hard ceiling on the WHOLE operation, not just its
-                // individual sub-steps: CompositeCtap2Transport's USB/NFC
-                // race (and each transport's own internal waits) already
-                // time out on their own, but a bug in any of that racing
-                // logic could still hang indefinitely - confirmed on real
-                // hardware (an NFC reconnect cascade left this coroutine
-                // stuck, silently blocking every later Enroll/Rotate/Destroy
-                // tap since wscdLifecycleBusy never got a chance to reset).
-                // Without an outer bound here, that kind of hang is
-                // unrecoverable without restarting the app.
-                kotlinx.coroutines.withTimeout(WSCD_LIFECYCLE_OP_TIMEOUT_MS) {
                 val manager = wallet.wscdManager
                 if (manager == null) {
                     _errorMessage.value = "WSCD signer not initialized"
-                    return@withTimeout
+                    return@launch
                 }
                 val pluginId = activePluginId
                 // Lazily register R2PS plugin if switching at runtime
@@ -1900,32 +1890,27 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                     // new one.
                     registerFido2OnSigner(manager, savedFido2State())
                 }
-                val contextId = lifecycleContextId
-                val factorKind = when (pluginId) {
-                    "r2ps" -> FactorKind.Opaque
-                    else -> FactorKind.RawSign
-                }
-
-                val regOutcome = manager.registerLifecycle(
-                    RegisterLifecycleRequest(
-                        pluginId = pluginId,
-                        contextId = contextId,
-                        factorKind = factorKind,
-                    ),
-                )
-                _lifecycleState.value = regOutcome.state
-                Log.i(TAG, "Lifecycle registered: context=$contextId state=${regOutcome.state}")
-
-                val actOutcome = manager.activateLifecycle(
-                    ActivateLifecycleRequest(
-                        pluginId = pluginId,
-                        contextId = contextId,
-                    ),
-                )
-                _lifecycleState.value = actOutcome.state
-                Log.i(TAG, "Lifecycle activated: context=$contextId state=${actOutcome.state}")
-                if (pluginId == "fido2") saveFido2PluginState(manager)
-                Log.i(MainActivity.WSCA_TEST_TAG, """{"action":"enroll","status":"ok","state":"${actOutcome.state}","context_id":"$contextId"}""")
+                if (pluginId == "fido2") {
+                    // Discover, then ask: the SDK describes the key (no PIN dialog), shows the dialog that fits it, re-describes
+                    // on the second tap and runs the ceremony. The app only shows the dialogs and the hints.
+                    _fido2EnrolmentDiscovering.value = true
+                    val session = org.siros.sdk.keystore.Fido2EnrolmentSession(manager) { request ->
+                        // Tap 1 resolved: a PIN dialog takes over from here.
+                        _fido2EnrolmentDiscovering.value = false
+                        awaitFido2PinEntry(request)?.toByteArray()
+                    }
+                    fido2Enrolment = session
+                    val enrolment = session.enrol(
+                        onSecondTap = { _fido2AwaitingPresentation.value = typesPinAheadFor(_fido2TransportMode.value) },
+                    ) {
+                        // A key without PIN support never raises a PIN prompt: discovery's own dialog ends once the ceremony starts.
+                        _fido2EnrolmentDiscovering.value = false
+                        // A hard ceiling on the CEREMONY (not on the user typing): see enrollCeremony.
+                        kotlinx.coroutines.withTimeout(WSCD_LIFECYCLE_OP_TIMEOUT_MS) { enrollCeremony(manager, pluginId) }
+                    }
+                    Log.i(TAG, "Enrolled FIDO2 authenticator ${enrolment.info.aaguidString}")
+                } else {
+                    kotlinx.coroutines.withTimeout(WSCD_LIFECYCLE_OP_TIMEOUT_MS) { enrollCeremony(manager, pluginId) }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "WSCD enrollment failed", e)
@@ -1935,16 +1920,59 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
                 } else if (e is org.siros.sdk.keystore.WscdPinException) {
                     // The SDK's own short localised text; nothing to interpret here.
                     activity.getString(e.failure.messageRes)
+                } else if (e is org.siros.sdk.keystore.Fido2EnrolmentException) {
+                    activity.getString(e.failure.messageRes) + (e.reason?.let { " ($it)" } ?: "")
                 } else {
                     "Enrollment failed: ${e.message}"
                 }
             } finally {
+                fido2Enrolment?.clear()
+                fido2Enrolment = null
                 _enrollmentInProgress.value = false
                 _wscdLifecycleBusy.value = false
                 _fido2AwaitingPresentation.value = false
+                _fido2EnrolmentDiscovering.value = false
                 typedAheadPin.clear()
             }
         }
+    }
+
+    /**
+     * The enrolment ceremony proper. A hard ceiling on the WHOLE ceremony, not just its individual sub-steps:
+     * CompositeCtap2Transport's USB/NFC race (and each transport's own internal waits) already time out on their own, but a bug
+     * in any of that racing logic could still hang indefinitely - confirmed on real hardware (an NFC reconnect cascade left this
+     * coroutine stuck, silently blocking every later Enroll/Rotate/Destroy tap since wscdLifecycleBusy never got a chance to
+     * reset). Without an outer bound, that kind of hang is unrecoverable without restarting the app.
+     */
+    private suspend fun enrollCeremony(manager: WscdManager, pluginId: String) {
+        // The context of the CAPTURED pluginId, never the live tab (see contextIdFor's doc comment): registerFido2OnSigner and
+        // the describe/ask ceremony above already ran against this plugin, however long that took.
+        val contextId = contextIdFor(pluginId)
+        val factorKind = when (pluginId) {
+            "r2ps" -> FactorKind.Opaque
+            else -> FactorKind.RawSign
+        }
+
+        val regOutcome = manager.registerLifecycle(
+            RegisterLifecycleRequest(
+                pluginId = pluginId,
+                contextId = contextId,
+                factorKind = factorKind,
+            ),
+        )
+        _lifecycleState.value = regOutcome.state
+        Log.i(TAG, "Lifecycle registered: context=$contextId state=${regOutcome.state}")
+
+        val actOutcome = manager.activateLifecycle(
+            ActivateLifecycleRequest(
+                pluginId = pluginId,
+                contextId = contextId,
+            ),
+        )
+        _lifecycleState.value = actOutcome.state
+        Log.i(TAG, "Lifecycle activated: context=$contextId state=${actOutcome.state}")
+        if (pluginId == "fido2") saveFido2PluginState(manager)
+        Log.i(MainActivity.WSCA_TEST_TAG, """{"action":"enroll","status":"ok","state":"${actOutcome.state}","context_id":"$contextId"}""")
     }
 
     // ── Devices screen state (wallet instance lifecycle, SID-AUTH-06) ──
@@ -2106,7 +2134,16 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * accumulate multiple simultaneous enrollments per plugin.
      */
     private val lifecycleContextId: String
-        get() = "ctx-$activePluginId"
+        get() = contextIdFor(activePluginId)
+
+    /**
+     * The context ID of [pluginId] specifically - for a coroutine that captured a plugin ID earlier (e.g. [enrollWscd]'s
+     * `pluginId`) and must keep using THAT one even if the user switches tabs while the operation (discovery, a PIN
+     * ceremony) is in flight. [lifecycleContextId] reads the CURRENT tab and must not be used once a plugin ID has been
+     * captured - a tab switch mid-enrolment used to register/activate the key under the new tab's context, which no
+     * later status/rotation/destruction call (all keyed on the captured session's own plugin) would ever look up.
+     */
+    private fun contextIdFor(pluginId: String) = "ctx-$pluginId"
 
     /** The plugin ID used for the current lifecycle session. */
     private val activePluginId: String
@@ -2340,6 +2377,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
     private suspend fun awaitFido2PinEntry(
         request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2"),
     ): String? = withContext(Dispatchers.Main.immediate) {
+        // A PIN prompt means the presentation guide ("PIN accepted, hold the key") no longer holds - the key was described again and
+        // differs, or the ceremony asks once more - so it is closed before every prompt.
+        _fido2AwaitingPresentation.value = false
         suspendCancellableCoroutine { continuation ->
             val pending = PendingPinEntry(
                 pluginId = "fido2",
@@ -2400,7 +2440,9 @@ class WalletViewModel(private val activity: Activity) : ViewModel() {
      * real credential presentation, outside the dev-screen flows).
      */
     private fun requestFido2Pin(request: org.siros.sdk.keystore.PinRequest = org.siros.sdk.keystore.PinRequest.Enter("fido2")): ByteArray {
-        // The SDK decides: the typed-ahead PIN answers the FIRST request only (and only a first ENTER), then it is gone.
+        // An enrolment in progress answers first (the SDK checks the prompt is the kind its dialog was built for), then the typed-ahead
+        // PIN of a rotation (the FIRST request only, and only a first ENTER, then it is gone).
+        fido2Enrolment?.answer(request)?.let { return it }
         typedAheadPin.take(request)?.let { return it }
         return kotlinx.coroutines.runBlocking(Dispatchers.Main.immediate) {
             val pin = awaitFido2PinEntry(request)

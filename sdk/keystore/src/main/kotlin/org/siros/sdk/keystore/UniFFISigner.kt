@@ -130,6 +130,10 @@ class UniFFISigner(
 
     override fun exportFido2State(): ByteArray = ffi.exportFido2State()
 
+    override suspend fun describeFido2Authenticator(): Fido2AuthenticatorInfo = withContext(Dispatchers.IO) {
+        ffi.describeAuthenticator("fido2").toSdk()
+    }
+
     override suspend fun generateKey(algorithm: String): String = withContext(Dispatchers.IO) {
         val ffiAlgorithm = algorithm.toFfiAlgorithm()
         val result: FfiGeneratedKey = withPinAuth { auth ->

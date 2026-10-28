@@ -24,6 +24,9 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlin.reflect.full.callSuspend
+import kotlin.reflect.full.declaredMemberFunctions
+import kotlin.reflect.jvm.isAccessible
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -52,6 +55,7 @@ class WalletViewModelTest {
         every { Log.w(any(), any<String>()) } returns 0
         every { Log.e(any(), any()) } returns 0
         every { Log.e(any(), any(), any()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
     }
 
     @After
@@ -315,5 +319,43 @@ class WalletViewModelTest {
         val field = target.javaClass.getDeclaredField(fieldName)
         field.isAccessible = true
         return field.get(target)
+    }
+
+    /** A new instance of [clazz] with NO constructor or property initializer run - every field is left at its JVM default. */
+    private fun allocateInstance(clazz: Class<*>): Any {
+        val unsafeClass = Class.forName("sun.misc.Unsafe")
+        val unsafeField = unsafeClass.getDeclaredField("theUnsafe")
+        unsafeField.isAccessible = true
+        val unsafe = unsafeField.get(null)
+        val allocateInstance = unsafeClass.getMethod("allocateInstance", Class::class.java)
+        return allocateInstance.invoke(unsafe, clazz)
+    }
+
+    /**
+     * allocateInstance skips WalletViewModel's constructor (which needs a real Activity and the native WSCD library - see
+     * every other test in this file), so enrollCeremony can be driven directly with the manager it is given, isolated from
+     * enrollWscd's PIN/discovery steps above it. Regression for a real bug: the plugin tabs stay enabled during discovery,
+     * so a tab switch between enrollWscd capturing `pluginId` and this call must not change which lifecycle context the
+     * key is registered and activated under.
+     */
+    @Test
+    fun enrollCeremony_usesTheCapturedPluginIdsContext_notTheLiveTab() = runTest(dispatcher) {
+        val viewModel = allocateInstance(WalletViewModel::class.java) as WalletViewModel
+        setField(viewModel, "_lifecycleState", MutableStateFlow<org.siros.sdk.keystore.LifecycleState?>(null))
+        setField(viewModel, "_selectedPluginId", MutableStateFlow("softkey")) // the LIVE tab, switched after pluginId was captured
+        setField(viewModel, "wallet", mockk<SirosWallet>(relaxed = true))
+        val manager = mockk<org.siros.sdk.keystore.WscdManager>()
+        val registered = slot<org.siros.sdk.keystore.RegisterLifecycleRequest>()
+        val activated = slot<org.siros.sdk.keystore.ActivateLifecycleRequest>()
+        coEvery { manager.registerLifecycle(capture(registered)) } returns org.siros.sdk.keystore.RegistrationOutcome("ctx-fido2", org.siros.sdk.keystore.LifecycleState.Registered)
+        coEvery { manager.activateLifecycle(capture(activated)) } returns org.siros.sdk.keystore.ActivationOutcome("ctx-fido2", org.siros.sdk.keystore.LifecycleState.Active)
+        coEvery { manager.exportFido2State() } returns ByteArray(0)
+
+        val method = viewModel::class.declaredMemberFunctions.first { it.name == "enrollCeremony" }
+        method.isAccessible = true
+        method.callSuspend(viewModel, manager, "fido2")
+
+        assertEquals("ctx-fido2", registered.captured.contextId)
+        assertEquals("ctx-fido2", activated.captured.contextId)
     }
 }

@@ -789,6 +789,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key(
     ): Int
+    external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_describe_authenticator(
+    ): Int
     external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle(
     ): Int
     external fun uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_export_fido2_state(
@@ -877,6 +879,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_delete_key(`ptr`: Long,`kid`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_describe_authenticator(`ptr`: Long,`pluginId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_destroy_lifecycle(`ptr`: Long,`request`: RustBuffer.ByValue,`auth`: Long,`progress`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_export_fido2_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1065,6 +1069,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_delete_key() and 0xFFFF) != 50338) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_describe_authenticator() and 0xFFFF) != 17415) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_siros_wscd_manager_checksum_method_ffiwscdmanager_destroy_lifecycle() and 0xFFFF) != 3691) {
@@ -1599,6 +1606,17 @@ public interface FfiWscdManagerInterface {
     fun `deleteKey`(`kid`: kotlin.String)
     
     /**
+     * Read-only description of the FIDO2 authenticator behind the
+     * registered `plugin_id` plugin (must be `"fido2"`; any other plugin
+     * gives `Unsupported`). Sends CTAP2 getInfo and, only when a PIN is set,
+     * getPinRetries (which consumes no retry). Never asks for a PIN, never
+     * sets one, never requests a token. Uses the registered transport as is:
+     * the library opens no connection of its own, so an already-open USB
+     * connection is reused.
+     */
+    fun `describeAuthenticator`(`pluginId`: kotlin.String): FfiAuthenticatorInfo
+    
+    /**
      * Destroy lifecycle bindings for a context.
      */
     fun `destroyLifecycle`(`request`: FfiDestroyLifecycleRequest, `auth`: FfiAuthCallback, `progress`: FfiProgressCallback): FfiDestructionOutcome
@@ -1915,6 +1933,30 @@ open class FfiWscdManager: Disposable, AutoCloseable, FfiWscdManagerInterface
 }
     }
     
+    
+
+    
+    /**
+     * Read-only description of the FIDO2 authenticator behind the
+     * registered `plugin_id` plugin (must be `"fido2"`; any other plugin
+     * gives `Unsupported`). Sends CTAP2 getInfo and, only when a PIN is set,
+     * getPinRetries (which consumes no retry). Never asks for a PIN, never
+     * sets one, never requests a token. Uses the registered transport as is:
+     * the library opens no connection of its own, so an already-open USB
+     * connection is reused.
+     */
+    @Throws(FfiWscdException::class)override fun `describeAuthenticator`(`pluginId`: kotlin.String): FfiAuthenticatorInfo {
+            return FfiConverterTypeFfiAuthenticatorInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiWscdException) { _status ->
+    UniffiLib.uniffi_siros_wscd_manager_fn_method_ffiwscdmanager_describe_authenticator(
+        it,
+        
+        FfiConverterString.lower(`pluginId`),_status)
+}
+    }
+    )
+    }
     
 
     
@@ -2530,6 +2572,93 @@ public object FfiConverterTypeFfiAuthFactors: FfiConverterRustBuffer<FfiAuthFact
             FfiConverterSequenceTypeFfiAuthFactor.write(value.`factors`, buf)
             FfiConverterBoolean.write(value.`satisfiesTwoCategories`, buf)
             FfiConverterOptionalString.write(value.`shortfall`, buf)
+    }
+}
+
+
+
+data class FfiAuthenticatorInfo (
+    var `versions`: List<kotlin.String>
+    , 
+    /**
+     * 16 bytes.
+     */
+    var `aaguid`: kotlin.ByteArray
+    , 
+    var `clientPin`: FfiClientPinState
+    , 
+    /**
+     * 4 when the authenticator does not advertise it.
+     */
+    var `minPinLength`: kotlin.UInt
+    , 
+    var `forcePinChange`: kotlin.Boolean
+    , 
+    /**
+     * Remaining PIN attempts; `None` unless a PIN is set.
+     */
+    var `pinRetries`: kotlin.UInt?
+    , 
+    var `pinUvAuthProtocols`: List<kotlin.UInt>
+    , 
+    var `extensions`: List<kotlin.String>
+    , 
+    var `options`: Map<kotlin.String, kotlin.Boolean>
+    , 
+    var `enrolmentSuitability`: FfiEnrolmentSuitability
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiAuthenticatorInfo: FfiConverterRustBuffer<FfiAuthenticatorInfo> {
+    override fun read(buf: ByteBuffer): FfiAuthenticatorInfo {
+        return FfiAuthenticatorInfo(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterByteArray.read(buf),
+            FfiConverterTypeFfiClientPinState.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterSequenceUInt.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterMapStringBoolean.read(buf),
+            FfiConverterTypeFfiEnrolmentSuitability.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: FfiAuthenticatorInfo) = (
+            FfiConverterSequenceString.allocationSize(value.`versions`) +
+            FfiConverterByteArray.allocationSize(value.`aaguid`) +
+            FfiConverterTypeFfiClientPinState.allocationSize(value.`clientPin`) +
+            FfiConverterUInt.allocationSize(value.`minPinLength`) +
+            FfiConverterBoolean.allocationSize(value.`forcePinChange`) +
+            FfiConverterOptionalUInt.allocationSize(value.`pinRetries`) +
+            FfiConverterSequenceUInt.allocationSize(value.`pinUvAuthProtocols`) +
+            FfiConverterSequenceString.allocationSize(value.`extensions`) +
+            FfiConverterMapStringBoolean.allocationSize(value.`options`) +
+            FfiConverterTypeFfiEnrolmentSuitability.allocationSize(value.`enrolmentSuitability`)
+    )
+
+    override fun write(value: FfiAuthenticatorInfo, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`versions`, buf)
+            FfiConverterByteArray.write(value.`aaguid`, buf)
+            FfiConverterTypeFfiClientPinState.write(value.`clientPin`, buf)
+            FfiConverterUInt.write(value.`minPinLength`, buf)
+            FfiConverterBoolean.write(value.`forcePinChange`, buf)
+            FfiConverterOptionalUInt.write(value.`pinRetries`, buf)
+            FfiConverterSequenceUInt.write(value.`pinUvAuthProtocols`, buf)
+            FfiConverterSequenceString.write(value.`extensions`, buf)
+            FfiConverterMapStringBoolean.write(value.`options`, buf)
+            FfiConverterTypeFfiEnrolmentSuitability.write(value.`enrolmentSuitability`, buf)
     }
 }
 
@@ -3425,6 +3554,53 @@ public object FfiConverterTypeFfiCertificationLevel: FfiConverterRustBuffer<FfiC
 
 
 
+/**
+ * See [`crate::authenticator_info::AuthenticatorInfo`].
+ */
+
+enum class FfiClientPinState {
+    
+    /**
+     * A PIN is set (`clientPin: true`): the user must enter it.
+     */
+    SET,
+    /**
+     * PIN supported but not set (`clientPin: false`): one will be chosen.
+     */
+    NOT_SET,
+    /**
+     * `clientPin` option absent: no PIN support.
+     */
+    UNSUPPORTED;
+
+    
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiClientPinState: FfiConverterRustBuffer<FfiClientPinState> {
+    override fun read(buf: ByteBuffer) = try {
+        FfiClientPinState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: FfiClientPinState) = 4UL
+
+    override fun write(value: FfiClientPinState, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
 
 enum class FfiDestroyMode {
     
@@ -3453,6 +3629,79 @@ public object FfiConverterTypeFfiDestroyMode: FfiConverterRustBuffer<FfiDestroyM
 
     override fun write(value: FfiDestroyMode, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class FfiEnrolmentSuitability {
+    
+    object Suitable : FfiEnrolmentSuitability()
+    
+    
+    data class Unsuitable(
+        val `reason`: kotlin.String) : FfiEnrolmentSuitability()
+        
+    {
+        
+
+        companion object
+    }
+    
+
+    
+
+    
+    
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeFfiEnrolmentSuitability : FfiConverterRustBuffer<FfiEnrolmentSuitability>{
+    override fun read(buf: ByteBuffer): FfiEnrolmentSuitability {
+        return when(buf.getInt()) {
+            1 -> FfiEnrolmentSuitability.Suitable
+            2 -> FfiEnrolmentSuitability.Unsuitable(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: FfiEnrolmentSuitability): ULong = when(value) {
+        is FfiEnrolmentSuitability.Suitable -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is FfiEnrolmentSuitability.Unsuitable -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`reason`)
+            )
+        }
+    }
+
+    override fun write(value: FfiEnrolmentSuitability, buf: ByteBuffer) {
+        when(value) {
+            is FfiEnrolmentSuitability.Suitable -> {
+                buf.putInt(1)
+                Unit
+            }
+            is FfiEnrolmentSuitability.Unsuitable -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 
@@ -4581,6 +4830,38 @@ public object FfiConverterTypeFfiProgressCallback: FfiConverterCallbackInterface
 /**
  * @suppress
  */
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
@@ -4667,6 +4948,34 @@ public object FfiConverterOptionalTypeFfiAuthFactor: FfiConverterRustBuffer<FfiA
         } else {
             buf.put(1)
             FfiConverterTypeFfiAuthFactor.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceUInt: FfiConverterRustBuffer<List<kotlin.UInt>> {
+    override fun read(buf: ByteBuffer): List<kotlin.UInt> {
+        val len = buf.getInt()
+        return List<kotlin.UInt>(len) {
+            FfiConverterUInt.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.UInt>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterUInt.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<kotlin.UInt>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterUInt.write(it, buf)
         }
     }
 }
@@ -4779,6 +5088,45 @@ public object FfiConverterSequenceTypeFfiKeyInfo: FfiConverterRustBuffer<List<Ff
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeFfiKeyInfo.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterMapStringBoolean: FfiConverterRustBuffer<Map<kotlin.String, kotlin.Boolean>> {
+    override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.Boolean> {
+        val len = buf.getInt()
+        return buildMap<kotlin.String, kotlin.Boolean>(len) {
+            repeat(len) {
+                val k = FfiConverterString.read(buf)
+                val v = FfiConverterBoolean.read(buf)
+                this[k] = v
+            }
+        }
+    }
+
+    override fun allocationSize(value: Map<kotlin.String, kotlin.Boolean>): ULong {
+        val spaceForMapSize = 4UL
+        val spaceForChildren = value.map { (k, v) ->
+            FfiConverterString.allocationSize(k) +
+            FfiConverterBoolean.allocationSize(v)
+        }.sum()
+        return spaceForMapSize + spaceForChildren
+    }
+
+    override fun write(value: Map<kotlin.String, kotlin.Boolean>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        // The parens on `(k, v)` here ensure we're calling the right method,
+        // which is important for compatibility with older android devices.
+        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
+        value.forEach { (k, v) ->
+            FfiConverterString.write(k, buf)
+            FfiConverterBoolean.write(v, buf)
         }
     }
 }

@@ -12,4 +12,7 @@
     <string name="siros_pin_error_replug">Irrota suojausavain, liitä se uudelleen ja yritä uudelleen.</string>
     <string name="siros_pin_error_internal">Suojausavain on odottamattomassa tilassa. Yritä uudelleen.</string>
     <string name="siros_pin_error_too_many">Liian monta PIN-yritystä. Yritä myöhemmin uudelleen.</string>
+    <string name="siros_enrol_unsuitable">Tätä suojausavainta ei voi rekisteröidä sellaisenaan.</string>
+    <string name="siros_enrol_key_changed">Suojausavain vaihtui tai muuttui. Aloita alusta käyttämälläsi avaimella.</string>
+    <string name="siros_enrol_cancelled">Rekisteröinti peruttiin.</string>
 </resources>

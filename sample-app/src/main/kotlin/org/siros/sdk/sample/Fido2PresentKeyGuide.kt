@@ -40,9 +40,13 @@ import kotlin.math.min
  * (the default) doesn't know in advance which transport the user will
  * present, so it shows both NFC and USB instructions; [Fido2TransportMode.USB]/
  * [Fido2TransportMode.NFC] show only the relevant one.
+ *
+ * [discovering] is true for enrolment's FIRST tap - the SDK only describes the key there (no PIN has been asked for
+ * or accepted yet - see [Fido2EnrolmentSession][org.siros.sdk.keystore.Fido2EnrolmentSession]'s doc comment), so the
+ * text says to present the key, not that a PIN was accepted.
  */
 @Composable
-fun Fido2PresentKeyGuide(mode: Fido2TransportMode, onCancel: () -> Unit) {
+fun Fido2PresentKeyGuide(mode: Fido2TransportMode, discovering: Boolean = false, onCancel: () -> Unit) {
     AlertDialog(
         onDismissRequest = onCancel,
         title = { Text("Present your security key") },
@@ -53,9 +57,14 @@ fun Fido2PresentKeyGuide(mode: Fido2TransportMode, onCancel: () -> Unit) {
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    "Your PIN has been accepted. Both hands are now free - " +
-                        "present the physical key and hold it in place until " +
-                        "this finishes.",
+                    if (discovering) {
+                        "Present the physical key and hold it in place - the " +
+                            "wallet needs to look at it before it can continue."
+                    } else {
+                        "Your PIN has been accepted. Both hands are now free - " +
+                            "present the physical key and hold it in place until " +
+                            "this finishes."
+                    },
                     textAlign = TextAlign.Center,
                 )
                 if (mode == Fido2TransportMode.AUTO || mode == Fido2TransportMode.NFC) {
